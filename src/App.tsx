@@ -10,6 +10,7 @@ import { StartupSplash } from "./components/StartupSplash";
 import { StatusStrip } from "./components/StatusStrip";
 import { Transcript } from "./components/Transcript";
 import { WorkspaceRail } from "./components/WorkspaceRail";
+import { UpdateNotice } from "./components/UpdateNotice";
 import {
   detectPi,
   getSubagentActivity,
@@ -49,6 +50,7 @@ import {
 import { initialTranscriptState, reduceTranscript } from "./lib/transcript";
 import { decideStartupGate } from "./lib/startup-gate";
 import { buildPromptWithAttachments, promptImages, type ComposerAttachment } from "./lib/attachments";
+import { useAppUpdater } from "./lib/app-updater";
 import {
   baselineProjectFinalReplies,
   countUnreadFinalReplies,
@@ -108,8 +110,8 @@ function asRecord(value: unknown): UnknownRecord | undefined {
 }
 
 function isActiveSubagentRun(run: SubagentRunStatus): boolean {
-  if (["running", "queued", "paused"].includes(run.state)) return true;
-  return run.steps?.some((step) => ["running", "queued", "pending", "paused"].includes(step.status)) ?? false;
+  if (["running", "queued"].includes(run.state)) return true;
+  return run.steps?.some((step) => ["running", "queued", "pending"].includes(step.status)) ?? false;
 }
 
 function foregroundRunFromDetails(value: unknown, final: boolean): SubagentRunStatus | undefined {
@@ -214,6 +216,7 @@ export default function App() {
   const projectRef = useRef<string | undefined>(undefined);
   const sessionRefreshRequestRef = useRef(0);
 
+  const appUpdater = useAppUpdater();
   const finishStartup = useCallback(() => setStartupReady(true), []);
   const addToast = useCallback((message: string, tone: Toast["tone"] = "info") => {
     const id = crypto.randomUUID();
@@ -544,7 +547,7 @@ export default function App() {
         if (disposed) return;
         setSubagentRuns(runs);
         const activeCount = runs.reduce(
-          (count, run) => count + (run.steps?.filter((step) => ["running", "queued", "pending", "paused"].includes(step.status)).length ?? (["running", "queued", "paused"].includes(run.state) ? 1 : 0)),
+          (count, run) => count + (run.steps?.filter((step) => ["running", "queued", "pending"].includes(step.status)).length ?? (["running", "queued"].includes(run.state) ? 1 : 0)),
           0,
         );
         nextDelay = activeCount > 0 ? 700 : 2500;
@@ -791,7 +794,7 @@ export default function App() {
   const hasActiveSubagents = visibleSubagentRuns.some((run) => isActiveSubagentRun(run));
   const activeAgentNames = useMemo(() => new Set(visibleSubagentRuns.flatMap((run) => (
     isActiveSubagentRun(run)
-      ? run.steps?.filter((step) => ["pending", "running", "paused"].includes(step.status)).map((step) => step.agent) ?? []
+      ? run.steps?.filter((step) => ["pending", "running", "queued"].includes(step.status)).map((step) => step.agent) ?? []
       : []
   ))), [visibleSubagentRuns]);
 
@@ -941,6 +944,16 @@ export default function App() {
         />
       )}
       {activeDialog && <ExtensionDialog request={activeDialog} onRespond={respondToExtension} />}
+      <UpdateNotice
+        phase={appUpdater.phase}
+        version={appUpdater.version}
+        error={appUpdater.error}
+        downloadedBytes={appUpdater.downloadedBytes}
+        totalBytes={appUpdater.totalBytes}
+        onInstall={() => void appUpdater.installAndRestart()}
+        onRetry={() => void appUpdater.retry()}
+        onDismiss={appUpdater.dismiss}
+      />
       <ToastStack toasts={toasts} onDismiss={(id) => setToasts((current) => current.filter((toast) => toast.id !== id))} />
       {splashVisible && <StartupSplash exiting={splashExiting} />}
     </div>

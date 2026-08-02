@@ -1770,6 +1770,54 @@ button:disabled {
   font-size: 10px;
 }
 
+.update-notice {
+  position: fixed;
+  z-index: 1001;
+  display: flex;
+  right: 20px;
+  bottom: 20px;
+  width: min(430px, calc(100vw - 40px));
+  padding: 12px;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid color-mix(in srgb, var(--lemon) 48%, var(--line));
+  border-radius: 14px;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--paper) 96%, var(--lemon));
+  box-shadow: 0 18px 52px rgba(10, 10, 8, 0.16);
+  backdrop-filter: blur(16px);
+}
+
+.update-notice--error { border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
+.update-notice--downloading,
+.update-notice--installing { border-color: color-mix(in srgb, var(--warning) 45%, var(--line)); }
+
+.update-notice__copy {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 3px;
+}
+
+.update-notice__copy strong { font-size: 11px; font-weight: 650; }
+.update-notice__copy span { color: var(--muted); font-size: 10px; line-height: 1.45; }
+
+.update-notice button {
+  min-height: 29px;
+  padding: 0 9px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 620;
+}
+
+.update-notice__primary { color: var(--lemon-ink); background: var(--lemon); }
+.update-notice__dismiss { color: var(--muted); background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.update-notice button:hover { filter: brightness(0.97); }
+.update-notice button:focus-visible { outline: 2px solid var(--lemon); outline-offset: 2px; }
+
 .toast-stack {
   position: fixed;
   z-index: 30;
@@ -1828,6 +1876,17 @@ button:disabled {
 
 @keyframes toast-in {
   from { opacity: 0; transform: translateX(18px); }
+}
+
+@media (max-width: 560px) {
+  .update-notice {
+    right: 12px;
+    bottom: 12px;
+    width: calc(100vw - 24px);
+    flex-wrap: wrap;
+  }
+
+  .update-notice__copy { flex-basis: 100%; }
 }
 
 @media (max-width: 1050px) {

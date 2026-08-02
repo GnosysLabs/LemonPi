@@ -371,6 +371,10 @@
   color: var(--danger);
 }
 
+.agent-card--paused .agent-card__status {
+  color: var(--faint);
+}
+
 .agent-card__identity {
   display: flex;
   min-width: 0;

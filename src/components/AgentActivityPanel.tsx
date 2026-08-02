@@ -3,6 +3,7 @@ import {
   Check,
   CircleNotch,
   Clock,
+  Pause,
   Robot,
   Signpost,
   Stop,
@@ -16,7 +17,7 @@ import type { PiSessionState, SubagentLiveActivity, SubagentRunStatus, SubagentS
 import type { TranscriptItem } from "../lib/transcript";
 
 function isActive(status: string): boolean {
-  return status === "running" || status === "queued" || status === "pending" || status === "paused";
+  return status === "running" || status === "queued" || status === "pending";
 }
 
 function formatElapsed(start?: number, end?: number, now = Date.now()): string {
@@ -122,6 +123,7 @@ function MainAgentCard({
 
 function StatusIcon({ status }: { status: string }) {
   if (status === "running" || status === "queued" || status === "pending") return <CircleNotch className="spin" size={12} />;
+  if (status === "paused") return <Pause size={12} weight="fill" />;
   if (status === "failed" || status === "stopped" || status === "rejected") return <Warning size={12} />;
   return <Check size={12} />;
 }
@@ -319,7 +321,11 @@ export function AgentActivityPanel({
   }, []);
 
   const visibleRuns = useMemo(
-    () => runs.filter((run) => isActive(run.state) || (run.endedAt != null && now - run.endedAt < 15 * 60_000)).slice(0, 8),
+    () => runs.filter((run) => {
+      if (isActive(run.state)) return true;
+      const historyAt = run.endedAt ?? run.lastUpdate ?? run.startedAt;
+      return now - historyAt < 15 * 60_000;
+    }).slice(0, 8),
     [now, runs],
   );
   const activeCount = visibleRuns.reduce(

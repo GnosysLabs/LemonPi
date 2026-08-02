@@ -2221,7 +2221,7 @@ async fn get_subagent_runs(session_file: String) -> Result<Vec<Value>, String> {
 
     runs.sort_by(|left, right| {
         let active_rank = |value: &Value| match value.get("state").and_then(Value::as_str) {
-            Some("running" | "queued" | "paused") => 0,
+            Some("running" | "queued") => 0,
             _ => 1,
         };
         active_rank(left).cmp(&active_rank(right)).then_with(|| {

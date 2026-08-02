@@ -21,21 +21,23 @@ Delegated work is asynchronous by default in LemonPi. After launching subagents,
 
 const ORCHESTRATION_CONTRACT = `
 <lemonpi-orchestration>
-You are Main Pi, the read-only supervisor and integration owner. You do not implement changes in project files. Optimize for the shortest reliable path to the user's outcome by giving one capable coding worker a clear, coherent slice, then inspecting and validating its result. File count alone never makes work large.
+You are Main Pi, the read-only supervisor and integration owner. You do not implement changes in project files. Optimize for the shortest reliable path to the user's outcome by selecting the best currently available subagent for each necessary phase, giving one writer a clear coherent slice, then inspecting and validating its result. File count alone never makes work large.
 
 Routing policy:
 
-1. Decomposition rule — first decide whether the request is already one small, independently verifiable outcome. If it is broader, divide it into ordered vertical chunks before dispatch: each chunk should leave the workspace coherent, be reviewable on its own, and reduce uncertainty for the next chunk. Prefer boundaries such as foundation, one behavior, integration, then polish; do not split into arbitrary file-by-file chores or tiny edits that add handoff overhead.
-2. Chunk contract — every worker task must state exactly four fields: \`Chunk outcome:\`, \`In scope:\`, \`Done when:\`, and \`Out of scope:\`. Give the worker only the current chunk, plus enough surrounding context to avoid incompatible decisions. Explicitly exclude later chunks. A chunk should normally cover one user-visible behavior or one architectural seam and have a short, observable acceptance condition.
-3. Fast worker path — a bounded, well-understood, low-risk request is one chunk. Examples include cohesive UI polish across markup/styles/state, labels and icons, a startup splash, localized interaction fixes, small configuration changes, and straightforward bugs with an established cause. Give one configured worker that complete small outcome, avoid specialists and reviewers, inspect the result, and run one proportionate validation pass.
-4. Sequential worker path — for broader work, dispatch only the first chunk. When it completes, inspect the actual diff and worker evidence before doing anything else. Confirm the chunk's acceptance condition, identify regressions or newly learned constraints, and either steer/resume the same worker for a bounded correction or dispatch the next chunk with updated context. Never hand the worker the entire backlog "for completeness." The worker role resolves its coding model through the user's Pi configuration; do not override it unless the user asks.
-5. Checkpoint review — Main Pi reviews every completed chunk directly: inspect what changed, compare it with the stated scope and out-of-scope boundary, and perform the smallest useful check. Report the concrete checkpoint to the user before continuing. Run a final holistic validation once after all chunks are integrated; do not rerun the full suite after every small chunk unless its risk requires that.
-6. Specialist path — use a scout, researcher, designer, planner, oracle, or reviewer only for a concrete unknown or specialized risk Main Pi cannot resolve efficiently. Specialists are not mandatory pipeline stages. Never relay a small task serially through designer, worker, reviewer, repair worker, and reviewer.
-7. Review gate — independent review is justified only when the user explicitly requests it or the change crosses a material risk boundary such as authentication, authorization, security, privacy, money, irreversible data changes, migrations, cryptography, public protocols, concurrency, or production release infrastructure. State that boundary in the delegated task as "Review justification: ...". At most one reviewer pass is allowed per user request unless the user explicitly asks for multiple independent reviews. Routine work is reviewed by Main Pi at each chunk checkpoint.
-8. Repair rule — only a concrete blocker or major correctness defect warrants a repair pass. Notes, hypothetical edge cases, test-coverage wishes, and low-severity residual risks do not trigger an automatic worker-review loop. For a bounded correction, steer or resume the same worker rather than launching a new implementation owner. After the worker repairs it, Main Pi inspects and validates directly. Do not launch a second reviewer to confirm the first reviewer.
-9. Parallelism rule — parallelize only independent work. In a shared checkout keep exactly one writer; concurrent work must be read-only and useful regardless of the writer's result. A new user message never authorizes a second writer while the current worker is running or paused: respond to the user, then steer the existing worker if needed.
-10. Progress and responsiveness rule — never invent a short child runtime deadline and never block the interactive supervisor with subagent_wait. Use progress evidence rather than elapsed time alone. End the Main Pi turn while background work continues so new user messages receive a fresh response immediately. If a child appears stuck or the user provides guidance, inspect its live activity, steer it once with concrete direction, and reassess. Do not respond to slowness by launching more agents or restarting the whole workflow.
-11. Acceptance rule — package-level \`verified\` acceptance is a runtime gate, not a request for the worker to report tests. Use it only with a non-empty \`acceptance.verify\` array of objects containing an \`id\` and executable \`command\`; commands mentioned in the task or child output do not count. If Main Pi will inspect and validate the chunk itself, omit acceptance and LemonPi will disable inferred package acceptance. Never resume a run that failed because its acceptance contract was malformed, because revival can inherit that contract; launch a fresh bounded chunk with corrected acceptance instead.
+1. Decomposition rule — first decide whether the request is already one small, independently verifiable outcome. If it is broader, divide it into ordered vertical chunks before implementation: each chunk should leave the workspace coherent, be reviewable on its own, and reduce uncertainty for the next chunk. Prefer boundaries such as foundation, one behavior, integration, then polish; do not split into arbitrary file-by-file chores or tiny edits that add handoff overhead.
+2. Planning rule — planner is the default preparation role when work needs multiple chunks, changes architecture, crosses subsystems, has important ordering constraints, or remains ambiguous after brief inspection. Give planner the requirements and ask for an ordered implementation plan with boundaries, dependencies, risks, and validation points. For a single bounded and well-understood change, skip planning and dispatch directly. Do not run planner before every trivial edit, and do not ask planner to implement.
+3. Live roster and dynamic role rule — at the start of each new user task, call the subagent tool with \`{ action: "list" }\` before selecting or launching any child. Treat its executable-agent output as the authoritative capability registry: it includes built-in, packaged, user, and project agents with their exact runtime names and descriptions. Consider every listed agent, choose autonomously from those descriptions, and invoke the best match by the exact returned name; the user does not need to name or request a custom agent. If a description leaves writing authority or capabilities unclear, inspect that candidate with \`{ action: "get", agent: "<exact-name>" }\`. Never assume an optional or custom role exists, hardcode behavior for a custom agent name, or restrict routing to a fixed allowlist. Built-in roles such as scout, researcher, context-builder, planner, oracle/advisor, worker, and reviewer are examples rather than the complete roster. A listed custom specialist is a first-class candidate for any phase its description matches, including serving as the sole writer. Ignoring a clearly matched listed agent is wrong; invoking every role ceremonially is also wrong. Do not rediscover the roster before every chunk in the same task unless it may have changed.
+4. Useful-output rule — every specialist dispatch must name the concrete question it will answer and how that answer changes the next decision or chunk. Prefer one well-matched specialist over a chain of generic handoffs. Read-only specialists may run concurrently only when their outputs are independent and immediately useful.
+5. Chunk contract — every implementation task, regardless of which available agent performs it, must state exactly four fields: \`Chunk outcome:\`, \`In scope:\`, \`Done when:\`, and \`Out of scope:\`. Give the writer only the current chunk, plus enough surrounding context to avoid incompatible decisions. Explicitly exclude later chunks. A chunk should normally cover one user-visible behavior or one architectural seam and have a short, observable acceptance condition.
+6. Fast path — a bounded, well-understood, low-risk request is one chunk. Give the best matched available executor that complete small outcome, avoid planning and review ceremony, inspect the result, and run one proportionate validation pass.
+7. Sequential path — for broader work, consume the planner's output and dispatch only the first implementation chunk. When it completes, inspect the actual diff and evidence before doing anything else. Confirm the chunk's acceptance condition, identify regressions or newly learned constraints, and either steer/resume the same writer for a bounded correction or dispatch the next chunk with updated context. Never hand one writer the entire backlog "for completeness."
+8. Checkpoint review — Main Pi reviews every completed chunk directly: inspect what changed, compare it with the stated scope and out-of-scope boundary, and perform the smallest useful check. Report the concrete checkpoint to the user before continuing. Run a final holistic validation once after all chunks are integrated; do not rerun the full suite after every small chunk unless its risk requires that.
+9. Review gate — independent review is justified only when the user explicitly requests it or the change crosses a material risk boundary such as authentication, authorization, security, privacy, money, irreversible data changes, migrations, cryptography, public protocols, concurrency, or production release infrastructure. State that boundary in the delegated task as "Review justification: ...". At most one reviewer pass is allowed per user request unless the user explicitly asks for multiple independent reviews. Routine work is reviewed by Main Pi at each chunk checkpoint.
+10. Repair rule — only a concrete blocker or major correctness defect warrants a repair pass. Notes, hypothetical edge cases, test-coverage wishes, and low-severity residual risks do not trigger an automatic writer-review loop. For a bounded correction, steer or resume the same writer rather than launching a new implementation owner. After the writer repairs it, Main Pi inspects and validates directly. Do not launch a second reviewer to confirm the first reviewer.
+11. Parallelism rule — parallelize only independent work. In a shared checkout keep exactly one writer; concurrent work must be read-only and useful regardless of the writer's result. A new user message never authorizes a second writer while the current writer is running or paused: respond to the user, then steer the existing writer if needed.
+12. Progress and responsiveness rule — never invent a short child runtime deadline and never block the interactive supervisor with subagent_wait. Use progress evidence rather than elapsed time alone. End the Main Pi turn while background work continues so new user messages receive a fresh response immediately. If a child appears stuck or the user provides guidance, inspect its live activity, steer it once with concrete direction, and reassess. Do not respond to slowness by launching more agents or restarting the whole workflow.
+13. Acceptance rule — package-level \`verified\` acceptance is a runtime gate, not a request for the child to report tests. Use it only with a non-empty \`acceptance.verify\` array of objects containing an \`id\` and executable \`command\`; commands mentioned in the task or child output do not count. If Main Pi will inspect and validate the chunk itself, omit acceptance and LemonPi will disable inferred package acceptance. Never resume a run that failed because its acceptance contract was malformed, because revival can inherit that contract; launch a fresh bounded chunk with corrected acceptance instead.
 
 Main Pi may use read-only inspection, search, status, test, build, and git-management operations. It must not call file editing/writing tools or use shell commands to mutate project files. Launch implementation asynchronously, do only brief useful read-only work, then return control to the user; completion events provide the integration wake-up. For explanation, diagnosis, review, or other read-only requests, do not launch an implementation worker.
 </lemonpi-orchestration>`;
@@ -108,9 +110,9 @@ const CHUNK_OUTCOME = /\bchunk outcome\s*:/i;
 const CHUNK_IN_SCOPE = /\bin scope\s*:/i;
 const CHUNK_DONE_WHEN = /\bdone when\s*:/i;
 const CHUNK_OUT_OF_SCOPE = /\bout of scope\s*:/i;
-const IMPLEMENTATION_AGENTS = new Set(["worker", "designer", "delegate"]);
 const MAIN_MUTATION_TOOLS = new Set(["edit", "write", "apply_patch", "patch", "write_file", "edit_file", "create_file", "delete_file", "move_file"]);
-const IMPLEMENTATION_TASK = /\b(?:implement|code|edit|write|change|fix|add|remove|refactor|create|update|modify|wire|style|replace|rename)\b/i;
+const IMPLEMENTATION_TASK = /\b(?:implement|edit|modify|fix|add|remove|refactor|wire|style|replace|rename|delete|patch)\b/i;
+const EXPLICIT_READ_ONLY_TASK = /\b(?:read[- ]only|no code changes|do not (?:edit|write|modify)|without (?:editing|writing|modifying)|plan only|report only|analysis only)\b/i;
 
 interface DelegatedSpec {
   agent: string;
@@ -144,10 +146,21 @@ function hasBoundedChunkContract(task: string): boolean {
     && CHUNK_OUT_OF_SCOPE.test(task);
 }
 
-function workerNotificationStatus(content: string): "completed" | "failed" | "paused" | "stopped" | undefined {
-  const single = content.match(/^(?:Background task|Detached foreground task) (completed|failed|paused|stopped): \*\*worker\*\*/m);
+function delegatesImplementation(spec: DelegatedSpec): boolean {
+  return hasBoundedChunkContract(spec.task)
+    || (IMPLEMENTATION_TASK.test(spec.task) && !EXPLICIT_READ_ONLY_TASK.test(spec.task));
+}
+
+function escapedRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function writerNotificationStatus(content: string, agent: string | undefined): "completed" | "failed" | "paused" | "stopped" | undefined {
+  if (!agent) return undefined;
+  const escapedAgent = escapedRegExp(agent);
+  const single = content.match(new RegExp(`^(?:Background task|Detached foreground task) (completed|failed|paused|stopped): \\*\\*${escapedAgent}\\*\\*`, "mi"));
   if (single) return single[1] as "completed" | "failed" | "paused" | "stopped";
-  if (/^Background tasks completed \(\d+\):.*\*\*worker\*\*/m.test(content)) return "completed";
+  if (new RegExp(`^Background tasks completed \\(\\d+\\):.*\\*\\*${escapedAgent}\\*\\*`, "mi").test(content)) return "completed";
   return undefined;
 }
 
@@ -246,9 +259,13 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   let latestUserRequest = "";
   let reviewDispatches = 0;
   let writerOccupied = false;
+  let activeWriterAgent: string | undefined;
   let consecutiveWriterFailures = 0;
+  let rosterInspected = false;
+  let rosterGeneration = 0;
   const delegationToolCalls = new Set<string>();
-  const writerToolCalls = new Map<string, boolean>();
+  const rosterListToolCalls = new Map<string, number>();
+  const writerToolCalls = new Map<string, { agent: string; async: boolean }>();
 
   pi.on("before_agent_start", async (event) => ({
     systemPrompt: `${event.systemPrompt}\n\n${NARRATION_CONTRACT}\n\n${ORCHESTRATION_CONTRACT}`,
@@ -311,37 +328,36 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (MAIN_MUTATION_TOOLS.has(event.toolName) || (["bash", "shell"].includes(event.toolName) && shellMutatesProject(input))) {
       return {
         block: true,
-        reason: "Main Pi is LemonPi's read-only orchestrator and may not mutate project files. Delegate the implementation to the configured `worker`, or steer/resume the existing worker for a correction. Main Pi should inspect and validate the result.",
+        reason: "Main Pi is LemonPi's read-only orchestrator and may not mutate project files. Choose the best matching writable agent from the live roster, or steer/resume the existing writer for a correction. Main Pi should inspect and validate the result.",
       };
     }
     if (event.toolName !== "subagent") return;
 
     const isManagementAction = typeof input.action === "string" && input.action.trim().length > 0;
+    if (input.action === "list") rosterListToolCalls.set(event.toolCallId, rosterGeneration);
     const specs = delegatedSpecs(input);
     const isDelegation = specs.length > 0;
 
     if (isDelegation && !isManagementAction) {
+      if (!rosterInspected) {
+        return {
+          block: true,
+          reason: "LemonPi requires live agent discovery before delegation. Call the subagent tool with { action: \"list\" }, read every executable agent's exact name and description, then autonomously choose the best match. Custom user and project agents are first-class candidates; do not wait for the user to name one.",
+        };
+      }
       const reviewers = specs.filter((spec) => spec.agent === "reviewer");
-      const writers = specs.filter((spec) => IMPLEMENTATION_AGENTS.has(spec.agent));
-      const misroutedImplementation = writers.find((spec) => spec.agent !== "worker" && IMPLEMENTATION_TASK.test(spec.task));
+      const writers = specs.filter(delegatesImplementation);
       const taskJustifiesReview = reviewers.some((spec) => REVIEW_JUSTIFICATION.test(spec.task));
       const requestExplicitlyRequestsReview = EXPLICIT_REVIEW_REQUEST.test(latestUserRequest);
       const requestHasMaterialRisk = MATERIAL_RISK_REQUEST.test(latestUserRequest);
       const requestExplicitlyRequestsMultipleReviews = EXPLICIT_MULTI_REVIEW_REQUEST.test(latestUserRequest);
       const hadPriorReview = reviewDispatches > 0;
 
-      if (misroutedImplementation) {
+      const unboundedImplementationTask = writers.find((spec) => !hasBoundedChunkContract(spec.task));
+      if (unboundedImplementationTask) {
         return {
           block: true,
-          reason: `LemonPi routes project implementation through the configured worker coding role, not ${misroutedImplementation.agent}. Use specialists read-only for concrete unknowns, then give the coherent coding slice to \`worker\`.`,
-        };
-      }
-
-      const unboundedWorkerTask = writers.find((spec) => spec.agent === "worker" && !hasBoundedChunkContract(spec.task));
-      if (unboundedWorkerTask) {
-        return {
-          block: true,
-          reason: "LemonPi requires a bounded worker chunk. Rewrite the task with `Chunk outcome:`, `In scope:`, `Done when:`, and `Out of scope:`. Delegate only the current independently reviewable chunk, not the remaining backlog.",
+          reason: `LemonPi requires a bounded implementation chunk for ${unboundedImplementationTask.agent}. Rewrite the task with \`Chunk outcome:\`, \`In scope:\`, \`Done when:\`, and \`Out of scope:\`. Delegate only the current independently reviewable chunk, not the remaining backlog.`,
         };
       }
 
@@ -386,7 +402,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       if (reviewers.length > 0) reviewDispatches += reviewers.length;
       if (writers.length > 0 && input.clarify !== true) {
         writerOccupied = true;
-        writerToolCalls.set(event.toolCallId, input.async !== false);
+        activeWriterAgent = writers[0]?.agent;
+        writerToolCalls.set(event.toolCallId, { agent: activeWriterAgent ?? "writer", async: input.async !== false });
       }
 
       if (input.acceptance === undefined) {
@@ -422,11 +439,16 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       latestUserRequest = notification;
       reviewDispatches = 0;
       consecutiveWriterFailures = 0;
+      rosterInspected = false;
+      rosterGeneration += 1;
     }
     if (message.customType === "subagent-notify") {
-      const workerStatus = workerNotificationStatus(notification);
+      const workerStatus = writerNotificationStatus(notification, activeWriterAgent);
       const workerWasOccupied = writerOccupied;
-      if (workerStatus && workerStatus !== "paused") writerOccupied = false;
+      if (workerStatus && workerStatus !== "paused") {
+        writerOccupied = false;
+        activeWriterAgent = undefined;
+      }
       if (workerStatus === "completed") consecutiveWriterFailures = 0;
       if (workerStatus === "failed" && workerWasOccupied) consecutiveWriterFailures += 1;
       sawToolActivity = false;
@@ -450,16 +472,25 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_end", async (event) => {
-    const writerWasAsync = writerToolCalls.get(event.toolCallId);
+    const listedRosterGeneration = rosterListToolCalls.get(event.toolCallId);
+    rosterListToolCalls.delete(event.toolCallId);
+    if (listedRosterGeneration === rosterGeneration) {
+      rosterInspected = !event.isError;
+    }
+    const writerCall = writerToolCalls.get(event.toolCallId);
     writerToolCalls.delete(event.toolCallId);
     if (!delegationToolCalls.delete(event.toolCallId)) return;
     const failure = delegationFailure(event.result, event.isError);
     if (!failure) {
-      if (writerWasAsync === false) writerOccupied = false;
+      if (writerCall?.async === false) {
+        writerOccupied = false;
+        activeWriterAgent = undefined;
+      }
       return;
     }
-    if (writerWasAsync !== undefined) {
+    if (writerCall) {
       writerOccupied = false;
+      activeWriterAgent = undefined;
       consecutiveWriterFailures += 1;
     }
     delegationFailurePending = true;
