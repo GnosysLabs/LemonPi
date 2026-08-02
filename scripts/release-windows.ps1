@@ -126,7 +126,7 @@ try {
         # build-time private-key variable.
         $env:TAURI_SIGNING_PRIVATE_KEY_PATH = $UpdaterKeyPath
         Set-Content -LiteralPath $preflightFile -Value "lemonpi updater signing preflight" -NoNewline
-        Invoke-Checked pnpm -Arguments @("--dir", $worktree, "tauri", "signer", "sign", "--password", "", $preflightFile)
+        Invoke-Checked pnpm -Arguments @("--dir", $worktree, "tauri", "signer", "sign", "--password=", $preflightFile)
         if (-not (Test-Path -LiteralPath "$preflightFile.sig" -PathType Leaf) -or (Get-Item -LiteralPath "$preflightFile.sig").Length -eq 0) {
             throw "Updater signing preflight did not produce a signature"
         }

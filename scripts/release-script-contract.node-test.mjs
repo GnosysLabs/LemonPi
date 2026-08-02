@@ -26,7 +26,8 @@ describe("release script contracts", () => {
     assert.match(windows, /\$env:TAURI_SIGNING_PRIVATE_KEY_PATH = \$UpdaterKeyPath/);
     assert.match(windows, /Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PATH -ErrorAction SilentlyContinue/);
     assert.match(windows, /\$env:TAURI_SIGNING_PRIVATE_KEY = \$UpdaterKeyPath/);
-    assert.match(windows, /"sign", "--password", "", \$preflightFile/);
+    assert.match(windows, /"sign", "--password=", \$preflightFile/);
+    assert.doesNotMatch(windows, /"sign", "--password", "", \$preflightFile/);
     assert.match(windows, /"build", "--ci", "--bundles", "nsis"/);
     assert.match(windows, /git -C \$worktree diff --quiet --ignore-space-at-eol/);
     assert.match(windows, /\$untrackedPaths = @\(\$worktreeStatus/);
