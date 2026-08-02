@@ -446,6 +446,20 @@ fn expand_home(path: PathBuf) -> PathBuf {
     path
 }
 
+fn path_for_frontend(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return format!("\\\\{rest}");
+    }
+    if let Some(rest) = text.strip_prefix("//?/UNC/") {
+        return format!("//{rest}");
+    }
+    text.strip_prefix(r"\\?\")
+        .or_else(|| text.strip_prefix("//?/"))
+        .unwrap_or(text.as_ref())
+        .to_string()
+}
+
 fn session_directory(cwd: &Path) -> Result<PathBuf, String> {
     if let Some(directory) = env::var_os("PI_CODING_AGENT_SESSION_DIR") {
         return Ok(expand_home(PathBuf::from(directory)));
@@ -460,7 +474,10 @@ fn session_directory(cwd: &Path) -> Result<PathBuf, String> {
         PathBuf::from(home).join(".pi/agent")
     };
 
-    let cwd_text = cwd.to_string_lossy();
+    // Windows canonicalization adds a `\\?\` verbatim prefix. Node's
+    // path.resolve(), which Pi uses to name its session directory, does not.
+    // Keeping the prefix here also introduces an illegal `?` filename.
+    let cwd_text = path_for_frontend(cwd);
     let path_text = cwd_text
         .strip_prefix('/')
         .or_else(|| cwd_text.strip_prefix('\\'))
@@ -828,7 +845,7 @@ async fn start_pi(
         executable: executable.to_string_lossy().into_owned(),
         version,
         pid: Some(pid),
-        cwd: Some(cwd_path.to_string_lossy().into_owned()),
+        cwd: Some(path_for_frontend(&cwd_path)),
     };
 
     {
@@ -2214,6 +2231,22 @@ mod tests {
     fn trust_decision_maps_to_explicit_cli_flag() {
         assert_eq!(project_trust_arg(true), "--approve");
         assert_eq!(project_trust_arg(false), "--no-approve");
+    }
+
+    #[test]
+    fn strips_windows_verbatim_prefixes_from_frontend_paths() {
+        assert_eq!(
+            path_for_frontend(Path::new(r"\\?\C:\Users\Christopher\Finches")),
+            r"C:\Users\Christopher\Finches"
+        );
+        assert_eq!(
+            path_for_frontend(Path::new(r"\\?\UNC\server\share\Finches")),
+            r"\\server\share\Finches"
+        );
+        assert_eq!(
+            path_for_frontend(Path::new("//?/C:/Users/Christopher/Finches")),
+            "C:/Users/Christopher/Finches"
+        );
     }
 
     #[test]

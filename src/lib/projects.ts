@@ -79,12 +79,18 @@ function trimProjects(projects: RecentProject[]): RecentProject[] {
   return [...pinned, ...recent];
 }
 
+export function projectPathForDisplay(path: string): string {
+  const normalized = path.replaceAll("\\", "/");
+  if (/^\/\/\?\/UNC\//i.test(normalized)) return normalized.replace(/^\/\/\?\/UNC\//i, "//");
+  return normalized.replace(/^\/\/\?\//, "");
+}
+
 function pathSegments(path: string): string[] {
-  return path.replaceAll("\\", "/").split("/").filter(Boolean);
+  return projectPathForDisplay(path).split("/").filter(Boolean);
 }
 
 export function shortProjectPath(path: string): string {
-  const normalized = path.replaceAll("\\", "/");
+  const normalized = projectPathForDisplay(path);
   return normalized.replace(/^\/Users\/[^/]+/, "~").replace(/^\/home\/[^/]+/, "~");
 }
 

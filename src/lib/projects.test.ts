@@ -3,7 +3,9 @@ import {
   describeProjects,
   MAX_RECENT_PROJECTS,
   parseRecentProjects,
+  projectPathForDisplay,
   rememberProject,
+  shortProjectPath,
   toggleProjectPinned,
 } from "./projects";
 
@@ -55,5 +57,15 @@ describe("project descriptions", () => {
     expect(descriptions.get("/Users/me/Dev/internal/web")?.displayName).toBe("web · internal");
     expect(descriptions.get("/Users/me/Dev/LemonPi")?.displayName).toBe("LemonPi");
     expect(descriptions.get("/Users/me/Dev/LemonPi")?.shortPath).toBe("~/Dev/LemonPi");
+  });
+
+  it("hides Windows verbatim path prefixes without changing project identity", () => {
+    const localPath = String.raw`\\?\C:\Users\Christopher\Finches`;
+    const networkPath = String.raw`\\?\UNC\server\share\Finches`;
+
+    expect(projectPathForDisplay(localPath)).toBe("C:/Users/Christopher/Finches");
+    expect(shortProjectPath(localPath)).toBe("C:/Users/Christopher/Finches");
+    expect(projectPathForDisplay(networkPath)).toBe("//server/share/Finches");
+    expect(describeProjects([localPath]).get(localPath)?.displayName).toBe("Finches");
   });
 });
