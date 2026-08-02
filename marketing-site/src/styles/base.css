@@ -1,0 +1,130 @@
+/* LemonPi marketing — reset & base layer */
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--void);
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  min-width: 320px;
+  margin: 0;
+  overflow-x: hidden;
+  color: var(--cream);
+  background: var(--void);
+  font-family: var(--display);
+  font-size: var(--step-body);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+}
+
+a {
+  color: inherit;
+}
+
+h1,
+h2,
+h3,
+p,
+ul,
+ol {
+  margin: 0;
+}
+
+ul,
+ol {
+  padding: 0;
+  list-style: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+::selection {
+  color: var(--lemon-ink);
+  background: var(--lemon);
+}
+
+:focus-visible {
+  outline: 2px solid var(--lemon);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip-link {
+  position: fixed;
+  z-index: var(--z-modal);
+  top: 12px;
+  left: 12px;
+  padding: 12px 20px;
+  transform: translateY(-140%);
+  border-radius: var(--radius-pill);
+  color: var(--lemon-ink);
+  background: var(--lemon);
+  font-family: var(--display);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: transform var(--dur-fast) var(--ease-heavy);
+}
+
+.skip-link:focus-visible {
+  transform: translateY(0);
+  outline-offset: 4px;
+}
+
+/* Grain: fixed, pointer-events: none, never on scrolling containers */
+body::after {
+  content: "";
+  position: fixed;
+  z-index: var(--z-grain);
+  inset: 0;
+  opacity: 0.03;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.92' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.6'/%3E%3C/svg%3E");
+}
+
+/* Reveal utility is scoped behind the .js class so the page stays fully
+   readable if JavaScript never runs. See components.css for [data-reveal]. */
+.js [data-reveal] {
+  opacity: 0;
+  transform: translate3d(0, 42px, 0);
+  filter: blur(6px);
+  transition:
+    opacity var(--dur-slow) var(--ease-expo),
+    transform var(--dur-slow) var(--ease-expo),
+    filter var(--dur-slow) var(--ease-expo);
+  transition-delay: calc(var(--reveal-index, 0) * 70ms);
+}
+
+.js [data-reveal].is-revealed {
+  opacity: 1;
+  transform: none;
+  filter: none;
+}
+

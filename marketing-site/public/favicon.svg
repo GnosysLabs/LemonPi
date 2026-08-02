@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="LemonPi">
+  <rect x="3" y="3" width="58" height="58" rx="18" fill="#0D0E10" />
+  <rect x="3.5" y="3.5" width="57" height="57" rx="17.5" fill="none" stroke="#1E2023" stroke-width="1" />
+  <circle cx="32" cy="32" r="21" fill="#F7F4EB" />
+  <circle cx="32" cy="32" r="17.5" fill="#F2EA5B" />
+  <g stroke="#F7F4EB" stroke-width="1.6" stroke-linecap="round" opacity="0.85">
+    <line x1="32" y1="32" x2="32" y2="16" />
+    <line x1="32" y1="32" x2="43.3" y2="20.7" />
+    <line x1="32" y1="32" x2="48" y2="32" />
+    <line x1="32" y1="32" x2="43.3" y2="43.3" />
+    <line x1="32" y1="32" x2="32" y2="48" />
+    <line x1="32" y1="32" x2="20.7" y2="43.3" />
+    <line x1="32" y1="32" x2="16" y2="32" />
+    <line x1="32" y1="32" x2="20.7" y2="20.7" />
+  </g>
+  <circle cx="32" cy="32" r="3" fill="#F7F4EB" />
+</svg>

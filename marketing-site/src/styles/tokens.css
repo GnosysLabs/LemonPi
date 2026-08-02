@@ -1,0 +1,78 @@
+/*
+  LemonPi marketing — design tokens.
+  "Night lemonade": near-black OLED surfaces, vivid lemon + hot-pink/orchid accents.
+  Every color, radius, easing curve, and type step used elsewhere in this project
+  is defined here. Do not hard-code hex values outside this file.
+*/
+
+:root {
+  /* Surfaces */
+  --void: #08090a;
+  --night: #0d0e10;
+  --slate: #141618;
+  --slate-raised: #17191c;
+  --shell: rgba(255, 255, 255, 0.045);
+  --hairline: rgba(255, 255, 255, 0.09);
+  --hairline-strong: rgba(255, 255, 255, 0.16);
+
+  /* Ink */
+  --cream: #f7f4eb;
+  --muted: #a9aaa2;
+  --faint: #83857c; /* AA-safe on --void: 5.3:1 */
+
+  /* Accents */
+  --lemon: #f2ea5b;
+  --lemon-deep: #d3c92c;
+  --lemon-ink: #17180e;
+  --pink: #ff5cc0;
+  --pink-soft: #ff9bd8;
+  --orchid: #fb6dfb;
+
+  /* Gradients */
+  --lemonade: linear-gradient(118deg, var(--lemon) 0%, var(--pink) 100%);
+  --fizz: radial-gradient(
+    circle at 20% 12%,
+    color-mix(in srgb, var(--lemon) 16%, transparent),
+    transparent 42%
+  );
+  --fizz-pink: radial-gradient(
+    circle at 82% 82%,
+    color-mix(in srgb, var(--orchid) 12%, transparent),
+    transparent 46%
+  );
+
+  /* Type */
+  --display: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --mono: "Geist Mono Variable", ui-monospace, "SF Mono", monospace;
+
+  --step-display: clamp(3.2rem, 8.6vw, 8.75rem);
+  --step-h2: clamp(2.5rem, 5.6vw, 5.25rem);
+  --step-h3: clamp(1.55rem, 2.4vw, 2.5rem);
+  --step-lead: clamp(1.05rem, 1.5vw, 1.45rem);
+  --step-body: 0.975rem;
+  --step-label: 0.6875rem;
+
+  /* Motion */
+  --ease-heavy: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 260ms;
+  --dur-mid: 520ms;
+  --dur-slow: 820ms;
+
+  /* Geometry */
+  --radius-shell: 34px;
+  --radius-core: 26px;
+  --radius-pill: 999px;
+  --bezel: 8px;
+  --max-width: 1320px;
+  --gutter: max(20px, calc((100vw - var(--max-width)) / 2));
+
+  /* Z-index scale (documented, small set). The floating header stays above
+     the mobile overlay on purpose — its hamburger-turned-X trigger must
+     stay clickable while the overlay is open. Only the modal (chunk 3)
+     outranks it. */
+  --z-grain: 60;
+  --z-overlay: 70;
+  --z-header: 75;
+  --z-modal: 80;
+}

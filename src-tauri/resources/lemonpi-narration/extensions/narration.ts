@@ -38,13 +38,13 @@ Routing policy:
 11. Parallelism rule — parallelize only independent work. In a shared checkout keep exactly one writer; concurrent work must be read-only and useful regardless of the writer's result. A new user message never authorizes a second writer while the current writer is running or paused: respond to the user, then steer the existing writer if needed.
 12. Progress and responsiveness rule — never invent a short child runtime deadline and never block the interactive supervisor with subagent_wait. Use progress evidence rather than elapsed time alone. End the Main Pi turn while background work continues so new user messages receive a fresh response immediately. A \`needs_attention\` control notice is an intervention request, not passive status: immediately inspect that exact run and transcript through the subagent status controls. If the package reconciles it to a terminal state, integrate the result. If it is alive with no active tool or new output, steer it once to stop exploring and return its result or exact blocker. If that steer cannot be delivered or the same run needs attention again, stop it, preserve useful transcript findings, and launch only a fresh smaller replacement chunk. Never leave a needs-attention run indefinitely, launch a competing agent, or restart the whole workflow.
 13. Acceptance rule — package-level \`verified\` acceptance is a runtime gate, not a request for the child to report tests. Use it only with a non-empty \`acceptance.verify\` array of objects containing an \`id\` and executable \`command\`; commands mentioned in the task or child output do not count. If Main Pi will inspect and validate the chunk itself, omit acceptance and LemonPi will disable inferred package acceptance. Never resume a run that failed because its acceptance contract was malformed, because revival can inherit that contract; launch a fresh bounded chunk with corrected acceptance instead.
-14. Read-only budget rule — focused planning, reconnaissance, research, and review should converge rather than consume the whole repository. LemonPi supplies a generous turn wrap-up window and read/search tool budget for delegations that contain no implementation writer. Treat the soft budget as a request to synthesize immediately. These are assistant/tool budgets, not wall-clock timeouts. Never apply hard tool or turn budgets to an implementation writer.
+14. Budget ownership rule — do not set per-dispatch \`timeoutMs\`, \`maxRuntimeMs\`, \`turnBudget\`, \`toolBudget\`, or \`usageBudget\`. LemonPi removes model-generated budget fields before launch because guessed counters create arbitrary failures and package turn budgets can terminate only after wrap-up/grace boundaries. Scope work through small tasks and intervene from live activity evidence instead. Deliberate budgets stored by the user in package settings or an agent profile remain authoritative.
 
 Main Pi may use read-only inspection, search, status, test, build, and git-management operations. It must not call file editing/writing tools or use shell commands to mutate project files. Launch implementation asynchronously, do only brief useful read-only work, then return control to the user; completion events provide the integration wake-up. For explanation, diagnosis, review, or other read-only requests, do not launch an implementation worker.
 </lemonpi-orchestration>`;
 
 const CLOSING_REPAIR = `The previous response ended after tool activity without a visible closing explanation. Do not call more tools. Give the user a concise, specific closing explanation now: state the outcome, what changed, what was verified, and any blocker or next step. If the task is incomplete, say exactly where it stopped and why.`;
-const DELEGATION_RECOVERY = `A delegated run failed and no replacement delegation was launched before the turn settled. Own the failure now: inspect the exact status/error and any partial output, identify whether the cause was a parent-imposed timeout, unavailable model/tool, configuration problem, or task failure, preserve valid partial work, and re-delegate only the next bounded chunk with corrected instructions, the required chunk-contract fields, and realistic limits. Do not set a tight timeout. If the error says the model produced no output or returned an empty response, do not resume the bloated failed session: salvage concrete transcript findings and launch a fresh-context replacement with a smaller question and explicit deliverable. If retrying cannot help because the blocker is external, give the user the exact blocker and the evidence instead of claiming recovery.`;
+const DELEGATION_RECOVERY = `A delegated run failed and no replacement delegation was launched before the turn settled. Own the failure now: inspect the exact status/error and any partial output, identify whether the cause was a parent-imposed timeout, unavailable model/tool, configuration problem, or task failure, preserve valid partial work, and re-delegate only the next bounded chunk with corrected instructions and the required chunk-contract fields. Shrink the task instead of adding a per-dispatch timeout, turn budget, tool budget, or usage budget. If the error says the model produced no output or returned an empty response, do not resume the bloated failed session: salvage concrete transcript findings and launch a fresh-context replacement with a smaller question and explicit deliverable. If retrying cannot help because the blocker is external, give the user the exact blocker and the evidence instead of claiming recovery.`;
 const ATTENTION_RECOVERY = `A delegated run reported needs_attention and the previous response did not inspect or control it. Act now instead of narrating passive waiting. Use the subagent status/transcript controls for the exact run. If it remains alive without an active tool or new output, steer it once to return its result or blocker immediately. If intervention cannot be delivered, stop it and preserve useful transcript findings for one fresh, smaller replacement. Do not leave it marked running indefinitely and do not launch a competing writer.`;
 
 function visibleText(content: unknown): string {
@@ -139,6 +139,22 @@ function delegatedSpecs(value: unknown): DelegatedSpec[] {
   };
   visit(value);
   return specs;
+}
+
+const PER_DISPATCH_BUDGET_FIELDS = ["timeoutMs", "maxRuntimeMs", "turnBudget", "toolBudget", "usageBudget"] as const;
+
+function stripPerDispatchBudgets(value: unknown): void {
+  const visit = (candidate: unknown) => {
+    const record = asRecord(candidate);
+    if (!record) return;
+    for (const field of PER_DISPATCH_BUDGET_FIELDS) delete record[field];
+    for (const key of ["tasks", "chain", "parallel"] as const) {
+      const nested = record[key];
+      if (Array.isArray(nested)) nested.forEach(visit);
+      else if (nested !== undefined) visit(nested);
+    }
+  };
+  visit(value);
 }
 
 function hasBoundedChunkContract(task: string): boolean {
@@ -350,6 +366,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     const isDelegation = specs.length > 0;
 
     if (isDelegation && !isManagementAction) {
+      stripPerDispatchBudgets(input);
       if (!rosterInspected) {
         return {
           block: true,
@@ -422,10 +439,6 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           level: "none",
           reason: "LemonPi makes Main Pi the integration owner unless explicit runtime verify commands are supplied.",
         };
-      }
-      if (writers.length === 0) {
-        if (input.turnBudget === undefined) input.turnBudget = { maxTurns: 8, graceTurns: 2 };
-        if (input.toolBudget === undefined) input.toolBudget = { soft: 10, hard: 16 };
       }
     }
 

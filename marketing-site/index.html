@@ -1,0 +1,822 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#08090A" />
+    <meta
+      name="description"
+      content="LemonPi is a native desktop workspace for the Pi coding agent: a real pi --mode rpc process, a live subagent Command center, main-agent narration, and session context and cost stats, built with Tauri v2, React, and Rust."
+    />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="alternate icon" href="/lemonpi-mark.png" type="image/png" />
+    <title>LemonPi — A native desktop workspace for the Pi coding agent</title>
+
+    <!--
+      og:url, <link rel="canonical">, and an absolute og:image URL are all
+      deliberately omitted: no canonical domain is confirmed for this site yet.
+      Inventing one here would produce a broken/misleading social preview.
+      og.png itself exists at /og.png (1200×630) so these tags are easy to
+      complete later — see marketing-site/README.md "Favicon and OG status".
+    -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="LemonPi" />
+    <meta property="og:title" content="LemonPi — A native desktop workspace for the Pi coding agent" />
+    <meta
+      property="og:description"
+      content="A real pi --mode rpc process, a live subagent Command center, main-agent narration, and session context and cost stats — in a native desktop workspace."
+    />
+    <!-- summary, not summary_large_image: no valid absolute twitter:image exists
+         yet (no canonical domain), so don't promise a large-image card layout. -->
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="LemonPi — A native desktop workspace for the Pi coding agent" />
+    <meta
+      name="twitter:description"
+      content="A real pi --mode rpc process, a live subagent Command center, main-agent narration, and session context and cost stats — in a native desktop workspace."
+    />
+    <script type="module" src="/src/main.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to main content</a>
+    <div data-header-sentinel aria-hidden="true"></div>
+
+    <header class="site-header" data-header>
+      <a class="brand" href="/">
+        <img class="brand__mark" src="/lemonpi-mark.png" alt="" width="32" height="32" />
+        <span class="brand__text">LemonPi</span>
+      </a>
+
+      <nav class="site-nav" aria-label="Main">
+        <a href="#how-it-works">How it works</a>
+        <a href="#inside">Inside</a>
+        <a href="#trust">Trust</a>
+        <a href="#get-started">Get started</a>
+      </nav>
+
+      <a
+        class="btn btn--lemon site-header__cta"
+        href="https://github.com/GnosysLabs/LemonPi/releases"
+        target="_blank"
+        rel="noreferrer"
+      >
+        View releases
+        <span class="btn__icon" aria-hidden="true">↗</span>
+      </a>
+
+      <button
+        class="hamburger"
+        type="button"
+        data-nav-toggle
+        aria-expanded="false"
+        aria-controls="nav-overlay"
+        aria-label="Open menu"
+      >
+        <span class="hamburger__bars" aria-hidden="true">
+          <span class="hamburger__bar"></span>
+          <span class="hamburger__bar"></span>
+        </span>
+      </button>
+    </header>
+
+    <main id="main">
+      <section class="hero" aria-label="Introduction">
+        <div class="hero__inner">
+          <div class="hero__copy">
+            <p class="eyebrow eyebrow--pill">
+              <span class="eyebrow__dot" aria-hidden="true"></span>
+              Native desktop workspace for Pi
+            </p>
+            <h1>
+              Watch your<br />
+              <span class="hero__gradient">agents think.</span><br />
+              Stay in control.
+            </h1>
+            <p class="hero__lead">
+              LemonPi runs the real <code>pi --mode rpc</code> process on your machine and gives
+              it a native workspace: a live Command center for every subagent, running narration
+              of the main agent's work, and session context and cost stats as you go.
+            </p>
+            <div class="hero__actions">
+              <a
+                class="btn btn--lemon"
+                href="https://github.com/GnosysLabs/LemonPi/releases"
+                target="_blank"
+                rel="noreferrer"
+              >
+                View releases
+                <span class="btn__icon" aria-hidden="true">↗</span>
+              </a>
+              <a
+                class="btn btn--ghost"
+                href="https://github.com/GnosysLabs/LemonPi"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Read the source
+                <span class="btn__icon" aria-hidden="true">↗</span>
+              </a>
+            </div>
+            <p class="hero__status">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span>Early build</span>
+              <span aria-hidden="true">·</span>
+              <span>macOS &amp; Windows release target</span>
+              <span aria-hidden="true">·</span>
+              <span>Requires Pi on your machine</span>
+            </p>
+          </div>
+
+          <div class="hero__cascade" data-reveal-group>
+            <article
+              id="command-center"
+              class="product-card product-card--a bezel"
+              data-reveal
+              tabindex="-1"
+              style="--reveal-index: 0"
+            >
+              <div class="bezel__core product-card__core">
+                <p class="product-card__label">Command center</p>
+                <p class="product-card__title">research-worker</p>
+                <div class="product-card__row">
+                  <span>Task</span>
+                  <strong>Audit the auth flow</strong>
+                </div>
+                <div class="product-card__row">
+                  <span>Model · effort</span>
+                  <strong>high</strong>
+                </div>
+                <div class="product-card__row">
+                  <span>Elapsed</span>
+                  <strong>02:14</strong>
+                </div>
+                <div class="product-card__row">
+                  <span>Tokens</span>
+                  <strong>18.2k</strong>
+                </div>
+                <div class="product-card__row">
+                  <span>Current tool</span>
+                  <strong>rg — searching src/</strong>
+                </div>
+                <div class="product-card__chips" aria-hidden="true">
+                  <span class="product-card__chip">Steer</span>
+                  <span class="product-card__chip">Stop</span>
+                </div>
+              </div>
+            </article>
+
+            <article class="product-card product-card--b bezel" data-reveal style="--reveal-index: 1">
+              <div class="bezel__core product-card__core">
+                <p class="product-card__label">Main agent</p>
+                <p class="product-card__title">Reading src/lib/pi-client.ts</p>
+                <div class="product-card__stream">
+                  <span class="product-card__cursor">
+                    <strong>reasoning:</strong> checking the rpc handshake before touching the
+                    trust decision
+                  </span>
+                </div>
+                <div class="product-card__row">
+                  <span>Role</span>
+                  <strong>Supervisor, read-only</strong>
+                </div>
+              </div>
+            </article>
+
+            <article class="product-card product-card--c bezel" data-reveal style="--reveal-index: 2">
+              <div class="bezel__core product-card__core">
+                <p class="product-card__label">Session</p>
+                <div class="product-card__stat-row">
+                  <span class="product-card__ring" role="img" aria-label="62 percent of context used"></span>
+                  <span class="product-card__stat-copy">
+                    <strong>62% context</strong>
+                    <span>$0.42 this session</span>
+                  </span>
+                </div>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <div class="marquee" aria-hidden="true">
+        <div class="marquee__track">
+          <div class="marquee__set">
+            <span>REAL <b>pi --mode rpc</b></span>
+            <span aria-hidden="true">◆</span>
+            <span>LIVE SUBAGENT COMMAND CENTER</span>
+            <span aria-hidden="true">◆</span>
+            <span>TRUST BEFORE OPEN</span>
+            <span aria-hidden="true">◆</span>
+            <span>YOUR PI, YOUR SETTINGS</span>
+            <span aria-hidden="true">◆</span>
+            <span>SIGNED UPDATES</span>
+            <span aria-hidden="true">◆</span>
+            <span>NO REIMPLEMENTATION</span>
+            <span aria-hidden="true">◆</span>
+          </div>
+          <div class="marquee__set">
+            <span>REAL <b>pi --mode rpc</b></span>
+            <span aria-hidden="true">◆</span>
+            <span>LIVE SUBAGENT COMMAND CENTER</span>
+            <span aria-hidden="true">◆</span>
+            <span>TRUST BEFORE OPEN</span>
+            <span aria-hidden="true">◆</span>
+            <span>YOUR PI, YOUR SETTINGS</span>
+            <span aria-hidden="true">◆</span>
+            <span>SIGNED UPDATES</span>
+            <span aria-hidden="true">◆</span>
+            <span>NO REIMPLEMENTATION</span>
+            <span aria-hidden="true">◆</span>
+          </div>
+        </div>
+      </div>
+
+      <section
+        class="section section--night manifesto"
+        id="how-it-works"
+        tabindex="-1"
+        aria-labelledby="how-it-works-heading"
+      >
+        <div class="section__inner manifesto__grid">
+          <div class="manifesto__heading" data-reveal style="--reveal-index: 0">
+            <p class="eyebrow">THE POINT / 01</p>
+            <h2 id="how-it-works-heading">
+              LemonPi doesn't <span class="text-gradient">reimplement</span> Pi.
+            </h2>
+          </div>
+          <div class="manifesto__copy" data-reveal style="--reveal-index: 1">
+            <p class="manifesto__lead">
+              It intentionally uses Pi's subprocess RPC boundary instead of reimplementing Pi.
+            </p>
+            <p>
+              This preserves your existing authentication, models, settings, skills, extensions,
+              and session files. Nothing about how Pi works underneath changes — LemonPi just
+              gives the real process a native home.
+            </p>
+            <blockquote class="manifesto__quote">
+              <p>Same Pi. Same auth. Same sessions.<br />Just a native window around the process.</p>
+            </blockquote>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section--void bento-section" id="inside" tabindex="-1" aria-labelledby="inside-heading">
+        <div class="section__inner">
+          <p class="eyebrow" data-reveal style="--reveal-index: 0">INSIDE THE APP / 02</p>
+          <h2 id="inside-heading" class="bento-section__heading" data-reveal style="--reveal-index: 1">
+            What the workspace actually gives you.
+          </h2>
+
+          <div class="bento">
+            <article class="cap-card cap-card--command bezel" data-reveal style="--reveal-index: 0">
+              <div class="bezel__core product-card__core">
+                <span class="cap-card__index">01</span>
+                <h3 class="product-card__title">Command center</h3>
+                <p class="cap-card__desc">
+                  Every active subagent gets a live panel: role, task, model, effort, elapsed
+                  time, token usage, and current tool — plus the output it's producing, direct
+                  steering, and a stop control.
+                </p>
+                <div class="product-card__row">
+                  <span>Role</span>
+                  <strong>docs-writer</strong>
+                </div>
+                <div class="product-card__row">
+                  <span>Task</span>
+                  <strong>Draft the changelog</strong>
+                </div>
+                <div class="product-card__row">
+                  <span>Tool</span>
+                  <strong>write_file — CHANGELOG.md</strong>
+                </div>
+                <div class="product-card__chips" aria-hidden="true">
+                  <span class="product-card__chip">Steer</span>
+                  <span class="product-card__chip">Stop</span>
+                  <span class="product-card__chip">Output ↴</span>
+                </div>
+              </div>
+            </article>
+
+            <article class="cap-card cap-card--narration bezel" data-reveal style="--reveal-index: 1">
+              <div class="bezel__core product-card__core">
+                <span class="cap-card__index">02</span>
+                <h3 class="product-card__title">Watch the main agent think</h3>
+                <p class="cap-card__desc">
+                  Main Pi narrates its current actions, auto-expands the tools it's running, and
+                  streams provider-surfaced reasoning token by token as it arrives.
+                </p>
+                <div class="product-card__stream">
+                  <span class="product-card__cursor">
+                    <strong>reasoning:</strong> weighing whether this touches src-tauri directly
+                    or should hand off to a worker
+                  </span>
+                </div>
+                <div class="product-card__row">
+                  <span>Role</span>
+                  <strong>Supervisor, read-only</strong>
+                </div>
+                <div class="product-card__row">
+                  <span>Chunk</span>
+                  <strong>3 of 5 · checkpoint pending</strong>
+                </div>
+                <p class="cap-card__note">
+                  Main Pi never edits directly. Broad implementation work runs as bounded,
+                  sequential worker chunks, with an inspection checkpoint after each one.
+                </p>
+              </div>
+            </article>
+
+            <article class="cap-card cap-card--sessions bezel" data-reveal style="--reveal-index: 2">
+              <div class="bezel__core product-card__core">
+                <span class="cap-card__index">03</span>
+                <h3 class="product-card__title">Pick up where you left off</h3>
+                <p class="cap-card__desc">
+                  LemonPi lists the saved Pi sessions for your active project and reopens them
+                  through Pi's own <code>switch_session</code> — nothing is copied or migrated.
+                </p>
+                <ul class="cap-card__sessions" aria-hidden="true">
+                  <li><span class="cap-card__dot"></span>Audit the auth flow <small>2h ago</small></li>
+                  <li><span class="cap-card__dot"></span>Draft the changelog <small>yesterday</small></li>
+                  <li><span class="cap-card__dot"></span>Fix updater signing <small>3d ago</small></li>
+                </ul>
+                <p class="cap-card__note">
+                  Recent projects, their trust choices, and your last active workspace are
+                  remembered across launches.
+                </p>
+              </div>
+            </article>
+
+            <article class="cap-card cap-card--settings bezel" data-reveal style="--reveal-index: 3">
+              <div class="bezel__core product-card__core">
+                <span class="cap-card__index">04</span>
+                <h3 class="product-card__title">Settings and packages, natively</h3>
+                <p class="cap-card__desc">
+                  Pi's user and project settings get a categorized native GUI, with a raw JSON
+                  escape hatch for anything new or extension-defined.
+                </p>
+                <div class="cap-card__tabs" aria-hidden="true">
+                  <span class="cap-card__tab cap-card__tab--active">General</span>
+                  <span class="cap-card__tab">Models</span>
+                  <span class="cap-card__tab">JSON</span>
+                </div>
+                <div class="product-card__row">
+                  <span>Package</span>
+                  <strong>npm:pi-subagents</strong>
+                </div>
+                <div class="product-card__row">
+                  <span>Status</span>
+                  <strong>Installed · required core</strong>
+                </div>
+                <p class="cap-card__note">
+                  User and project packages install, update, list, and remove through Pi's own
+                  package manager. <code>npm:pi-subagents</code> is treated as a required core
+                  package and installed automatically when it's missing.
+                </p>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section--night capability-index" aria-labelledby="capability-index-heading">
+        <div class="section__inner">
+          <p class="eyebrow" data-reveal style="--reveal-index: 0">WHAT IT ACTUALLY DOES</p>
+          <h2
+            id="capability-index-heading"
+            class="capability-index__heading"
+            data-reveal
+            style="--reveal-index: 1"
+          >
+            Every stream, every control.
+          </h2>
+          <ul class="capability-index__list" data-reveal style="--reveal-index: 2">
+            <li class="capability-index__row" tabindex="0">
+              <span class="capability-index__inner">
+                <span class="capability-index__index">01</span>
+                <span class="capability-index__label">Streams assistant text</span>
+              </span>
+            </li>
+            <li class="capability-index__row" tabindex="0">
+              <span class="capability-index__inner">
+                <span class="capability-index__index">02</span>
+                <span class="capability-index__label">Streams thinking</span>
+              </span>
+            </li>
+            <li class="capability-index__row" tabindex="0">
+              <span class="capability-index__inner">
+                <span class="capability-index__index">03</span>
+                <span class="capability-index__label">Streams tool calls and tool output</span>
+              </span>
+            </li>
+            <li class="capability-index__row" tabindex="0">
+              <span class="capability-index__inner">
+                <span class="capability-index__index">04</span>
+                <span class="capability-index__label">Streams queues and lifecycle events</span>
+              </span>
+            </li>
+            <li class="capability-index__row" tabindex="0">
+              <span class="capability-index__inner">
+                <span class="capability-index__index">05</span>
+                <span class="capability-index__label">Prompt, steer, follow-up, and abort</span>
+              </span>
+            </li>
+            <li class="capability-index__row" tabindex="0">
+              <span class="capability-index__inner">
+                <span class="capability-index__index">06</span>
+                <span class="capability-index__label">Cycles models</span>
+              </span>
+            </li>
+            <li class="capability-index__row" tabindex="0">
+              <span class="capability-index__inner">
+                <span class="capability-index__index">07</span>
+                <span class="capability-index__label">Cycles thinking level</span>
+              </span>
+            </li>
+            <li class="capability-index__row" tabindex="0">
+              <span class="capability-index__inner">
+                <span class="capability-index__index">08</span>
+                <span class="capability-index__label">Handles Pi extension dialogs and notifications</span>
+              </span>
+            </li>
+            <li class="capability-index__row" tabindex="0">
+              <span class="capability-index__inner">
+                <span class="capability-index__index">09</span>
+                <span class="capability-index__label">Shows session context and cost stats</span>
+              </span>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <section
+        class="section section--void architecture"
+        id="architecture"
+        tabindex="-1"
+        aria-labelledby="architecture-heading"
+      >
+        <div class="section__inner architecture__inner">
+          <p class="eyebrow" data-reveal style="--reveal-index: 0">THE BORING TECH BIT / 03</p>
+          <h2 id="architecture-heading" data-reveal style="--reveal-index: 1">
+            How the pieces actually talk.
+          </h2>
+          <p class="architecture__lead" data-reveal style="--reveal-index: 2">
+            No terminal scraping. No reimplementation. Just a supervised process boundary, end to
+            end.
+          </p>
+
+          <div class="bezel architecture__panel" data-reveal style="--reveal-index: 3">
+            <div class="bezel__core architecture__core">
+              <ol class="architecture__stack">
+                <li class="architecture__layer">React UI</li>
+                <li class="architecture__link">↕ <span>Tauri commands/events</span></li>
+                <li class="architecture__layer">Rust process supervisor</li>
+                <li class="architecture__link">↕ <span>strict LF-delimited JSONL over stdin/stdout</span></li>
+                <li class="architecture__layer"><code>pi --mode rpc</code></li>
+              </ol>
+            </div>
+          </div>
+
+          <p class="architecture__note" data-reveal style="--reveal-index: 4">
+            LemonPi verifies the required <code>npm:pi-subagents</code> package before launching
+            Pi and reads its machine-readable lifecycle artifacts for live observability —
+            terminal rendering is never scraped.
+          </p>
+
+          <a
+            class="btn btn--ghost architecture__source"
+            href="https://github.com/GnosysLabs/LemonPi"
+            target="_blank"
+            rel="noreferrer"
+            data-reveal
+            style="--reveal-index: 5"
+          >
+            Read the source
+            <span class="btn__icon" aria-hidden="true">↗</span>
+          </a>
+        </div>
+      </section>
+
+      <section class="section section--night trust" id="trust" tabindex="-1" aria-labelledby="trust-heading">
+        <div class="section__inner trust__intro-grid">
+          <p class="eyebrow" data-reveal style="--reveal-index: 0">TRUST / 04</p>
+          <div data-reveal style="--reveal-index: 1">
+            <h2 id="trust-heading" class="trust__heading">You choose how much Pi gets to touch.</h2>
+            <p class="trust__lead">
+              LemonPi never silently approves project-local Pi resources. Opening a project
+              always means choosing one of two paths first.
+            </p>
+          </div>
+        </div>
+
+        <div class="section__inner trust__cards">
+          <article class="bezel trust__card trust__card--approve" data-reveal style="--reveal-index: 0">
+            <div class="bezel__core trust__card-core">
+              <p class="trust__card-flag">Trust and open</p>
+              <p class="trust__card-desc">
+                Launches Pi with <code>--approve</code>, using the project's own Pi settings,
+                extensions, skills, and packages.
+              </p>
+              <div class="product-card__row">
+                <span>Flag</span>
+                <strong><code>--approve</code></strong>
+              </div>
+            </div>
+          </article>
+
+          <article class="bezel trust__card trust__card--safe" data-reveal style="--reveal-index: 1">
+            <div class="bezel__core trust__card-core">
+              <p class="trust__card-flag">Open safely</p>
+              <p class="trust__card-desc">
+                Launches Pi with <code>--no-approve</code>, ignoring project-local Pi settings,
+                extensions, skills, and packages.
+              </p>
+              <div class="product-card__row">
+                <span>Flag</span>
+                <strong><code>--no-approve</code></strong>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <div class="section__inner">
+          <div class="bezel trust__disclaimer" data-reveal style="--reveal-index: 2">
+            <div class="bezel__core trust__disclaimer-core">
+              <p class="trust__disclaimer-label">Read this part</p>
+              <p class="trust__disclaimer-text">
+                Pi and its extensions still execute with the user's operating-system permissions.
+                LemonPi is a UI and process boundary, not a sandbox.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section--void requirements" aria-labelledby="requirements-heading">
+        <div class="section__inner requirements__inner">
+          <p class="eyebrow" data-reveal style="--reveal-index: 0">REQUIREMENTS</p>
+          <h2
+            id="requirements-heading"
+            class="requirements__heading"
+            data-reveal
+            style="--reveal-index: 1"
+          >
+            What you need on your machine.
+          </h2>
+
+          <div class="requirements__row" data-reveal style="--reveal-index: 2">
+            <div class="requirements__item">
+              <p class="requirements__label">App platforms</p>
+              <p class="requirements__value">macOS, Windows, and Linux</p>
+            </div>
+            <div class="requirements__item">
+              <p class="requirements__label">Pi</p>
+              <p class="requirements__value">
+                On <code>PATH</code>, in a common install location, or set via
+                <code>LEMONPI_PI_PATH</code>
+              </p>
+            </div>
+            <div class="requirements__item">
+              <p class="requirements__label">First launch</p>
+              <p class="requirements__value">
+                Internet access only if Pi hasn't already installed
+                <code>npm:pi-subagents</code>
+              </p>
+            </div>
+          </div>
+
+          <p class="requirements__note" data-reveal style="--reveal-index: 3">
+            The app itself targets macOS, Windows, and Linux. The planned first release targets
+            Apple Silicon macOS and Windows x64 only — see Get started.
+          </p>
+        </div>
+      </section>
+
+      <section
+        class="section section--night get-started"
+        id="get-started"
+        tabindex="-1"
+        aria-labelledby="get-started-heading"
+      >
+        <div class="section__inner get-started__inner">
+          <p class="eyebrow eyebrow--pill" data-reveal style="--reveal-index: 0">
+            <span class="eyebrow__dot" aria-hidden="true"></span>
+            GET IN / 05
+          </p>
+          <h2 id="get-started-heading" class="get-started__heading" data-reveal style="--reveal-index: 1">
+            Get in before <span class="text-gradient">everyone else.</span>
+          </h2>
+          <p class="get-started__lead" data-reveal style="--reveal-index: 2">
+            LemonPi is an early build. It requires Pi on your machine, and this site doesn't
+            claim a public release yet — check the releases page for the current status or build
+            it yourself.
+          </p>
+
+          <div class="get-started__grid">
+            <article class="bezel get-started__card" data-reveal style="--reveal-index: 0">
+              <div class="bezel__core get-started__card-core">
+                <p class="get-started__card-label">macOS · Apple Silicon</p>
+                <p class="get-started__card-title">First release target</p>
+                <p class="get-started__card-desc">
+                  The planned first release targets Apple Silicon macOS.
+                </p>
+                <a
+                  class="btn btn--ghost get-started__card-cta"
+                  href="https://github.com/GnosysLabs/LemonPi/releases"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  View releases
+                  <span class="btn__icon" aria-hidden="true">↗</span>
+                </a>
+              </div>
+            </article>
+
+            <article class="bezel get-started__card" data-reveal style="--reveal-index: 1">
+              <div class="bezel__core get-started__card-core">
+                <p class="get-started__card-label">Windows · x64</p>
+                <p class="get-started__card-title">First release target</p>
+                <p class="get-started__card-desc">
+                  The planned installer will be updater-signed, but may still show as unrecognized
+                  to SmartScreen.
+                </p>
+                <button
+                  class="btn btn--ghost get-started__card-cta"
+                  type="button"
+                  data-windows-open
+                  aria-haspopup="dialog"
+                >
+                  About the SmartScreen warning
+                  <span class="btn__icon" aria-hidden="true">i</span>
+                </button>
+                <a
+                  class="link-underline get-started__card-link"
+                  href="https://github.com/GnosysLabs/LemonPi/releases"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  View releases ↗
+                </a>
+              </div>
+            </article>
+
+            <article class="bezel get-started__card" data-reveal style="--reveal-index: 2">
+              <div class="bezel__core get-started__card-core">
+                <p class="get-started__card-label">macOS · Windows · Linux</p>
+                <p class="get-started__card-title">Build from source</p>
+                <p class="get-started__card-desc">Clone the repo and run it with Tauri's dev server.</p>
+                <pre class="get-started__card-code"><code>pnpm install
+pnpm tauri dev</code></pre>
+                <a
+                  class="link-underline get-started__card-link"
+                  href="https://github.com/GnosysLabs/LemonPi"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Read the source ↗
+                </a>
+              </div>
+            </article>
+          </div>
+
+          <p class="get-started__note" data-reveal style="--reveal-index: 3">
+            LemonPi is early. It needs Pi installed on your machine, and no public release is
+            currently claimed by this site.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="site-footer__top">
+        <div class="site-footer__brand">
+          <a class="brand" href="/">
+            <img class="brand__mark" src="/lemonpi-mark.png" alt="" width="32" height="32" />
+            <span class="brand__text">LemonPi</span>
+          </a>
+          <p class="site-footer__tagline">
+            A native desktop workspace for the Pi coding agent. Runs the real
+            <code>pi --mode rpc</code> process — never a reimplementation.
+          </p>
+        </div>
+
+        <div class="site-footer__col">
+          <h3>Product</h3>
+          <ul>
+            <li><a href="#how-it-works">How it works</a></li>
+            <li><a href="#inside">Inside the app</a></li>
+            <li><a href="#architecture">Architecture</a></li>
+            <li><a href="#trust">Trust</a></li>
+            <li><a href="#get-started">Get started</a></li>
+          </ul>
+        </div>
+
+        <div class="site-footer__col">
+          <h3>Source</h3>
+          <ul>
+            <li><a href="https://github.com/GnosysLabs/LemonPi" target="_blank" rel="noreferrer">GitHub</a></li>
+            <li>
+              <a href="https://github.com/GnosysLabs/LemonPi/issues" target="_blank" rel="noreferrer">Issues</a>
+            </li>
+            <li>
+              <a href="https://github.com/GnosysLabs/LemonPi/releases" target="_blank" rel="noreferrer"
+                >Releases</a
+              >
+            </li>
+          </ul>
+        </div>
+
+        <div class="site-footer__col">
+          <h3>Pi</h3>
+          <ul>
+            <li><a href="https://pi.dev" target="_blank" rel="noreferrer">pi.dev</a></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="site-footer__bottom">
+        <span>© <span data-year></span> Gnosys Labs</span>
+        <span class="site-footer__built-for">
+          Built for
+          <img src="/lemonpi-pi-wordmark.png" alt="Pi" width="60" height="36" />
+        </span>
+      </div>
+    </footer>
+
+    <nav
+      class="nav-overlay"
+      id="nav-overlay"
+      data-nav-overlay
+      hidden
+      tabindex="-1"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Mobile navigation"
+    >
+      <div class="nav-overlay__links">
+        <a class="nav-overlay__link" href="#how-it-works" style="--i: 0">How it works</a>
+        <a class="nav-overlay__link" href="#inside" style="--i: 1">Inside</a>
+        <a class="nav-overlay__link" href="#architecture" style="--i: 2">Architecture</a>
+        <a class="nav-overlay__link" href="#trust" style="--i: 3">Trust</a>
+        <a class="nav-overlay__link" href="#get-started" style="--i: 4">Get started</a>
+        <a
+          class="nav-overlay__link"
+          href="https://github.com/GnosysLabs/LemonPi"
+          target="_blank"
+          rel="noreferrer"
+          style="--i: 5"
+          >Source ↗</a
+        >
+      </div>
+      <div class="nav-overlay__foot" style="--i: 6">
+        <a
+          class="btn btn--lemon"
+          href="https://github.com/GnosysLabs/LemonPi/releases"
+          target="_blank"
+          rel="noreferrer"
+        >
+          View releases
+          <span class="btn__icon" aria-hidden="true">↗</span>
+        </a>
+      </div>
+    </nav>
+
+    <div class="modal-backdrop" data-windows-modal hidden>
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="windows-modal-title"
+        aria-describedby="windows-modal-description"
+        tabindex="-1"
+      >
+        <div class="bezel modal__panel">
+          <div class="bezel__core modal__core">
+            <button class="modal__close" type="button" data-windows-close aria-label="Close dialog">
+              <span aria-hidden="true">×</span>
+            </button>
+            <p class="eyebrow">WINDOWS · SMARTSCREEN</p>
+            <h2 id="windows-modal-title">Windows might warn you. Here's why.</h2>
+            <p id="windows-modal-description" class="modal__desc">
+              The planned Windows installer will be updater-signed, but may remain Authenticode
+              <code>NotSigned</code> — so Microsoft SmartScreen may warn that it's unrecognized.
+            </p>
+            <ol class="modal__steps">
+              <li><span class="modal__step-index">01</span><span>Open the installer.</span></li>
+              <li><span class="modal__step-index">02</span><span>Click <strong>More info</strong>.</span></li>
+              <li><span class="modal__step-index">03</span><span>Click <strong>Run anyway</strong>.</span></li>
+            </ol>
+            <p class="modal__note">Managed work or school PCs may remove the "Run anyway" option.</p>
+            <a
+              class="btn btn--lemon modal__cta"
+              href="https://github.com/GnosysLabs/LemonPi/releases"
+              target="_blank"
+              rel="noreferrer"
+            >
+              View releases
+              <span class="btn__icon" aria-hidden="true">↗</span>
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
