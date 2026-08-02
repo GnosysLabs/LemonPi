@@ -11,10 +11,12 @@ version=$(node -e 'const fs=require("fs"); console.log(JSON.parse(fs.readFileSyn
 updater_key=${LEMONPI_UPDATER_KEY_PATH:-"$HOME/.tauri/lemonpi-updater.key"}
 local_assets="$repo_root/src-tauri/target/release/windows-assets"
 temporary_dir=$(mktemp -d /tmp/lemonpi-windows-release.XXXXXX)
+remote_stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 remote_script="C:/Users/cmcel/AppData/Local/Temp/lemonpi-release-windows-$short_revision.ps1"
 remote_script_uploaded=false
+remote_finalize_script="C:/Users/cmcel/AppData/Local/Temp/lemonpi-finalize-updater-key-$short_revision-$remote_stamp.ps1"
+remote_finalize_script_uploaded=false
 remote_key_temp=""
-remote_stamp=$(date -u +%Y%m%dT%H%M%SZ)
 expected_origin='https://github.com/GnosysLabs/LemonPi.git'
 
 fail() {
@@ -47,15 +49,27 @@ run_remote_build() {
     "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded"
 }
 
+is_safe_remote_cleanup_target() {
+  local target=${1:-}
+  [[ -n "$target" && "$target" != "/" && "$target" != $'\\' && ! "$target" =~ ^[A-Za-z]:[\\/]*$ ]]
+}
+
+remove_remote_file() {
+  local target=${1:-}
+  is_safe_remote_cleanup_target "$target" || return 1
+  run_remote "\$path = $(ps_quote "$target"); if (Test-Path -LiteralPath \$path) { Remove-Item -LiteralPath \$path -Force -ErrorAction Stop }"
+}
+
 cleanup() {
   rm -rf "$temporary_dir"
-  if [[ -n "$remote_key_temp" ]]; then
+  if is_safe_remote_cleanup_target "$remote_key_temp"; then
     run_remote "Remove-Item -LiteralPath $(ps_quote "$remote_key_temp") -Recurse -Force -ErrorAction SilentlyContinue" >/dev/null 2>&1 || true
   fi
-  if [[ "$remote_script_uploaded" == true ]]; then
-    ssh -n -o BatchMode=yes "$windows_host" \
-      "powershell -NoProfile -NonInteractive -Command \"Remove-Item -LiteralPath '$remote_script' -Force -ErrorAction SilentlyContinue\"" \
-      >/dev/null 2>&1 || true
+  if [[ "$remote_finalize_script_uploaded" == true ]] && is_safe_remote_cleanup_target "$remote_finalize_script"; then
+    remove_remote_file "$remote_finalize_script" >/dev/null 2>&1 || true
+  fi
+  if [[ "$remote_script_uploaded" == true ]] && is_safe_remote_cleanup_target "$remote_script"; then
+    remove_remote_file "$remote_script" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -128,64 +142,72 @@ case "$key_status" in
     ;;
   missing)
     remote_key_temp=$(printf '%s\n' "$key_probe" | sed -n 's/^TEMP_DIRECTORY=//p' | head -1)
-    [[ -n "$remote_key_temp" ]] || fail "Windows key provisioning did not return a temporary path."
+    is_safe_remote_cleanup_target "$remote_key_temp" || fail "Windows key provisioning returned an unsafe temporary path."
     remote_private_temp="$remote_key_temp/lemonpi-updater.key"
     remote_public_temp="$remote_key_temp/lemonpi-updater.key.pub"
     remote_private_scp=${remote_private_temp//\\//}
     remote_public_scp=${remote_public_temp//\\//}
     scp -q "$updater_key" "$windows_host:$remote_private_scp"
     scp -q "$updater_key.pub" "$windows_host:$remote_public_scp"
-    finalize_key_command=$(cat <<PS
-\$temporary = $(ps_quote "$remote_key_temp")
-\$expectedHash = $(ps_quote "$expected_public_hash")
-\$keyDirectory = Join-Path \$env:USERPROFILE ".tauri"
-\$keyPath = Join-Path \$keyDirectory "lemonpi-updater.key"
-\$publicPath = "\$keyPath.pub"
-\$temporaryKey = Join-Path \$temporary "lemonpi-updater.key"
-\$temporaryPublic = "\$temporaryKey.pub"
-function Set-And-TestPrivateKeyAcl([string]\$path) {
-  \$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-  if (\$null -eq \$sid) { throw "Current Windows identity has no SID" }
-  \$acl = Get-Acl -LiteralPath \$path
-  \$acl.SetAccessRuleProtection(\$true, \$false)
-  foreach (\$rule in @(\$acl.Access)) { [void]\$acl.RemoveAccessRuleAll(\$rule) }
-  \$fullControl = [System.Security.AccessControl.FileSystemRights]::FullControl
-  \$allow = [System.Security.AccessControl.AccessControlType]::Allow
-  \$acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(\$sid, \$fullControl, \$allow)))
-  Set-Acl -LiteralPath \$path -AclObject \$acl
-  \$verified = Get-Acl -LiteralPath \$path
-  \$rules = @(\$verified.Access | Where-Object { \$_.AccessControlType -eq \$allow })
-  \$verifiedSid = \$rules[0].IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
-  return \$verified.AreAccessRulesProtected -and \$rules.Count -eq 1 -and \$verifiedSid.Value -eq \$sid.Value -and ((\$rules[0].FileSystemRights -band \$fullControl) -eq \$fullControl)
+    finalize_key_script="$temporary_dir/finalize-updater-key.ps1"
+    cat > "$finalize_key_script" <<'PS'
+param(
+  [Parameter(Mandatory = $true)]
+  [string]$Temporary,
+  [Parameter(Mandatory = $true)]
+  [string]$ExpectedHash
+)
+
+$keyDirectory = Join-Path $env:USERPROFILE ".tauri"
+$keyPath = Join-Path $keyDirectory "lemonpi-updater.key"
+$publicPath = "$keyPath.pub"
+$temporaryKey = Join-Path $Temporary "lemonpi-updater.key"
+$temporaryPublic = "$temporaryKey.pub"
+function Set-And-TestPrivateKeyAcl([string]$path) {
+  $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+  if ($null -eq $sid) { throw "Current Windows identity has no SID" }
+  $acl = Get-Acl -LiteralPath $path
+  $acl.SetAccessRuleProtection($true, $false)
+  foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRuleAll($rule) }
+  $fullControl = [System.Security.AccessControl.FileSystemRights]::FullControl
+  $allow = [System.Security.AccessControl.AccessControlType]::Allow
+  $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, $fullControl, $allow)))
+  Set-Acl -LiteralPath $path -AclObject $acl
+  $verified = Get-Acl -LiteralPath $path
+  $rules = @($verified.Access | Where-Object { $_.AccessControlType -eq $allow })
+  $verifiedSid = $rules[0].IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+  return $verified.AreAccessRulesProtected -and $rules.Count -eq 1 -and $verifiedSid.Value -eq $sid.Value -and (($rules[0].FileSystemRights -band $fullControl) -eq $fullControl)
 }
-if ((Test-Path -LiteralPath \$keyPath) -or (Test-Path -LiteralPath \$publicPath)) { throw "Windows updater key appeared during provisioning; refusing to overwrite it" }
-if (-not (Test-Path -LiteralPath \$temporaryKey -PathType Leaf) -or -not (Test-Path -LiteralPath \$temporaryPublic -PathType Leaf)) { throw "Transferred updater key files are incomplete" }
-\$publicText = (Get-Content -LiteralPath \$temporaryPublic -Raw).Trim()
-\$bytes = [Text.Encoding]::UTF8.GetBytes(\$publicText)
-\$actualHash = ([Security.Cryptography.SHA256]::Create().ComputeHash(\$bytes) | ForEach-Object ToString x2) -join ""
-if (\$actualHash -ne \$expectedHash) { throw "Transferred updater public key does not match the approved key" }
-\$privateMoved = \$false
-\$publicMoved = \$false
+if ((Test-Path -LiteralPath $keyPath) -or (Test-Path -LiteralPath $publicPath)) { throw "Windows updater key appeared during provisioning; refusing to overwrite it" }
+if (-not (Test-Path -LiteralPath $temporaryKey -PathType Leaf) -or -not (Test-Path -LiteralPath $temporaryPublic -PathType Leaf)) { throw "Transferred updater key files are incomplete" }
+$publicText = (Get-Content -LiteralPath $temporaryPublic -Raw).Trim()
+$bytes = [Text.Encoding]::UTF8.GetBytes($publicText)
+$actualHash = ([Security.Cryptography.SHA256]::Create().ComputeHash($bytes) | ForEach-Object ToString x2) -join ""
+if ($actualHash -ne $ExpectedHash) { throw "Transferred updater public key does not match the approved key" }
+$privateMoved = $false
+$publicMoved = $false
 try {
-  if (-not (Set-And-TestPrivateKeyAcl \$temporaryKey)) { throw "Could not restrict and verify the Windows updater key ACL" }
-  New-Item -ItemType Directory -Force -Path \$keyDirectory | Out-Null
-  Move-Item -LiteralPath \$temporaryKey -Destination \$keyPath
-  \$privateMoved = \$true
-  Move-Item -LiteralPath \$temporaryPublic -Destination \$publicPath
-  \$publicMoved = \$true
-  if (-not (Set-And-TestPrivateKeyAcl \$keyPath)) { throw "Final Windows updater key ACL verification failed" }
+  if (-not (Set-And-TestPrivateKeyAcl $temporaryKey)) { throw "Could not restrict and verify the Windows updater key ACL" }
+  New-Item -ItemType Directory -Force -Path $keyDirectory | Out-Null
+  Move-Item -LiteralPath $temporaryKey -Destination $keyPath
+  $privateMoved = $true
+  Move-Item -LiteralPath $temporaryPublic -Destination $publicPath
+  $publicMoved = $true
+  if (-not (Set-And-TestPrivateKeyAcl $keyPath)) { throw "Final Windows updater key ACL verification failed" }
 } catch {
-  if (\$privateMoved) { Remove-Item -LiteralPath \$keyPath -Force -ErrorAction SilentlyContinue }
-  if (\$publicMoved) { Remove-Item -LiteralPath \$publicPath -Force -ErrorAction SilentlyContinue }
+  if ($privateMoved) { Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue }
+  if ($publicMoved) { Remove-Item -LiteralPath $publicPath -Force -ErrorAction SilentlyContinue }
   throw
 } finally {
-  Remove-Item -LiteralPath \$temporary -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $Temporary -Recurse -Force -ErrorAction SilentlyContinue
 }
 Write-Output "WINDOWS_UPDATER_KEY_PROVISIONED"
 PS
-)
-    finalize_result=$(run_remote "$finalize_key_command" | tr -d '\r')
+    remote_finalize_script_uploaded=true
+    scp -q "$finalize_key_script" "$windows_host:$remote_finalize_script"
+    finalize_result=$(run_remote "& $(ps_quote "$remote_finalize_script") -Temporary $(ps_quote "$remote_key_temp") -ExpectedHash $(ps_quote "$expected_public_hash")" | tr -d '\r')
     printf '%s\n' "$finalize_result" | grep -Fx 'WINDOWS_UPDATER_KEY_PROVISIONED' >/dev/null || fail "Windows updater key provisioning did not complete."
+    remove_remote_file "$remote_finalize_script" >/dev/null
     remote_key_temp=""
     ;;
   *) fail "Windows key probe returned an invalid status." ;;
