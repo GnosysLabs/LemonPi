@@ -58,7 +58,7 @@ printf 'lemonpi updater signing preflight\n' > "$preflight_file"
   unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
   export TAURI_SIGNING_PRIVATE_KEY_PATH="$updater_key"
   trap 'unset TAURI_SIGNING_PRIVATE_KEY_PATH' EXIT
-  pnpm --dir "$repo_root" tauri signer sign "$preflight_file" >/dev/null
+  pnpm --dir "$repo_root" tauri signer sign --password "" "$preflight_file" >/dev/null
 )
 [[ -s "$preflight_file.sig" ]] || fail "Updater signing preflight did not produce a signature."
 
@@ -71,7 +71,7 @@ mkdir -p "$assets_dir"
   export APPLE_SIGNING_IDENTITY="$identity"
   export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4}
   export CARGO_PROFILE_RELEASE_STRIP=${CARGO_PROFILE_RELEASE_STRIP:-false}
-  pnpm --dir "$repo_root" tauri build --bundles app
+  pnpm --dir "$repo_root" tauri build --ci --bundles app
 )
 [[ -d "$app_bundle" ]] || fail "Tauri did not produce LemonPi.app."
 
@@ -88,7 +88,7 @@ COPYFILE_DISABLE=1 tar -C "$bundle_dir" -czf "$updater_archive" "LemonPi.app"
   unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
   export TAURI_SIGNING_PRIVATE_KEY_PATH="$updater_key"
   trap 'unset TAURI_SIGNING_PRIVATE_KEY_PATH' EXIT
-  pnpm --dir "$repo_root" tauri signer sign "$updater_archive" >/dev/null
+  pnpm --dir "$repo_root" tauri signer sign --password "" "$updater_archive" >/dev/null
 )
 [[ -s "$updater_archive.sig" ]] || fail "Updater archive signature is missing."
 

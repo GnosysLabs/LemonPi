@@ -126,7 +126,7 @@ jobs:
         with:
           releaseId: ${{ needs.prepare-release.outputs.release-id }}
           projectPath: .
-          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+          args: --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
           uploadUpdaterJson: false
           uploadUpdaterSignatures: true
           retryAttempts: 2

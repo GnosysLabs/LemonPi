@@ -10,19 +10,24 @@ function source(path) {
 const macos = source("scripts/release-macos.sh");
 const windows = source("scripts/release-windows.ps1");
 const remote = source("scripts/release-windows-remote.sh");
+const workflow = source(".github/workflows/release.yml");
 
 describe("release script contracts", () => {
   it("uses the signer path variable only for direct macOS signer commands", () => {
     assert.equal((macos.match(/export TAURI_SIGNING_PRIVATE_KEY_PATH="\$updater_key"/g) ?? []).length, 2);
     assert.equal((macos.match(/trap 'unset TAURI_SIGNING_PRIVATE_KEY_PATH' EXIT/g) ?? []).length, 2);
+    assert.equal((macos.match(/tauri signer sign --password ""/g) ?? []).length, 2);
     assert.match(macos, /unset TAURI_SIGNING_PRIVATE_KEY_PATH TAURI_SIGNING_PRIVATE_KEY_PASSWORD/);
     assert.match(macos, /export TAURI_SIGNING_PRIVATE_KEY="\$updater_key"/);
+    assert.match(macos, /tauri build --ci --bundles app/);
   });
 
   it("separates Windows preflight and build signer environments and preserves line-ending-only hygiene", () => {
     assert.match(windows, /\$env:TAURI_SIGNING_PRIVATE_KEY_PATH = \$UpdaterKeyPath/);
     assert.match(windows, /Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PATH -ErrorAction SilentlyContinue/);
     assert.match(windows, /\$env:TAURI_SIGNING_PRIVATE_KEY = \$UpdaterKeyPath/);
+    assert.match(windows, /"sign", "--password", "", \$preflightFile/);
+    assert.match(windows, /"build", "--ci", "--bundles", "nsis"/);
     assert.match(windows, /git -C \$worktree diff --quiet --ignore-space-at-eol/);
     assert.match(windows, /\$untrackedPaths = @\(\$worktreeStatus/);
   });
@@ -35,5 +40,9 @@ describe("release script contracts", () => {
     assert.match(remote, /if \(\\\$privateMoved\) \{ Remove-Item -LiteralPath \\\$keyPath/);
     assert.match(remote, /if \[\[ -e "\$local_assets" \]\]; then/);
     assert.ok(remote.indexOf('if [[ -e "$local_assets" ]]') < remote.indexOf("bootstrap_command="));
+  });
+
+  it("uses noninteractive Tauri build signing in the manual fallback workflow", () => {
+    assert.match(workflow, /args: --ci --target \$\{\{ matrix\.target \}\} --bundles \$\{\{ matrix\.bundles \}\}/);
   });
 });

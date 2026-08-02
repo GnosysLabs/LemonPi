@@ -126,7 +126,7 @@ try {
         # build-time private-key variable.
         $env:TAURI_SIGNING_PRIVATE_KEY_PATH = $UpdaterKeyPath
         Set-Content -LiteralPath $preflightFile -Value "lemonpi updater signing preflight" -NoNewline
-        Invoke-Checked pnpm -Arguments @("--dir", $worktree, "tauri", "signer", "sign", $preflightFile)
+        Invoke-Checked pnpm -Arguments @("--dir", $worktree, "tauri", "signer", "sign", "--password", "", $preflightFile)
         if (-not (Test-Path -LiteralPath "$preflightFile.sig" -PathType Leaf) -or (Get-Item -LiteralPath "$preflightFile.sig").Length -eq 0) {
             throw "Updater signing preflight did not produce a signature"
         }
@@ -141,7 +141,7 @@ try {
     # Tauri build supports a private-key path or contents in this variable; use
     # the protected path so PowerShell never reads or logs the key contents.
     $env:TAURI_SIGNING_PRIVATE_KEY = $UpdaterKeyPath
-    Invoke-Checked pnpm -Arguments @("--dir", $worktree, "tauri", "build", "--bundles", "nsis")
+    Invoke-Checked pnpm -Arguments @("--dir", $worktree, "tauri", "build", "--ci", "--bundles", "nsis")
 
     $installers = @(Get-ChildItem -LiteralPath $bundleDirectory -Filter "LemonPi_0.1.1_*-setup.exe" -File)
     if ($installers.Count -ne 1) {
