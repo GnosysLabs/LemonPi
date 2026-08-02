@@ -38,6 +38,10 @@ describe("release script contracts", () => {
     assert.match(remote, /run_remote_build\(\)/);
     assert.match(remote, /ServerAliveInterval=20 -o ServerAliveCountMax=30/);
     assert.match(remote, /Set-And-TestPrivateKeyAcl/);
+    assert.match(remote, /\[System\.Security\.Principal\.WindowsIdentity\]::GetCurrent\(\)\.User/);
+    assert.match(remote, /IdentityReference\.Translate\(\[System\.Security\.Principal\.SecurityIdentifier\]\)/);
+    assert.doesNotMatch(remote, /System\.Security\.Principal\.NTAccount/);
+    assert.doesNotMatch(remote, /\$env:USERDOMAIN/);
     assert.match(remote, /if \(\\\$privateMoved\) \{ Remove-Item -LiteralPath \\\$keyPath/);
     assert.match(remote, /if \[\[ -e "\$local_assets" \]\]; then/);
     assert.ok(remote.indexOf('if [[ -e "$local_assets" ]]') < remote.indexOf("bootstrap_command="));

@@ -144,17 +144,19 @@ case "$key_status" in
 \$temporaryKey = Join-Path \$temporary "lemonpi-updater.key"
 \$temporaryPublic = "\$temporaryKey.pub"
 function Set-And-TestPrivateKeyAcl([string]\$path) {
-  \$identity = New-Object System.Security.Principal.NTAccount("\$env:USERDOMAIN\\\$env:USERNAME")
+  \$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+  if (\$null -eq \$sid) { throw "Current Windows identity has no SID" }
   \$acl = Get-Acl -LiteralPath \$path
   \$acl.SetAccessRuleProtection(\$true, \$false)
   foreach (\$rule in @(\$acl.Access)) { [void]\$acl.RemoveAccessRuleAll(\$rule) }
   \$fullControl = [System.Security.AccessControl.FileSystemRights]::FullControl
   \$allow = [System.Security.AccessControl.AccessControlType]::Allow
-  \$acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(\$identity, \$fullControl, \$allow)))
+  \$acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(\$sid, \$fullControl, \$allow)))
   Set-Acl -LiteralPath \$path -AclObject \$acl
   \$verified = Get-Acl -LiteralPath \$path
   \$rules = @(\$verified.Access | Where-Object { \$_.AccessControlType -eq \$allow })
-  return \$verified.AreAccessRulesProtected -and \$rules.Count -eq 1 -and \$rules[0].IdentityReference.Value -eq \$identity.Value -and ((\$rules[0].FileSystemRights -band \$fullControl) -eq \$fullControl)
+  \$verifiedSid = \$rules[0].IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+  return \$verified.AreAccessRulesProtected -and \$rules.Count -eq 1 -and \$verifiedSid.Value -eq \$sid.Value -and ((\$rules[0].FileSystemRights -band \$fullControl) -eq \$fullControl)
 }
 if ((Test-Path -LiteralPath \$keyPath) -or (Test-Path -LiteralPath \$publicPath)) { throw "Windows updater key appeared during provisioning; refusing to overwrite it" }
 if (-not (Test-Path -LiteralPath \$temporaryKey -PathType Leaf) -or -not (Test-Path -LiteralPath \$temporaryPublic -PathType Leaf)) { throw "Transferred updater key files are incomplete" }
