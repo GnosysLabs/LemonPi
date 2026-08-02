@@ -91,6 +91,13 @@ struct PiPackagesSnapshot {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct PiSessionFinalReply {
+    marker: String,
+    timestamp: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PiSessionSummary {
     path: String,
     id: String,
@@ -99,6 +106,7 @@ struct PiSessionSummary {
     modified: u64,
     message_count: usize,
     first_message: String,
+    last_final_reply: Option<PiSessionFinalReply>,
 }
 
 #[derive(Deserialize)]
@@ -505,6 +513,34 @@ fn session_text(content: Option<&Value>) -> String {
     }
 }
 
+fn session_scalar_marker(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(text) if !text.trim().is_empty() => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+fn final_reply_metadata(value: &Value, message_number: usize) -> PiSessionFinalReply {
+    let message = value.get("message");
+    // Pi currently writes an outer ISO timestamp and an inner numeric message
+    // timestamp. Retain either representation verbatim so the receipt stays
+    // stable even if Pi changes which representation it emits.
+    let timestamp = session_scalar_marker(value.get("timestamp")).or_else(|| {
+        session_scalar_marker(message.and_then(|message| message.get("timestamp")))
+    });
+    let id = session_scalar_marker(value.get("id")).or_else(|| {
+        session_scalar_marker(message.and_then(|message| message.get("id")))
+    });
+    let marker = match (&timestamp, &id) {
+        (Some(timestamp), Some(id)) => format!("timestamp:{timestamp}|id:{id}"),
+        (Some(timestamp), None) => format!("timestamp:{timestamp}|message:{message_number}"),
+        (None, Some(id)) => format!("id:{id}"),
+        (None, None) => format!("message:{message_number}"),
+    };
+    PiSessionFinalReply { marker, timestamp }
+}
+
 fn compact_session_label(value: &str) -> String {
     let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut characters = compact.chars();
@@ -541,6 +577,7 @@ fn read_session_summary(path: &Path, expected_cwd: &Path) -> Option<PiSessionSum
     let mut parent_session_path = None;
     let mut message_count = 0usize;
     let mut first_message = String::new();
+    let mut last_final_reply = None;
 
     {
         let mut consume = |value: Value| {
@@ -579,18 +616,27 @@ fn read_session_summary(path: &Path, expected_cwd: &Path) -> Option<PiSessionSum
                 }
                 Some("message") => {
                     message_count += 1;
-                    if first_message.is_empty()
-                        && value
-                            .get("message")
-                            .and_then(|message| message.get("role"))
+                    let message = value.get("message");
+                    let role = message
+                        .and_then(|message| message.get("role"))
+                        .and_then(Value::as_str);
+                    if role == Some("user") {
+                        // A newer user turn supersedes an older final reply.
+                        last_final_reply = None;
+                        if first_message.is_empty() {
+                            first_message = compact_session_label(&session_text(
+                                message.and_then(|message| message.get("content")),
+                            ));
+                        }
+                    } else if role == Some("assistant")
+                        && message
+                            .and_then(|message| message.get("stopReason"))
                             .and_then(Value::as_str)
-                            == Some("user")
+                            == Some("stop")
                     {
-                        first_message = compact_session_label(&session_text(
-                            value
-                                .get("message")
-                                .and_then(|message| message.get("content")),
-                        ));
+                        // Tool-use and intermediate assistant records are not replies
+                        // that can make a conversation unread.
+                        last_final_reply = Some(final_reply_metadata(&value, message_count));
                     }
                 }
                 _ => {}
@@ -627,6 +673,7 @@ fn read_session_summary(path: &Path, expected_cwd: &Path) -> Option<PiSessionSum
         } else {
             first_message
         },
+        last_final_reply,
     })
 }
 
@@ -2475,6 +2522,48 @@ mod tests {
         assert_eq!(summary.name.as_deref(), Some("Readable name"));
         assert_eq!(summary.first_message, "Fix the sidebar");
         assert_eq!(summary.message_count, 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn summarizes_only_the_current_terminal_agent_reply() {
+        let root = env::temp_dir().join(format!(
+            "lemonpi-final-reply-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let project = project.canonicalize().unwrap();
+        let session = root.join("session.jsonl");
+        let records = format!(
+            "{{\"type\":\"session\",\"id\":\"session-1\",\"cwd\":{}}}\n\
+             {{\"type\":\"message\",\"id\":\"user-1\",\"message\":{{\"role\":\"user\",\"content\":\"Question\"}}}}\n\
+             {{\"type\":\"message\",\"id\":\"tool-use\",\"message\":{{\"role\":\"assistant\",\"stopReason\":\"toolUse\",\"content\":\"Looking up an answer\"}}}}\n\
+             {{\"type\":\"message\",\"id\":\"final-1\",\"message\":{{\"role\":\"assistant\",\"stopReason\":\"stop\",\"timestamp\":1234,\"content\":\"Answer\"}}}}\n",
+            serde_json::to_string(&project.to_string_lossy()).unwrap()
+        );
+        fs::write(&session, &records).unwrap();
+
+        let summary = read_session_summary(&session, &project).unwrap();
+        let final_reply = summary.last_final_reply.expect("terminal reply metadata");
+        assert_eq!(final_reply.timestamp.as_deref(), Some("1234"));
+        assert_eq!(final_reply.marker, "timestamp:1234|id:final-1");
+
+        fs::write(
+            &session,
+            format!(
+                "{records}{{\"type\":\"message\",\"id\":\"user-2\",\"message\":{{\"role\":\"user\",\"content\":\"Follow-up\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        assert!(read_session_summary(&session, &project)
+            .unwrap()
+            .last_final_reply
+            .is_none());
         fs::remove_dir_all(root).unwrap();
     }
 }

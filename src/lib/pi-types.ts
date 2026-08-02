@@ -26,6 +26,13 @@ export interface PiSessionState {
   pendingFollowUpCount?: number;
 }
 
+export interface PiSessionFinalReply {
+  /** Stable identifier for the most recent terminal agent reply in a session. */
+  marker: string;
+  /** Pi's record timestamp when available; it may be an ISO string or numeric string. */
+  timestamp?: string;
+}
+
 export interface PiSessionSummary {
   path: string;
   id: string;
@@ -34,6 +41,7 @@ export interface PiSessionSummary {
   modified: number;
   messageCount: number;
   firstMessage: string;
+  lastFinalReply?: PiSessionFinalReply;
 }
 
 export interface PiSessionStats {

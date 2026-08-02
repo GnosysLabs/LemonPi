@@ -49,6 +49,7 @@ export function WorkspaceRail({
   state,
   sessions,
   sessionsStatus,
+  unreadConversationCount,
   piVersion,
   connection,
   collapsed,
@@ -73,6 +74,7 @@ export function WorkspaceRail({
   state?: PiSessionState;
   sessions: PiSessionSummary[];
   sessionsStatus: SessionsStatus;
+  unreadConversationCount: number;
   piVersion?: string;
   connection: ConnectionState;
   collapsed: boolean;
@@ -109,6 +111,7 @@ export function WorkspaceRail({
   const activeName = currentDescription?.displayName ?? "Choose a project";
   const projectSwitching = connection === "launching";
   const sessionLocked = isStreaming || sessionSwitching || projectSwitching;
+  const unreadConversationLabel = `${unreadConversationCount} unread conversation${unreadConversationCount === 1 ? "" : "s"}`;
 
   const filteredProjects = useMemo(() => {
     const terms = projectQuery.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
@@ -343,9 +346,9 @@ export function WorkspaceRail({
           <button type="button" className="compact-rail-button" onClick={onNewSession} disabled={!project || sessionLocked} aria-label="New session" title="New session">
             <Plus size={17} />
           </button>
-          <button type="button" className="compact-rail-button compact-rail-button--sessions" onClick={onToggle} aria-label={`Show ${sessions.length} sessions`} title={`Show sessions · ${sessions.length}`}>
+          <button type="button" className="compact-rail-button compact-rail-button--sessions" onClick={onToggle} aria-label={`Show ${unreadConversationLabel}`} title={`Show ${unreadConversationLabel}`}>
             <ChatCircle size={17} />
-            {sessions.length > 0 && <i>{sessions.length > 99 ? "99+" : sessions.length}</i>}
+            {unreadConversationCount > 0 && <i aria-hidden="true">{unreadConversationCount > 99 ? "99+" : unreadConversationCount}</i>}
           </button>
         </div>
       ) : (
@@ -360,7 +363,7 @@ export function WorkspaceRail({
             <nav className="workspace-rail__sessions" aria-label="Sessions">
               <div className="session-list__heading">
                 <span>History</span>
-                <i>{sessions.length}</i>
+                <i aria-label={unreadConversationLabel} title={unreadConversationLabel}>{unreadConversationCount}</i>
               </div>
               {(sessions.length >= 5 || sessionQuery) && (
                 <label className="session-search">

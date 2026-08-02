@@ -49,6 +49,14 @@ import {
 import { initialTranscriptState, reduceTranscript } from "./lib/transcript";
 import { decideStartupGate } from "./lib/startup-gate";
 import { buildPromptWithAttachments, promptImages, type ComposerAttachment } from "./lib/attachments";
+import {
+  baselineProjectFinalReplies,
+  countUnreadFinalReplies,
+  markSessionFinalReplyRead,
+  parseUnreadFinalReplyState,
+  serializeUnreadFinalReplyState,
+  UNREAD_FINAL_REPLIES_STORAGE_KEY,
+} from "./lib/unread-sessions";
 
 type ConnectionState = "offline" | "launching" | "online" | "error";
 type Toast = { id: string; message: string; tone: "info" | "warning" | "error" };
@@ -172,6 +180,16 @@ export default function App() {
   const [sessionState, setSessionState] = useState<PiSessionState>();
   const [sessions, setSessions] = useState<PiSessionSummary[]>([]);
   const [sessionsStatus, setSessionsStatus] = useState<SessionsStatus>("ready");
+  const [unreadFinalReplyState, setUnreadFinalReplyState] = useState(() => {
+    try {
+      return parseUnreadFinalReplyState(window.localStorage.getItem(UNREAD_FINAL_REPLIES_STORAGE_KEY));
+    } catch {
+      return parseUnreadFinalReplyState(null);
+    }
+  });
+  const [conversationViewed, setConversationViewed] = useState(() => (
+    document.visibilityState !== "hidden" && document.hasFocus()
+  ));
   const [sessionSwitching, setSessionSwitching] = useState(false);
   const [stats, setStats] = useState<PiSessionStats>();
   const [availableModels, setAvailableModels] = useState<PiModel[]>([]);
@@ -193,6 +211,8 @@ export default function App() {
   const detectionStartedRef = useRef(false);
   const restoredProjectRef = useRef(false);
   const pendingRef = useRef(new Map<string, PendingRequest>());
+  const projectRef = useRef<string | undefined>(undefined);
+  const sessionRefreshRequestRef = useRef(0);
 
   const finishStartup = useCallback(() => setStartupReady(true), []);
   const addToast = useCallback((message: string, tone: Toast["tone"] = "info") => {
@@ -227,21 +247,27 @@ export default function App() {
     }
   }, [addToast]);
 
-  const refreshSessions = useCallback(async (cwd = project) => {
-    if (!cwd) {
+  const refreshSessions = useCallback(async (cwd?: string) => {
+    const targetProject = cwd ?? projectRef.current;
+    const request = ++sessionRefreshRequestRef.current;
+    if (!targetProject) {
       setSessions([]);
       setSessionsStatus("ready");
       return;
     }
     setSessionsStatus("loading");
     try {
-      setSessions(await listPiSessions(cwd));
+      const nextSessions = await listPiSessions(targetProject);
+      if (request !== sessionRefreshRequestRef.current || targetProject !== projectRef.current) return;
+      setSessions(nextSessions);
+      setUnreadFinalReplyState((current) => baselineProjectFinalReplies(current, targetProject, nextSessions));
       setSessionsStatus("ready");
     } catch (error) {
+      if (request !== sessionRefreshRequestRef.current || targetProject !== projectRef.current) return;
       console.warn("Could not refresh Pi sessions", error);
       setSessionsStatus("error");
     }
-  }, [project]);
+  }, []);
 
   const refreshState = useCallback(() => {
     void rpc(
@@ -336,6 +362,8 @@ export default function App() {
 
     if (event.type === "agent_start") {
       setSessionState((current) => current ? { ...current, isStreaming: true } : current);
+      // A newly logged user turn makes any previous final reply ineligible.
+      void refreshSessions();
     }
 
     if (event.type === "agent_settled") {
@@ -445,6 +473,40 @@ export default function App() {
   }, [sidebarCollapsed, sidebarWidth]);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(UNREAD_FINAL_REPLIES_STORAGE_KEY, serializeUnreadFinalReplyState(unreadFinalReplyState));
+    } catch {
+      // Read receipts are best-effort when webview storage is unavailable.
+    }
+  }, [unreadFinalReplyState]);
+
+  useEffect(() => {
+    projectRef.current = project;
+  }, [project]);
+
+  useEffect(() => {
+    const updateConversationViewed = () => {
+      setConversationViewed(document.visibilityState !== "hidden" && document.hasFocus());
+    };
+    updateConversationViewed();
+    document.addEventListener("visibilitychange", updateConversationViewed);
+    window.addEventListener("focus", updateConversationViewed);
+    window.addEventListener("blur", updateConversationViewed);
+    return () => {
+      document.removeEventListener("visibilitychange", updateConversationViewed);
+      window.removeEventListener("focus", updateConversationViewed);
+      window.removeEventListener("blur", updateConversationViewed);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!conversationViewed || !sessionState?.sessionFile) return;
+    const activeSession = sessions.find((session) => session.path === sessionState.sessionFile);
+    if (!activeSession) return;
+    setUnreadFinalReplyState((current) => markSessionFinalReplyRead(current, activeSession));
+  }, [conversationViewed, sessionState?.sessionFile, sessions]);
+
+  useEffect(() => {
     const recent = recentProjects.reduce<RecentProject | undefined>(
       (latest, entry) => !latest || entry.lastOpened > latest.lastOpened ? entry : latest,
       undefined,
@@ -531,6 +593,7 @@ export default function App() {
       const openedPath = info.cwd ?? path;
       activePidRef.current = info.pid;
       setPi(info);
+      projectRef.current = openedPath;
       setProject(openedPath);
       setProjectTrusted(trusted);
       setRecentProjects((current) => {
@@ -687,6 +750,10 @@ export default function App() {
 
   const online = connection === "online";
   const streaming = sessionState?.isStreaming ?? transcript.isStreaming;
+  const unreadConversationCount = useMemo(
+    () => countUnreadFinalReplies(sessions, unreadFinalReplyState),
+    [sessions, unreadFinalReplyState],
+  );
   const activeDialog = dialogQueue[0];
   const visibleSubagentRuns = useMemo(() => {
     const seen = new Set<string>();
@@ -746,6 +813,7 @@ export default function App() {
         state={sessionState}
         sessions={sessions}
         sessionsStatus={sessionsStatus}
+        unreadConversationCount={unreadConversationCount}
         piVersion={pi?.version}
         connection={connection}
         collapsed={sidebarCollapsed}

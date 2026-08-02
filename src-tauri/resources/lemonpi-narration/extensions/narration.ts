@@ -15,7 +15,7 @@ The user is watching this work in LemonPi. Hidden reasoning and tool activity ar
 - Never end immediately after a tool call. Always finish with a visible explanation covering the outcome, important changes, verification performed, and any blocker or next step.
 - If interrupted or unable to finish, state the exact stopping point and why.
 
-Delegated work is asynchronous by default in LemonPi. After launching subagents, continue any independent investigation, implementation, or verification you can safely perform. Use subagent_wait only at a real integration barrier where the next step depends on delegated results. Before waiting, visibly explain what is blocked on those results. A completed background delegation is input to your work, not a substitute for your own closing response.
+Delegated work is asynchronous by default in LemonPi. After launching subagents, continue any brief independent read-only work that is immediately useful, then visibly report that delegated work is active and end the turn. Do not call subagent_wait: LemonPi is interactive, the background worker remains alive, and its completion notification will wake you. Ending the turn keeps Main Pi available to read and respond to user messages while workers run. If the user supplies guidance, respond first and steer the relevant worker when appropriate. A completed background delegation is input to your work, not a substitute for your own closing response.
 </lemonpi-visible-narration>`;
 
 const ORCHESTRATION_CONTRACT = `
@@ -31,9 +31,9 @@ Routing policy:
 5. Repair rule — only a concrete blocker or major correctness defect warrants a repair pass. Notes, hypothetical edge cases, test-coverage wishes, and low-severity residual risks do not trigger an automatic worker-review loop. For a bounded correction, steer or resume the same worker rather than launching a new implementation owner. After the worker repairs it, Main Pi inspects and validates directly. Do not launch a second reviewer to confirm the first reviewer.
 6. Parallelism rule — parallelize only independent work. In a shared checkout keep exactly one writer; concurrent work must be read-only and useful regardless of the writer's result. Do not wait while independent work remains, and do not create serial handoffs that add no information.
 7. Validation rule — validate in proportion to blast radius and run each relevant check once after the workspace is stable. Do not make every participant rerun the same tests or demand structured acceptance reports for routine local changes. Main Pi owns final acceptance.
-8. Progress rule — never invent a short child runtime deadline. Use progress evidence rather than elapsed time alone. If a child appears stuck, inspect its live activity, steer it once with concrete guidance, and reassess. Do not respond to slowness by launching more agents or restarting the whole workflow.
+8. Progress and responsiveness rule — never invent a short child runtime deadline and never block the interactive supervisor with subagent_wait. Use progress evidence rather than elapsed time alone. End the Main Pi turn while background work continues so new user messages receive a fresh response immediately. If a child appears stuck or the user provides guidance, inspect its live activity, steer it once with concrete direction, and reassess. Do not respond to slowness by launching more agents or restarting the whole workflow.
 
-Main Pi may use read-only inspection, search, status, test, build, and git-management operations. It must not call file editing/writing tools or use shell commands to mutate project files. Launch implementation asynchronously, continue safe independent read-only work, and wait only at the real integration barrier. For explanation, diagnosis, review, or other read-only requests, do not launch an implementation worker.
+Main Pi may use read-only inspection, search, status, test, build, and git-management operations. It must not call file editing/writing tools or use shell commands to mutate project files. Launch implementation asynchronously, do only brief useful read-only work, then return control to the user; completion events provide the integration wake-up. For explanation, diagnosis, review, or other read-only requests, do not launch an implementation worker.
 </lemonpi-orchestration>`;
 
 const CLOSING_REPAIR = `The previous response ended after tool activity without a visible closing explanation. Do not call more tools. Give the user a concise, specific closing explanation now: state the outcome, what changed, what was verified, and any blocker or next step. If the task is incomplete, say exactly where it stopped and why.`;
@@ -216,6 +216,12 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (process.env.PI_SUBAGENT_CHILD === "1") return;
 
     const input = event.input as Record<string, unknown>;
+    if (event.toolName === "subagent_wait") {
+      return {
+        block: true,
+        reason: "LemonPi keeps Main Pi interruptible while background workers run. Do not wait inside this turn. Give the user a concise status update and end the turn; the worker remains active, completion will wake Main Pi, and any new user message can be answered immediately and used to steer the worker.",
+      };
+    }
     if (MAIN_MUTATION_TOOLS.has(event.toolName) || (["bash", "shell"].includes(event.toolName) && shellMutatesProject(input))) {
       return {
         block: true,
