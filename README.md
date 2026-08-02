@@ -24,7 +24,7 @@ The app intentionally uses Pi's subprocess RPC boundary instead of reimplementin
 
 ## Requirements
 
-- macOS or Windows
+- macOS, Windows, or Linux
 - [Pi](https://pi.dev) available on `PATH`, in a common installation location, or configured through `LEMONPI_PI_PATH`. Internet access is required on first launch if Pi has not already installed `npm:pi-subagents`.
 - Node.js and pnpm for development
 - Rust toolchain and Tauri platform prerequisites
@@ -43,6 +43,24 @@ pnpm test
 pnpm build
 cd src-tauri && cargo test
 ```
+
+## Signed releases and updates
+
+LemonPi publishes signed Tauri updater artifacts through GitHub Releases. The updater reads `latest.json` from the latest [LemonPi release](https://github.com/GnosysLabs/LemonPi/releases), verifies it against the public key embedded in `src-tauri/tauri.conf.json`, and only then installs an update.
+
+The private signing key is deliberately not in this repository. It lives at `~/.tauri/lemonpi-updater.key` with owner-only permissions and is stored in the repository’s `TAURI_SIGNING_PRIVATE_KEY` GitHub Actions secret. Keep an encrypted backup of that key: replacing it after a public release would prevent installed copies from accepting future updates. Do not commit, print, or share it. The public `.pub` companion may be embedded in the Tauri config.
+
+To publish a version, make `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml` agree, commit those changes, then push the exact matching tag:
+
+```bash
+# Example only; do not create a tag until the release is ready.
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The tag-driven `Release LemonPi` workflow verifies the versions, creates a draft release, builds signed macOS (Intel and Apple Silicon), Windows x64, and Linux x64 artifacts, and publishes `latest.json` only after every platform build succeeds. Matrix builds deliberately disable Tauri Action’s per-job updater JSON generation so an incomplete manifest cannot be published. macOS artifacts are not notarized by this workflow; add Apple signing/notarization credentials separately before promising a seamless Gatekeeper experience.
+
+For a local signed release build, set `TAURI_SIGNING_PRIVATE_KEY` to the path or content of the protected LemonPi key before running `pnpm tauri build`. The normal development build does not require it.
 
 ## Architecture
 

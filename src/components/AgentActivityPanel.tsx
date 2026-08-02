@@ -10,6 +10,7 @@ import {
   Warning,
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
+import ReactMarkdown from "react-markdown";
 import { describeToolActivity } from "../lib/activity-narration";
 import type { PiSessionState, SubagentLiveActivity, SubagentRunStatus, SubagentStepStatus } from "../lib/pi-types";
 import type { TranscriptItem } from "../lib/transcript";
@@ -156,32 +157,16 @@ function AgentCard({
   const latestEvent = activityEvents.at(-1);
   const latestReasoning = [...activityEvents].reverse().find((event) => event.kind === "reasoning");
   const healthState = step.activityState ?? run.activityState;
-  const visibleActivityAge = activity?.lastActivityAt
-    ? formatElapsed(activity.lastActivityAt, undefined, now)
-    : undefined;
   let currentActivity = activity?.headline ?? step.status;
-  let currentKind = activity?.headlineKind ?? "reasoning";
-  let currentDetail: string | undefined;
 
   if (active && step.currentTool) {
     currentActivity = `Running ${step.currentTool}${step.currentToolArgs ? ` · ${step.currentToolArgs}` : ""}`;
-    currentKind = "tool";
   } else if (active && healthState === "needs_attention") {
     currentActivity = "Needs attention — the worker has stopped producing visible activity";
-    currentKind = "error";
   } else if (active) {
     currentActivity = latestEvent?.kind === "reasoning" && latestEvent.text
       ? `Reasoning · ${latestEvent.text}`
       : "Reasoning or waiting for the model's next action";
-    currentKind = "reasoning";
-  }
-
-  if (active) {
-    const details = [];
-    if (visibleActivityAge) details.push(`Last visible output ${visibleActivityAge} ago`);
-    if (healthState === "active_long_running") details.push("long-running worker");
-    if (healthState === "needs_attention") details.push("intervention recommended");
-    currentDetail = details.join(" · ") || "Waiting for the first visible update";
   }
   const collapsedStatus = active ? compactLine(currentActivity, 110) : (step.description ?? `${run.mode} child ${index + 1}`);
 
@@ -225,17 +210,18 @@ function AgentCard({
           <span className="agent-card__elapsed"><Clock size={10} />{formatElapsed(step.startedAt ?? run.startedAt, step.endedAt, now)}</span>
         </button>
         {active && run.statusPath && (
-          <button
-            className="agent-card__stop"
-            type="button"
-            onClick={() => void stopAgent()}
-            disabled={stopping}
-            title={groupedRun ? "Permanently stop this entire delegated run" : "Permanently stop this agent"}
-            aria-label={groupedRun ? `Stop the run containing ${step.label ?? step.agent}` : `Stop ${step.label ?? step.agent}`}
-          >
-            {stopping ? <CircleNotch className="spin" size={11} /> : <Stop size={11} weight="fill" />}
-            <span>{stopping ? "Stopping" : groupedRun ? "Stop run" : "Stop"}</span>
-          </button>
+          <div className="agent-card__actions">
+            <button
+              className="agent-card__stop"
+              type="button"
+              onClick={() => void stopAgent()}
+              disabled={stopping}
+              title={groupedRun ? "End this entire delegated run" : "End this agent"}
+              aria-label={groupedRun ? `End the run containing ${step.label ?? step.agent}` : `End ${step.label ?? step.agent}`}
+            >
+              {stopping ? <CircleNotch className="spin" size={11} /> : <Stop size={11} weight="fill" />}
+            </button>
+          </div>
         )}
       </div>
 
@@ -248,22 +234,16 @@ function AgentCard({
             {step.turnCount != null && <span>{step.turnCount} turn{step.turnCount === 1 ? "" : "s"}</span>}
           </div>
 
-          <div className={`agent-current ${active ? "agent-current--active" : ""}`}>
-            {currentKind === "tool" || currentKind === "result" ? <TerminalWindow size={12} /> : currentKind === "error" ? <Warning size={12} /> : <Brain size={12} />}
-            <span className="agent-current__copy">
-              <strong>{currentActivity}</strong>
-              {currentDetail && <small>{currentDetail}</small>}
-            </span>
-          </div>
-
-          {active && latestReasoning && latestReasoning !== latestEvent && (
-            <div className="agent-reasoning-preview">
-              <div>
+          {latestReasoning && (
+            <section className="agent-reasoning-preview" aria-live="polite">
+              <div className="agent-reasoning-preview__header">
                 <span>Latest reasoning</span>
                 <time>{formatElapsed(latestReasoning.at, undefined, now)} ago</time>
               </div>
-              <p>{latestReasoning.text}</p>
-            </div>
+              <div className="agent-reasoning-preview__content">
+                <ReactMarkdown>{latestReasoning.text}</ReactMarkdown>
+              </div>
+            </section>
           )}
 
           {active && run.statusPath && (

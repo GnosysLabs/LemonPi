@@ -35,6 +35,7 @@ Routing policy:
 8. Repair rule — only a concrete blocker or major correctness defect warrants a repair pass. Notes, hypothetical edge cases, test-coverage wishes, and low-severity residual risks do not trigger an automatic worker-review loop. For a bounded correction, steer or resume the same worker rather than launching a new implementation owner. After the worker repairs it, Main Pi inspects and validates directly. Do not launch a second reviewer to confirm the first reviewer.
 9. Parallelism rule — parallelize only independent work. In a shared checkout keep exactly one writer; concurrent work must be read-only and useful regardless of the writer's result. A new user message never authorizes a second writer while the current worker is running or paused: respond to the user, then steer the existing worker if needed.
 10. Progress and responsiveness rule — never invent a short child runtime deadline and never block the interactive supervisor with subagent_wait. Use progress evidence rather than elapsed time alone. End the Main Pi turn while background work continues so new user messages receive a fresh response immediately. If a child appears stuck or the user provides guidance, inspect its live activity, steer it once with concrete direction, and reassess. Do not respond to slowness by launching more agents or restarting the whole workflow.
+11. Acceptance rule — package-level \`verified\` acceptance is a runtime gate, not a request for the worker to report tests. Use it only with a non-empty \`acceptance.verify\` array of objects containing an \`id\` and executable \`command\`; commands mentioned in the task or child output do not count. If Main Pi will inspect and validate the chunk itself, omit acceptance and LemonPi will disable inferred package acceptance. Never resume a run that failed because its acceptance contract was malformed, because revival can inherit that contract; launch a fresh bounded chunk with corrected acceptance instead.
 
 Main Pi may use read-only inspection, search, status, test, build, and git-management operations. It must not call file editing/writing tools or use shell commands to mutate project files. Launch implementation asynchronously, do only brief useful read-only work, then return control to the user; completion events provide the integration wake-up. For explanation, diagnosis, review, or other read-only requests, do not launch an implementation worker.
 </lemonpi-orchestration>`;
@@ -148,6 +149,44 @@ function workerNotificationStatus(content: string): "completed" | "failed" | "pa
   if (single) return single[1] as "completed" | "failed" | "paused" | "stopped";
   if (/^Background tasks completed \(\d+\):.*\*\*worker\*\*/m.test(content)) return "completed";
   return undefined;
+}
+
+function verifiedAcceptanceWithoutRuntimeCommands(value: unknown): boolean {
+  if (value === "verified") return true;
+  const acceptance = asRecord(value);
+  if (acceptance?.level !== "verified") return false;
+  if (!Array.isArray(acceptance.verify) || acceptance.verify.length === 0) return true;
+  return !acceptance.verify.some((candidate) => {
+    const command = asRecord(candidate);
+    return typeof command?.id === "string"
+      && command.id.trim().length > 0
+      && typeof command.command === "string"
+      && command.command.trim().length > 0;
+  });
+}
+
+function invalidVerifiedAcceptancePath(input: Record<string, unknown>): string | undefined {
+  const visit = (candidate: unknown, path: string): string | undefined => {
+    const record = asRecord(candidate);
+    if (!record) return undefined;
+    if (Object.hasOwn(record, "acceptance") && verifiedAcceptanceWithoutRuntimeCommands(record.acceptance)) {
+      return `${path}.acceptance`;
+    }
+    for (const key of ["tasks", "chain", "parallel"] as const) {
+      const nested = record[key];
+      if (Array.isArray(nested)) {
+        for (let index = 0; index < nested.length; index += 1) {
+          const issue = visit(nested[index], `${path}.${key}[${index}]`);
+          if (issue) return issue;
+        }
+      } else if (nested !== undefined) {
+        const issue = visit(nested, `${path}.${key}`);
+        if (issue) return issue;
+      }
+    }
+    return undefined;
+  };
+  return visit(input, "subagent");
 }
 
 function shellMutatesProject(input: Record<string, unknown>): boolean {
@@ -306,6 +345,14 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         };
       }
 
+      const invalidAcceptancePath = invalidVerifiedAcceptancePath(input);
+      if (invalidAcceptancePath) {
+        return {
+          block: true,
+          reason: `LemonPi blocked ${invalidAcceptancePath}: verified acceptance requires at least one runtime command such as { id: "build", command: "pnpm build", timeoutMs: 120000 }. Commands written in the worker task or reported by the worker do not satisfy this gate. Add acceptance.verify commands, or omit acceptance so Main Pi owns validation. No worker was launched.`,
+        };
+      }
+
       if (reviewers.length > 0 && !requestExplicitlyRequestsReview && !requestHasMaterialRisk && !taskJustifiesReview) {
         return {
           block: true,
@@ -342,11 +389,10 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         writerToolCalls.set(event.toolCallId, input.async !== false);
       }
 
-      const routineDelegation = !requestExplicitlyRequestsReview && !requestHasMaterialRisk && !taskJustifiesReview;
-      if (routineDelegation && input.acceptance === undefined) {
+      if (input.acceptance === undefined) {
         input.acceptance = {
           level: "none",
-          reason: "Routine LemonPi delegation; Main Pi owns proportionate integration and validation.",
+          reason: "LemonPi makes Main Pi the integration owner unless explicit runtime verify commands are supplied.",
         };
       }
     }
