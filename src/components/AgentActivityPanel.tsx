@@ -20,6 +20,17 @@ function isActive(status: string): boolean {
   return status === "running" || status === "queued" || status === "pending";
 }
 
+function stepNeedsAttention(run: SubagentRunStatus, step: SubagentStepStatus): boolean {
+  if (!isActive(step.status)) return false;
+  if (step.activityState !== undefined) return step.activityState === "needs_attention";
+  return (run.steps?.length ?? 0) <= 1 && run.activityState === "needs_attention";
+}
+
+function runNeedsAttention(run: SubagentRunStatus): boolean {
+  if (!isActive(run.state)) return false;
+  return run.activityState === "needs_attention" || (run.steps?.some((step) => stepNeedsAttention(run, step)) ?? false);
+}
+
 function formatElapsed(start?: number, end?: number, now = Date.now()): string {
   if (!start) return "—";
   const seconds = Math.max(0, Math.floor(((end ?? now) - start) / 1000));
@@ -52,12 +63,14 @@ function MainAgentCard({
   items,
   isStreaming,
   activeSubagentCount,
+  attentionSubagentCount,
   state,
   now,
 }: {
   items: TranscriptItem[];
   isStreaming: boolean;
   activeSubagentCount: number;
+  attentionSubagentCount: number;
   state?: PiSessionState;
   now: number;
 }) {
@@ -73,10 +86,12 @@ function MainAgentCard({
 
   const waitingOnDelegation = activeTool?.name === "subagent_wait"
     || (activeTool?.name === "subagent" && activeTool.args.async !== true);
-  let latest = activeSubagentCount > 0
-    ? `${activeSubagentCount} delegated agent${activeSubagentCount === 1 ? " is" : "s are"} working in the background`
-    : "Ready for your next instruction";
-  let mode: "tool" | "reasoning" | "monitoring" | "idle" = activeSubagentCount > 0 ? "monitoring" : "idle";
+  let latest = attentionSubagentCount > 0
+    ? `${attentionSubagentCount} delegated agent${attentionSubagentCount === 1 ? " needs" : "s need"} intervention`
+    : activeSubagentCount > 0
+      ? `${activeSubagentCount} delegated agent${activeSubagentCount === 1 ? " is" : "s are"} working in the background`
+      : "Ready for your next instruction";
+  let mode: "tool" | "reasoning" | "monitoring" | "attention" | "idle" = attentionSubagentCount > 0 ? "attention" : activeSubagentCount > 0 ? "monitoring" : "idle";
   let mainState: "working" | "waiting" | "monitoring" | "idle" = activeSubagentCount > 0 ? "monitoring" : "idle";
   if (isStreaming && activeTool) {
     latest = describeToolActivity(activeTool);
@@ -109,7 +124,7 @@ function MainAgentCard({
         <span className="command-main__state">{mainState !== "idle" ? <><i />{mainState}</> : "idle"}</span>
       </div>
       <div className="command-main__latest" role="status" aria-live="polite">
-        {mode === "tool" ? <TerminalWindow size={14} /> : mode === "reasoning" ? <Brain size={14} /> : mode === "monitoring" ? <CircleNotch className="spin" size={14} /> : <Robot size={14} />}
+        {mode === "tool" ? <TerminalWindow size={14} /> : mode === "reasoning" ? <Brain size={14} /> : mode === "monitoring" ? <CircleNotch className="spin" size={14} /> : mode === "attention" ? <Warning size={14} /> : <Robot size={14} />}
         <span>{latest}</span>
       </div>
       <div className="command-main__meta">
@@ -121,7 +136,8 @@ function MainAgentCard({
   );
 }
 
-function StatusIcon({ status }: { status: string }) {
+function StatusIcon({ status, needsAttention = false }: { status: string; needsAttention?: boolean }) {
+  if (needsAttention) return <Warning size={12} />;
   if (status === "running" || status === "queued" || status === "pending") return <CircleNotch className="spin" size={12} />;
   if (status === "paused") return <Pause size={12} weight="fill" />;
   if (status === "failed" || status === "stopped" || status === "rejected") return <Warning size={12} />;
@@ -158,7 +174,7 @@ function AgentCard({
   const newestActivityEvents = [...activityEvents].reverse();
   const latestEvent = activityEvents.at(-1);
   const latestReasoning = [...activityEvents].reverse().find((event) => event.kind === "reasoning");
-  const healthState = step.activityState ?? run.activityState;
+  const healthState = step.activityState ?? ((run.steps?.length ?? 0) <= 1 ? run.activityState : undefined);
   let currentActivity = activity?.headline ?? step.status;
 
   if (active && step.currentTool) {
@@ -201,10 +217,10 @@ function AgentCard({
   }
 
   return (
-    <article className={`agent-card agent-card--${step.status}`}>
+    <article className={`agent-card agent-card--${step.status}${healthState === "needs_attention" ? " agent-card--needs-attention" : ""}`}>
       <div className="agent-card__header">
         <button className="agent-card__summary" type="button" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
-          <span className="agent-card__status"><StatusIcon status={step.status} /></span>
+          <span className="agent-card__status"><StatusIcon status={step.status} needsAttention={active && healthState === "needs_attention"} /></span>
           <span className="agent-card__identity">
             <strong>{step.label ?? step.agent}</strong>
             <small title={step.description}>{collapsedStatus}</small>
@@ -332,21 +348,30 @@ export function AgentActivityPanel({
     (count, run) => count + (run.steps?.filter((step) => isActive(step.status)).length ?? (isActive(run.state) ? 1 : 0)),
     0,
   );
+  const attentionCount = visibleRuns.reduce(
+    (count, run) => {
+      const flaggedSteps = run.steps?.filter((step) => stepNeedsAttention(run, step)).length ?? 0;
+      return count + (flaggedSteps > 0 ? flaggedSteps : runNeedsAttention(run) ? 1 : 0);
+    },
+    0,
+  );
+  const progressingCount = Math.max(0, activeCount - attentionCount);
 
   return (
     <aside className="agent-activity-panel" aria-label="Command center">
       <header className="agent-activity-panel__header">
         <h2>Command center</h2>
         <div className="agent-activity-panel__actions">
-          {(activeCount > 0 || isStreaming) && <span className="live-count"><i />{activeCount + (isStreaming ? 1 : 0)} live</span>}
+          {attentionCount > 0 && <span className="live-count live-count--attention"><Warning size={11} />{attentionCount} needs attention</span>}
+          {(progressingCount > 0 || isStreaming) && <span className="live-count"><i />{progressingCount + (isStreaming ? 1 : 0)} live</span>}
         </div>
       </header>
 
       <div className="agent-activity-panel__body">
-        <MainAgentCard items={transcriptItems} isStreaming={isStreaming} activeSubagentCount={activeCount} state={state} now={now} />
+        <MainAgentCard items={transcriptItems} isStreaming={isStreaming} activeSubagentCount={activeCount} attentionSubagentCount={attentionCount} state={state} now={now} />
         <div className="command-section-title">
           <span>Delegated agents</span>
-          {activeCount > 0 && <small>{activeCount} active</small>}
+          {attentionCount > 0 ? <small>{attentionCount} needs attention</small> : activeCount > 0 && <small>{activeCount} active</small>}
         </div>
         {visibleRuns.length === 0 ? (
           <div className="agent-activity-empty">
@@ -355,19 +380,22 @@ export function AgentActivityPanel({
             <span>Subagents will appear here as soon as Pi launches them.</span>
           </div>
         ) : (
-          visibleRuns.map((run) => (
-            <section className="agent-run" key={run.runId}>
+          visibleRuns.map((run) => {
+            const needsAttention = runNeedsAttention(run);
+            const stateLabel = needsAttention ? "needs attention" : run.state;
+            const stateClass = needsAttention ? "needs-attention" : run.state;
+            return <section className="agent-run" key={run.runId}>
               <div className="agent-run__header">
                 <span>{run.mode}</span>
                 <code>{run.runId.slice(0, 8)}</code>
-                <span className={`run-state run-state--${run.state}`}>{run.state}</span>
+                <span className={`run-state run-state--${stateClass}`}>{stateLabel}</span>
               </div>
               {(run.steps?.length ? run.steps : [{ agent: "subagent", status: run.state, startedAt: run.startedAt, error: run.error } as SubagentStepStatus]).map((step, index) => {
                 const childIndex = step.index ?? index;
                 return <AgentCard key={`${run.runId}-${childIndex}`} run={run} step={step} index={childIndex} now={now} activity={activity[`${run.runId}:${childIndex}`]} onSteer={onSteerSubagent} onStop={onStopSubagent} />;
               })}
-            </section>
-          ))
+            </section>;
+          })
         )}
       </div>
       <footer className="agent-activity-panel__footer">

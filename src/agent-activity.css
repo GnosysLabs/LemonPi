@@ -54,6 +54,11 @@
   animation: activity-pulse 1.5s ease-out infinite;
 }
 
+.live-count--attention {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 9%, var(--bg-subtle));
+}
+
 @keyframes activity-pulse {
   50% { opacity: 0.4; }
 }
@@ -252,6 +257,10 @@
   color: var(--danger);
 }
 
+.run-state--needs-attention {
+  color: var(--warning);
+}
+
 .agent-card {
   overflow: hidden;
   border: 1px solid var(--matte-line);
@@ -265,6 +274,14 @@
 
 .agent-card--running {
   border-color: var(--matte-line-strong);
+}
+
+.agent-card--needs-attention {
+  border-color: color-mix(in srgb, var(--warning) 55%, var(--matte-line));
+}
+
+.agent-card--needs-attention .agent-card__status {
+  color: var(--warning);
 }
 
 .agent-card--failed,

@@ -36,14 +36,16 @@ Routing policy:
 9. Review gate — independent review is justified only when the user explicitly requests it or the change crosses a material risk boundary such as authentication, authorization, security, privacy, money, irreversible data changes, migrations, cryptography, public protocols, concurrency, or production release infrastructure. State that boundary in the delegated task as "Review justification: ...". At most one reviewer pass is allowed per user request unless the user explicitly asks for multiple independent reviews. Routine work is reviewed by Main Pi at each chunk checkpoint.
 10. Repair rule — only a concrete blocker or major correctness defect warrants a repair pass. Notes, hypothetical edge cases, test-coverage wishes, and low-severity residual risks do not trigger an automatic writer-review loop. For a bounded correction, steer or resume the same writer rather than launching a new implementation owner. After the writer repairs it, Main Pi inspects and validates directly. Do not launch a second reviewer to confirm the first reviewer.
 11. Parallelism rule — parallelize only independent work. In a shared checkout keep exactly one writer; concurrent work must be read-only and useful regardless of the writer's result. A new user message never authorizes a second writer while the current writer is running or paused: respond to the user, then steer the existing writer if needed.
-12. Progress and responsiveness rule — never invent a short child runtime deadline and never block the interactive supervisor with subagent_wait. Use progress evidence rather than elapsed time alone. End the Main Pi turn while background work continues so new user messages receive a fresh response immediately. If a child appears stuck or the user provides guidance, inspect its live activity, steer it once with concrete direction, and reassess. Do not respond to slowness by launching more agents or restarting the whole workflow.
+12. Progress and responsiveness rule — never invent a short child runtime deadline and never block the interactive supervisor with subagent_wait. Use progress evidence rather than elapsed time alone. End the Main Pi turn while background work continues so new user messages receive a fresh response immediately. A \`needs_attention\` control notice is an intervention request, not passive status: immediately inspect that exact run and transcript through the subagent status controls. If the package reconciles it to a terminal state, integrate the result. If it is alive with no active tool or new output, steer it once to stop exploring and return its result or exact blocker. If that steer cannot be delivered or the same run needs attention again, stop it, preserve useful transcript findings, and launch only a fresh smaller replacement chunk. Never leave a needs-attention run indefinitely, launch a competing agent, or restart the whole workflow.
 13. Acceptance rule — package-level \`verified\` acceptance is a runtime gate, not a request for the child to report tests. Use it only with a non-empty \`acceptance.verify\` array of objects containing an \`id\` and executable \`command\`; commands mentioned in the task or child output do not count. If Main Pi will inspect and validate the chunk itself, omit acceptance and LemonPi will disable inferred package acceptance. Never resume a run that failed because its acceptance contract was malformed, because revival can inherit that contract; launch a fresh bounded chunk with corrected acceptance instead.
+14. Read-only budget rule — focused planning, reconnaissance, research, and review should converge rather than consume the whole repository. LemonPi supplies a generous turn wrap-up window and read/search tool budget for delegations that contain no implementation writer. Treat the soft budget as a request to synthesize immediately. These are assistant/tool budgets, not wall-clock timeouts. Never apply hard tool or turn budgets to an implementation writer.
 
 Main Pi may use read-only inspection, search, status, test, build, and git-management operations. It must not call file editing/writing tools or use shell commands to mutate project files. Launch implementation asynchronously, do only brief useful read-only work, then return control to the user; completion events provide the integration wake-up. For explanation, diagnosis, review, or other read-only requests, do not launch an implementation worker.
 </lemonpi-orchestration>`;
 
 const CLOSING_REPAIR = `The previous response ended after tool activity without a visible closing explanation. Do not call more tools. Give the user a concise, specific closing explanation now: state the outcome, what changed, what was verified, and any blocker or next step. If the task is incomplete, say exactly where it stopped and why.`;
-const DELEGATION_RECOVERY = `A delegated run failed and no replacement delegation was launched before the turn settled. Own the failure now: inspect the exact status/error and any partial output, identify whether the cause was a parent-imposed timeout, unavailable model/tool, configuration problem, or task failure, preserve valid partial work, and re-delegate only the next bounded chunk with corrected instructions, the required chunk-contract fields, and realistic limits. Do not set a tight timeout. If retrying cannot help because the blocker is external, give the user the exact blocker and the evidence instead of claiming recovery.`;
+const DELEGATION_RECOVERY = `A delegated run failed and no replacement delegation was launched before the turn settled. Own the failure now: inspect the exact status/error and any partial output, identify whether the cause was a parent-imposed timeout, unavailable model/tool, configuration problem, or task failure, preserve valid partial work, and re-delegate only the next bounded chunk with corrected instructions, the required chunk-contract fields, and realistic limits. Do not set a tight timeout. If the error says the model produced no output or returned an empty response, do not resume the bloated failed session: salvage concrete transcript findings and launch a fresh-context replacement with a smaller question and explicit deliverable. If retrying cannot help because the blocker is external, give the user the exact blocker and the evidence instead of claiming recovery.`;
+const ATTENTION_RECOVERY = `A delegated run reported needs_attention and the previous response did not inspect or control it. Act now instead of narrating passive waiting. Use the subagent status/transcript controls for the exact run. If it remains alive without an active tool or new output, steer it once to return its result or blocker immediately. If intervention cannot be delivered, stop it and preserve useful transcript findings for one fresh, smaller replacement. Do not leave it marked running indefinitely and do not launch a competing writer.`;
 
 function visibleText(content: unknown): string {
   if (typeof content === "string") return content.trim();
@@ -263,12 +265,15 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   let consecutiveWriterFailures = 0;
   let rosterInspected = false;
   let rosterGeneration = 0;
+  let attentionRecovery: { runId: string; index?: number } | undefined;
+  let attentionActionObserved = false;
+  let attentionRepairRequested = false;
   const delegationToolCalls = new Set<string>();
   const rosterListToolCalls = new Map<string, number>();
   const writerToolCalls = new Map<string, { agent: string; async: boolean }>();
 
   pi.on("before_agent_start", async (event) => ({
-    systemPrompt: `${event.systemPrompt}\n\n${NARRATION_CONTRACT}\n\n${ORCHESTRATION_CONTRACT}`,
+    systemPrompt: `${event.systemPrompt}\n\n${NARRATION_CONTRACT}\n\n${ORCHESTRATION_CONTRACT}${attentionRecovery ? `\n\n<lemonpi-attention-recovery>\nRun ${attentionRecovery.runId}${attentionRecovery.index !== undefined ? ` child ${attentionRecovery.index}` : ""} needs intervention now. Inspect and control that exact run before ending this turn.\n</lemonpi-attention-recovery>` : ""}`,
   }));
 
   pi.on("input", async (event, ctx) => {
@@ -335,6 +340,12 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
 
     const isManagementAction = typeof input.action === "string" && input.action.trim().length > 0;
     if (input.action === "list") rosterListToolCalls.set(event.toolCallId, rosterGeneration);
+    if (attentionRecovery && ["status", "steer", "stop"].includes(String(input.action ?? ""))) {
+      const target = typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : "";
+      if (!target || attentionRecovery.runId.startsWith(target) || target.startsWith(attentionRecovery.runId)) {
+        attentionActionObserved = true;
+      }
+    }
     const specs = delegatedSpecs(input);
     const isDelegation = specs.length > 0;
 
@@ -412,6 +423,10 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           reason: "LemonPi makes Main Pi the integration owner unless explicit runtime verify commands are supplied.",
         };
       }
+      if (writers.length === 0) {
+        if (input.turnBudget === undefined) input.turnBudget = { maxTurns: 8, graceTurns: 2 };
+        if (input.toolBudget === undefined) input.toolBudget = { soft: 10, hard: 16 };
+      }
     }
 
     // pi-subagents supports async natively. LemonPi supplies the product-level
@@ -427,7 +442,10 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   });
 
   pi.on("message_start", async (event) => {
-    const message = event.message as typeof event.message & { customType?: string };
+    const message = event.message as typeof event.message & {
+      customType?: string;
+      details?: { event?: { runId?: unknown; index?: unknown; to?: unknown } };
+    };
     const notification = visibleText(message.content);
     if (event.message.role === "user" && message.customType == null) {
       sawToolActivity = false;
@@ -441,6 +459,18 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       consecutiveWriterFailures = 0;
       rosterInspected = false;
       rosterGeneration += 1;
+      if (attentionRecovery) attentionRepairRequested = false;
+    }
+    if (message.customType === "subagent_control_notice" && message.details?.event?.to === "needs_attention") {
+      const runId = typeof message.details.event.runId === "string" ? message.details.event.runId.trim() : "";
+      const index = typeof message.details.event.index === "number" && Number.isInteger(message.details.event.index)
+        ? message.details.event.index
+        : undefined;
+      if (runId) {
+        attentionRecovery = { runId, ...(index !== undefined ? { index } : {}) };
+        attentionActionObserved = false;
+        attentionRepairRequested = false;
+      }
     }
     if (message.customType === "subagent-notify") {
       const workerStatus = writerNotificationStatus(notification, activeWriterAgent);
@@ -499,6 +529,23 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
 
   pi.on("agent_settled", async () => {
     const intentionallyStopped = lastAssistantStopReason === "aborted" || lastAssistantStopReason === "error";
+    if (attentionRecovery && !attentionActionObserved && !attentionRepairRequested && !intentionallyStopped) {
+      attentionRepairRequested = true;
+      pi.sendMessage(
+        {
+          customType: "lemonpi-attention-recovery",
+          content: `${ATTENTION_RECOVERY}\n\nTarget run: ${attentionRecovery.runId}${attentionRecovery.index !== undefined ? `\nTarget child index: ${attentionRecovery.index}` : ""}`,
+          display: false,
+        },
+        { deliverAs: "followUp", triggerTurn: true },
+      );
+      return;
+    }
+    if (attentionRecovery && attentionActionObserved) {
+      attentionRecovery = undefined;
+      attentionActionObserved = false;
+      attentionRepairRequested = false;
+    }
     if (delegationFailurePending && !intentionallyStopped && !repairRequested) {
       repairRequested = true;
       delegationFailurePending = false;
