@@ -18,14 +18,15 @@ A native desktop workspace for the [Pi coding agent](https://pi.dev), built with
 - Remembers recent projects, their trust choices, and the last active workspace across launches.
 - Exposes Pi's user and project settings in a native categorized GUI, with a raw JSON escape hatch for new or extension-defined settings.
 - Manages user and project Pi packages through Pi's own install, update, list, and remove commands.
-- Treats `npm:pi-subagents` as a required core package and installs it automatically through Pi before the first LemonPi session when needed.
+- Treats `npm:pi-subagents`, `npm:pi-web-access`, and `npm:@juicesharp/rpiv-ask-user-question` as required core packages and installs them automatically through Pi before the first LemonPi session when needed.
+- Renders structured agent questions as native choice cards, multi-select controls, custom-answer fields, and rich option previews instead of exposing Pi's flattened RPC fallback strings.
 
 The app intentionally uses Pi's subprocess RPC boundary instead of reimplementing Pi. This preserves the user's existing authentication, models, settings, skills, extensions, and session files.
 
 ## Requirements
 
 - macOS, Windows, or Linux
-- [Pi](https://pi.dev) available on `PATH`, in a common installation location, or configured through `LEMONPI_PI_PATH`. Internet access is required on first launch if Pi has not already installed `npm:pi-subagents`.
+- [Pi](https://pi.dev) available on `PATH`, in a common installation location, or configured through `LEMONPI_PI_PATH`. Internet access is required on first launch if Pi has not already installed LemonPi's required packages.
 - Node.js and pnpm for development
 - Rust toolchain and Tauri platform prerequisites
 
@@ -122,7 +123,7 @@ Rust process supervisor
 pi --mode rpc
 ```
 
-LemonPi verifies the required `npm:pi-subagents` package before launching Pi and asks Pi's native package manager to install it when missing. It reads the package's machine-readable lifecycle artifacts for live observability; terminal rendering is never scraped. The next integration milestone is a bundled LemonPi bridge extension using Pi's in-process `pi.events` bus and the stable `pi-subagents` v1 extension RPC. That bridge will add acknowledged steer, interrupt, stop, resume, and spawn controls over a private local IPC channel.
+LemonPi verifies the required `npm:pi-subagents`, `npm:pi-web-access`, and `npm:@juicesharp/rpiv-ask-user-question` packages before launching Pi and asks Pi's native package manager to install any missing member. Subagents supply orchestration and machine-readable lifecycle artifacts; web access registers research tools; ask-user-question gives the model a structured clarification tool. LemonPi turns that package's RPC fallback into a native questionnaire experience while preserving its response contract. Terminal rendering is never scraped.
 
 ## Project trust
 

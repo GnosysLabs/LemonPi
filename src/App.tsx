@@ -969,7 +969,7 @@ export default function App() {
           onOpenWithConfig={() => void openProject(true)}
         />
       )}
-      {activeDialog && <ExtensionDialog request={activeDialog} onRespond={respondToExtension} />}
+      {activeDialog && <ExtensionDialog key={activeDialog.id} request={activeDialog} onRespond={respondToExtension} />}
       <UpdateNotice
         phase={appUpdater.phase}
         version={appUpdater.version}

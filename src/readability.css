@@ -308,6 +308,18 @@ body {
   font-size: 11px;
 }
 
+.extension-dialog__context,
+.questionnaire-option__copy small,
+.questionnaire-preview > span,
+.questionnaire-custom-field > span,
+.extension-dialog__footer {
+  font-size: 12px;
+}
+
+.questionnaire-option__copy strong {
+  font-size: 14px;
+}
+
 .toast {
   font-size: 12px;
 }

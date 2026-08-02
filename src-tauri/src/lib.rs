@@ -63,7 +63,29 @@ struct PiProcessEvent {
     message: Option<String>,
 }
 
-const CORE_SUBAGENT_PACKAGE: &str = "npm:pi-subagents";
+struct RequiredPiPackage {
+    source: &'static str,
+    npm_name: &'static str,
+    display_name: &'static str,
+}
+
+const REQUIRED_PI_PACKAGES: &[RequiredPiPackage] = &[
+    RequiredPiPackage {
+        source: "npm:pi-subagents",
+        npm_name: "pi-subagents",
+        display_name: "pi-subagents",
+    },
+    RequiredPiPackage {
+        source: "npm:pi-web-access",
+        npm_name: "pi-web-access",
+        display_name: "pi-web-access",
+    },
+    RequiredPiPackage {
+        source: "npm:@juicesharp/rpiv-ask-user-question",
+        npm_name: "@juicesharp/rpiv-ask-user-question",
+        display_name: "@juicesharp/rpiv-ask-user-question",
+    },
+];
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -274,44 +296,53 @@ fn npm_package_name(source: &str) -> Option<&str> {
     }
 }
 
-fn is_core_subagent_source(source: &str) -> bool {
-    npm_package_name(source) == Some("pi-subagents")
+fn required_pi_package(source: &str) -> Option<&'static RequiredPiPackage> {
+    let name = npm_package_name(source)?;
+    REQUIRED_PI_PACKAGES
+        .iter()
+        .find(|package| package.npm_name == name)
 }
 
-fn core_subagent_installed(agent_dir: &Path) -> bool {
+fn required_pi_package_installed(agent_dir: &Path, package: &RequiredPiPackage) -> bool {
     agent_dir
-        .join("npm/node_modules/pi-subagents/package.json")
+        .join("npm/node_modules")
+        .join(package.npm_name)
+        .join("package.json")
         .is_file()
 }
 
-async fn ensure_core_subagent_package(executable: &PathBuf) -> Result<(), String> {
+async fn ensure_required_pi_packages(executable: &PathBuf) -> Result<(), String> {
     let agent_dir = pi_agent_dir()?;
     let settings = read_settings_object(&agent_dir.join("settings.json"))?;
-    let configured = settings
-        .get("packages")
-        .and_then(Value::as_array)
-        .is_some_and(|packages| {
-            packages
-                .iter()
-                .filter_map(package_source)
-                .any(is_core_subagent_source)
-        });
-    if configured && core_subagent_installed(&agent_dir) {
-        return Ok(());
-    }
-
     let cwd = home_dir()?;
-    run_pi_cli(
-        executable,
-        &cwd,
-        &["install", CORE_SUBAGENT_PACKAGE, "--no-approve"],
-    )
-    .await
-    .map_err(|error| format!(
-        "LemonPi requires pi-subagents and could not install it automatically: {error}"
-    ))?;
-    if !core_subagent_installed(&agent_dir) {
-        return Err("Pi reported a successful pi-subagents install, but the package is unavailable.".to_string());
+    let configured_sources = configured_package_sources(&settings);
+    for package in REQUIRED_PI_PACKAGES {
+        let configured = configured_sources.iter().any(|source| {
+            required_pi_package(source)
+                .is_some_and(|candidate| candidate.npm_name == package.npm_name)
+        });
+        if configured && required_pi_package_installed(&agent_dir, package) {
+            continue;
+        }
+
+        run_pi_cli(
+            executable,
+            &cwd,
+            &["install", package.source, "--no-approve"],
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "LemonPi requires {} and could not install it automatically: {error}",
+                package.display_name
+            )
+        })?;
+        if !required_pi_package_installed(&agent_dir, package) {
+            return Err(format!(
+                "Pi reported a successful {} install, but the package is unavailable.",
+                package.display_name
+            ));
+        }
     }
     Ok(())
 }
@@ -856,7 +887,7 @@ async fn start_pi(
 
     let executable = find_pi()?;
     let version = pi_version(&executable).await?;
-    ensure_core_subagent_package(&executable).await?;
+    ensure_required_pi_packages(&executable).await?;
     let narration_extension = narration_extension_path(&app)?;
     let mut command = pi_command(&executable)?;
     command
@@ -2066,10 +2097,15 @@ async fn build_pi_packages_snapshot(
     ] {
         for source in sources {
             let location = locations.get(&(scope.to_string(), source.clone())).cloned();
-            let installed = location.as_deref().is_some_and(|path| Path::new(path).exists())
-                || (scope == "user" && is_core_subagent_source(&source) && core_subagent_installed(&agent_dir));
+            let required_package = required_pi_package(&source);
+            let installed = location
+                .as_deref()
+                .is_some_and(|path| Path::new(path).exists())
+                || (scope == "user"
+                    && required_package
+                        .is_some_and(|package| required_pi_package_installed(&agent_dir, package)));
             packages.push(PiPackageInfo {
-                required: is_core_subagent_source(&source),
+                required: required_package.is_some(),
                 source,
                 scope: scope.to_string(),
                 location,
@@ -2079,7 +2115,14 @@ async fn build_pi_packages_snapshot(
     }
     packages.sort_by(|left, right| left.scope.cmp(&right.scope).then_with(|| left.source.cmp(&right.source)));
     Ok(PiPackagesSnapshot {
-        core_ready: packages.iter().any(|package| package.required && package.installed),
+        core_ready: REQUIRED_PI_PACKAGES.iter().all(|required| {
+            packages.iter().any(|package| {
+                package.scope == "user"
+                    && package.installed
+                    && required_pi_package(&package.source)
+                        .is_some_and(|candidate| candidate.npm_name == required.npm_name)
+            })
+        }),
         packages,
     })
 }
@@ -2110,8 +2153,11 @@ async fn run_pi_package_action(
         if source.is_empty() || source.len() > 500 || source.chars().any(char::is_control) {
             return Err("Invalid package source.".to_string());
         }
-        if action == "remove" && is_core_subagent_source(source) {
-            return Err("pi-subagents is a required LemonPi package and cannot be removed.".to_string());
+        if action == "remove" && required_pi_package(source).is_some() {
+            return Err(format!(
+                "{} is a required LemonPi package and cannot be removed.",
+                npm_package_name(source).unwrap_or(source)
+            ));
         }
     } else if action != "update" {
         return Err("Choose a package source.".to_string());
@@ -2402,10 +2448,14 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_versioned_core_subagent_packages() {
-        assert!(is_core_subagent_source("npm:pi-subagents"));
-        assert!(is_core_subagent_source("npm:pi-subagents@1.2.3"));
-        assert!(!is_core_subagent_source("npm:pi-subagents-extra"));
+    fn recognizes_versioned_required_pi_packages() {
+        assert!(required_pi_package("npm:pi-subagents").is_some());
+        assert!(required_pi_package("npm:pi-subagents@1.2.3").is_some());
+        assert!(required_pi_package("npm:pi-web-access").is_some());
+        assert!(required_pi_package("npm:pi-web-access@0.17.1").is_some());
+        assert!(required_pi_package("npm:@juicesharp/rpiv-ask-user-question").is_some());
+        assert!(required_pi_package("npm:@juicesharp/rpiv-ask-user-question@2.3.1").is_some());
+        assert!(required_pi_package("npm:pi-subagents-extra").is_none());
         assert_eq!(npm_package_name("npm:@scope/tools@2.0.0"), Some("@scope/tools"));
     }
 

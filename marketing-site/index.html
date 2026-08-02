@@ -360,7 +360,7 @@
                 </div>
                 <div class="product-card__row">
                   <span>Package</span>
-                  <strong>npm:pi-subagents</strong>
+                  <strong>Core agent tools</strong>
                 </div>
                 <div class="product-card__row">
                   <span>Status</span>
@@ -368,8 +368,9 @@
                 </div>
                 <p class="cap-card__note">
                   User and project packages install, update, list, and remove through Pi's own
-                  package manager. <code>npm:pi-subagents</code> is treated as a required core
-                  package and installed automatically when it's missing.
+                  package manager. <code>npm:pi-subagents</code> and
+                  <code>npm:pi-web-access</code>, plus structured agent questions, are required
+                  core packages and installed automatically when missing.
                 </p>
               </div>
             </article>
@@ -476,9 +477,10 @@
           </div>
 
           <p class="architecture__note" data-reveal style="--reveal-index: 4">
-            LemonPi verifies the required <code>npm:pi-subagents</code> package before launching
-            Pi and reads its machine-readable lifecycle artifacts for live observability —
-            terminal rendering is never scraped.
+            LemonPi verifies its required subagent, web-access, and structured-question packages
+            before launching Pi. Lifecycle data powers live observability, research agents get
+            search tools, and clarifying questions become native LemonPi controls — terminal
+            rendering is never scraped.
           </p>
 
           <a
@@ -578,7 +580,7 @@
               <p class="requirements__label">First launch</p>
               <p class="requirements__value">
                 Internet access only if Pi hasn't already installed
-                <code>npm:pi-subagents</code>
+                LemonPi's required Pi packages
               </p>
             </div>
           </div>

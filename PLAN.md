@@ -82,7 +82,8 @@ Supported controls will be capability-driven: `ping`, `status`, `spawn`, `steer`
 - [x] Full user/project Pi settings surface with typed controls
 - [x] Advanced JSON editor that preserves extension-defined settings
 - [x] Pi-native package install, update, list, and remove UI
-- [x] Required `npm:pi-subagents` bootstrap before Pi launch
+- [x] Required subagents, web access, and structured-question packages bootstrap before Pi launch
+- [x] Native structured-question cards, multi-select, custom answers, and option previews
 - [ ] Package gallery discovery and metadata previews
 
 ### M3: Distribution

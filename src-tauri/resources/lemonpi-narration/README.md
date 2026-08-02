@@ -24,4 +24,6 @@ If a delegated tool call fails and no corrected delegation follows, LemonPi queu
 
 The extension also handles LemonPi's private RPC control messages for direct child steering and stopping. It validates the target and calls `pi-subagents`' public `subagents:rpc:v1` `steer` or `stop` method, so Command Center intervention reaches the selected background run without an LLM relay or transcript pollution.
 
+Main Pi is the sole owner of user clarification. It uses the required `ask_user_question` tool only when a decision genuinely blocks scope, safety, or the next useful action; discoverable facts and non-blocking preferences do not justify an interruption, and subagents return uncertainty to Main Pi instead of opening competing questionnaires.
+
 LemonPi loads `extensions/narration.ts` explicitly for every managed Pi process. It is not installed into the user's global Pi configuration.
