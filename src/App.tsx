@@ -13,6 +13,7 @@ import { WorkspaceRail } from "./components/WorkspaceRail";
 import { UpdateNotice } from "./components/UpdateNotice";
 import {
   detectPi,
+  getGitBranch,
   getSubagentActivity,
   getSubagentRuns,
   isTauriRuntime,
@@ -131,6 +132,7 @@ function foregroundRunFromDetails(value: unknown, final: boolean): SubagentRunSt
       index: typeof step.index === "number" ? step.index : undefined,
       agent: step.agent,
       description: typeof step.task === "string" ? step.task : undefined,
+      prompt: typeof step.task === "string" ? step.task : undefined,
       status,
       transcriptPath: typeof step.transcriptPath === "string" ? step.transcriptPath : undefined,
       lastActivityAt: typeof step.lastActivityAt === "number" ? step.lastActivityAt : undefined,
@@ -178,6 +180,7 @@ export default function App() {
   const [project, setProject] = useState<string>();
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>(loadRecentProjects);
   const [projectTrusted, setProjectTrusted] = useState(false);
+  const [gitBranch, setGitBranch] = useState<string | null>();
   const [connection, setConnection] = useState<ConnectionState>("offline");
   const [sessionState, setSessionState] = useState<PiSessionState>();
   const [sessions, setSessions] = useState<PiSessionSummary[]>([]);
@@ -532,6 +535,28 @@ export default function App() {
   }, [candidatePath, detectionSettled, finishStartup, pi, project, recentProjects]);
 
   useEffect(() => {
+    if (!project) {
+      setGitBranch(undefined);
+      return;
+    }
+    let disposed = false;
+    const refreshBranch = async () => {
+      try {
+        const branch = await getGitBranch(project);
+        if (!disposed) setGitBranch(branch);
+      } catch {
+        if (!disposed) setGitBranch(null);
+      }
+    };
+    void refreshBranch();
+    const interval = window.setInterval(refreshBranch, 5000);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [project]);
+
+  useEffect(() => {
     const sessionFile = sessionState?.sessionFile;
     if (!sessionFile || connection !== "online") {
       setSubagentRuns([]);
@@ -858,6 +883,7 @@ export default function App() {
           state={sessionState}
           stats={stats}
           project={project}
+          branch={gitBranch}
           connected={online}
         />
         <section className="conversation-stage">

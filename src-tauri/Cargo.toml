@@ -1,6 +1,6 @@
 [package]
 name = "lemonpi"
-version = "0.1.0"
+version = "0.1.1"
 description = "A native desktop workspace for Pi"
 authors = ["LemonPi contributors"]
 edition = "2021"

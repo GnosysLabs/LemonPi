@@ -9,11 +9,13 @@ export function StatusStrip({
   state,
   stats,
   project,
+  branch,
   connected,
 }: {
   state?: PiSessionState;
   stats?: PiSessionStats;
   project?: string;
+  branch?: string | null;
   connected: boolean;
 }) {
   const projectName = project?.split(/[\\/]/).filter(Boolean).at(-1) ?? "No project";
@@ -24,7 +26,7 @@ export function StatusStrip({
         <div className="status-strip__project" title={project}>
           <GitBranch size={14} weight="light" />
           <span>{projectName}</span>
-          <span className="status-strip__branch">working tree</span>
+          <span className="status-strip__branch">{branch === undefined ? "…" : branch ?? "not a Git repo"}</span>
         </div>
 
         <div className="status-strip__session">

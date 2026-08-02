@@ -122,6 +122,7 @@ export interface SubagentStepStatus {
   agent: string;
   context?: "fresh" | "fork";
   description?: string;
+  prompt?: string;
   phase?: string;
   label?: string;
   status: "pending" | "running" | "complete" | "completed" | "failed" | "paused" | "stopped" | "rejected";

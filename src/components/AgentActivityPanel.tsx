@@ -9,8 +9,10 @@ import {
   Stop,
   TerminalWindow,
   Warning,
+  X,
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import { describeToolActivity } from "../lib/activity-narration";
 import type { PiSessionState, SubagentLiveActivity, SubagentRunStatus, SubagentStepStatus } from "../lib/pi-types";
@@ -144,6 +146,32 @@ function StatusIcon({ status, needsAttention = false }: { status: string; needsA
   return <Check size={12} />;
 }
 
+function AgentPromptModal({ agent, prompt, onClose }: { agent: string; prompt: string; onClose: () => void }) {
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
+  return createPortal(
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="agent-prompt-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-prompt-title">
+        <header className="agent-prompt-dialog__header">
+          <div>
+            <span>Delegated task</span>
+            <h2 id="agent-prompt-title">Prompt sent to {agent}</h2>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close prompt" autoFocus><X size={15} /></button>
+        </header>
+        <div className="agent-prompt-dialog__content"><ReactMarkdown>{prompt}</ReactMarkdown></div>
+      </section>
+    </div>,
+    document.body,
+  );
+}
+
 function AgentCard({
   run,
   step,
@@ -168,6 +196,7 @@ function AgentCard({
   const [steering, setSteering] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [steerError, setSteerError] = useState<string>();
+  const [promptOpen, setPromptOpen] = useState(false);
   const output = step.recentOutput?.filter(Boolean).slice(-8) ?? [];
   const model = shortModel(step.model);
   const activityEvents = activity?.events ?? [];
@@ -175,6 +204,8 @@ function AgentCard({
   const latestEvent = activityEvents.at(-1);
   const latestReasoning = [...activityEvents].reverse().find((event) => event.kind === "reasoning");
   const healthState = step.activityState ?? ((run.steps?.length ?? 0) <= 1 ? run.activityState : undefined);
+  const promptText = step.prompt?.trim() || step.description?.trim();
+  let showingPrompt = false;
   let currentActivity = activity?.headline ?? step.status;
 
   if (active && step.currentTool) {
@@ -182,11 +213,17 @@ function AgentCard({
   } else if (active && healthState === "needs_attention") {
     currentActivity = "Needs attention — the worker has stopped producing visible activity";
   } else if (active) {
-    currentActivity = latestEvent?.kind === "reasoning" && latestEvent.text
-      ? `Reasoning · ${latestEvent.text}`
-      : "Reasoning or waiting for the model's next action";
+    if (latestEvent?.kind === "reasoning" && latestEvent.text) {
+      currentActivity = `Reasoning · ${latestEvent.text}`;
+    } else if (promptText) {
+      currentActivity = promptText;
+      showingPrompt = true;
+    } else {
+      currentActivity = "Waiting for the model's next action";
+    }
   }
-  const collapsedStatus = active ? compactLine(currentActivity, 110) : (step.description ?? `${run.mode} child ${index + 1}`);
+  if (!active && promptText) showingPrompt = true;
+  const collapsedStatus = active ? compactLine(currentActivity, 110) : (promptText ? compactLine(promptText, 110) : `${run.mode} child ${index + 1}`);
 
   async function submitSteer() {
     const message = steerText.trim();
@@ -217,13 +254,22 @@ function AgentCard({
   }
 
   return (
+    <>
     <article className={`agent-card agent-card--${step.status}${healthState === "needs_attention" ? " agent-card--needs-attention" : ""}`}>
       <div className="agent-card__header">
-        <button className="agent-card__summary" type="button" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
+        <button
+          className="agent-card__summary"
+          type="button"
+          onClick={(event) => {
+            if (showingPrompt && (event.target as HTMLElement).closest("[data-agent-prompt]")) setPromptOpen(true);
+            else setExpanded((value) => !value);
+          }}
+          aria-expanded={expanded}
+        >
           <span className="agent-card__status"><StatusIcon status={step.status} needsAttention={active && healthState === "needs_attention"} /></span>
           <span className="agent-card__identity">
             <strong>{step.label ?? step.agent}</strong>
-            <small title={step.description}>{collapsedStatus}</small>
+            <small data-agent-prompt={showingPrompt ? "true" : undefined} title={showingPrompt ? "View the full delegated prompt" : step.description}>{collapsedStatus}</small>
           </span>
           <span className="agent-card__elapsed"><Clock size={10} />{formatElapsed(step.startedAt ?? run.startedAt, step.endedAt, now)}</span>
         </button>
@@ -310,6 +356,8 @@ function AgentCard({
         </div>
       )}
     </article>
+    {promptOpen && promptText && <AgentPromptModal agent={step.label ?? step.agent} prompt={promptText} onClose={() => setPromptOpen(false)} />}
+    </>
   );
 }
 

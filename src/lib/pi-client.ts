@@ -22,6 +22,10 @@ export async function listPiSessions(cwd: string): Promise<PiSessionSummary[]> {
   return invoke<PiSessionSummary[]>("list_pi_sessions", { cwd });
 }
 
+export async function getGitBranch(project: string): Promise<string | null> {
+  return invoke<string | null>("get_git_branch", { project });
+}
+
 export async function getSubagentRuns(sessionFile: string): Promise<SubagentRunStatus[]> {
   return invoke<SubagentRunStatus[]>("get_subagent_runs", { sessionFile });
 }

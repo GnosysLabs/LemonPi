@@ -1,13 +1,12 @@
-name: Release LemonPi
+name: Release LemonPi all-platform fallback
 
+# The primary release path is built locally on macOS and remotely on Windows.
+# This optional workflow is intentionally manual-only so a pushed tag cannot race it.
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to publish (for example, v0.1.0)
+        description: Existing version tag for the optional all-platform fallback (for example, v0.1.1)
         required: true
         type: string
 

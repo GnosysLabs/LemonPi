@@ -20,6 +20,8 @@ const MAX_RPC_RECORD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SESSION_FILES: usize = 250;
 const STDERR_CHUNK_BYTES: usize = 8 * 1024;
 const SUBAGENT_TRANSCRIPT_TAIL_BYTES: u64 = 384 * 1024;
+const SUBAGENT_PROMPT_SCAN_BYTES: u64 = 4 * 1024 * 1024;
+const SUBAGENT_PROMPT_MAX_CHARS: usize = 256 * 1024;
 const SUBAGENT_ACTIVITY_EVENTS: usize = 12;
 const MAX_SETTINGS_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_AGENT_FILE_BYTES: u64 = 256 * 1024;
@@ -2175,6 +2177,62 @@ fn collect_subagent_status_files(directory: &Path, depth: usize, output: &mut Ve
     }
 }
 
+fn message_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_string());
+    }
+    let parts = value.as_array()?;
+    let text = parts
+        .iter()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
+}
+
+fn read_subagent_prompts(async_dir: &Path) -> HashMap<usize, String> {
+    let Ok(file) = fs::File::open(async_dir.join("events.jsonl")) else {
+        return HashMap::new();
+    };
+    let mut content = String::new();
+    if file
+        .take(SUBAGENT_PROMPT_SCAN_BYTES)
+        .read_to_string(&mut content)
+        .is_err()
+    {
+        return HashMap::new();
+    }
+
+    let mut prompts = HashMap::new();
+    for line in content.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if event.get("type").and_then(Value::as_str) != Some("message_start")
+            || event
+                .pointer("/message/role")
+                .and_then(Value::as_str)
+                != Some("user")
+        {
+            continue;
+        }
+        let index = event
+            .get("subagentStepIndex")
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as usize;
+        if prompts.contains_key(&index) {
+            continue;
+        }
+        let Some(prompt) = event.pointer("/message/content").and_then(message_text) else {
+            continue;
+        };
+        let prompt = prompt.chars().take(SUBAGENT_PROMPT_MAX_CHARS).collect();
+        prompts.insert(index, prompt);
+    }
+    prompts
+}
+
 #[tauri::command]
 async fn get_subagent_runs(session_file: String) -> Result<Vec<Value>, String> {
     let temp = env::temp_dir();
@@ -2210,6 +2268,17 @@ async fn get_subagent_runs(session_file: String) -> Result<Vec<Value>, String> {
         if status.get("sessionId").and_then(Value::as_str) != Some(session_file.as_str()) {
             continue;
         }
+        let prompts = path
+            .parent()
+            .map(read_subagent_prompts)
+            .unwrap_or_default();
+        if let Some(steps) = status.get_mut("steps").and_then(Value::as_array_mut) {
+            for (index, step) in steps.iter_mut().enumerate() {
+                if let (Some(prompt), Some(fields)) = (prompts.get(&index), step.as_object_mut()) {
+                    fields.insert("prompt".to_string(), Value::from(prompt.clone()));
+                }
+            }
+        }
         if let Value::Object(fields) = &mut status {
             fields.insert(
                 "statusPath".to_string(),
@@ -2240,6 +2309,39 @@ async fn get_subagent_runs(session_file: String) -> Result<Vec<Value>, String> {
 }
 
 #[tauri::command]
+async fn get_git_branch(project: String) -> Result<Option<String>, String> {
+    let project = PathBuf::from(project);
+    if !project.is_dir() {
+        return Ok(None);
+    }
+    let branch = Command::new("git")
+        .arg("-C")
+        .arg(&project)
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| format!("Could not inspect the Git branch: {error}"))?;
+    if branch.status.success() {
+        let name = String::from_utf8_lossy(&branch.stdout).trim().to_string();
+        return Ok((!name.is_empty()).then_some(name));
+    }
+    let revision = Command::new("git")
+        .arg("-C")
+        .arg(&project)
+        .args(["rev-parse", "--short", "HEAD"])
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| format!("Could not inspect the Git revision: {error}"))?;
+    if !revision.status.success() {
+        return Ok(None);
+    }
+    let revision = String::from_utf8_lossy(&revision.stdout).trim().to_string();
+    Ok((!revision.is_empty()).then_some(format!("detached @ {revision}")))
+}
+
+#[tauri::command]
 async fn stop_pi(manager: State<'_, Arc<PiManager>>) -> Result<(), String> {
     stop_active(manager.inner()).await;
     Ok(())
@@ -2257,6 +2359,7 @@ pub fn run() {
             start_pi,
             send_pi,
             list_pi_sessions,
+            get_git_branch,
             get_subagent_runs,
             get_subagent_activity,
             get_subagent_settings,

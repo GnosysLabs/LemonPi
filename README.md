@@ -46,21 +46,40 @@ cd src-tauri && cargo test
 
 ## Signed releases and updates
 
-LemonPi publishes signed Tauri updater artifacts through GitHub Releases. The updater reads `latest.json` from the latest [LemonPi release](https://github.com/GnosysLabs/LemonPi/releases), verifies it against the public key embedded in `src-tauri/tauri.conf.json`, and only then installs an update.
+LemonPi verifies every updater artifact against the public key embedded in `src-tauri/tauri.conf.json`. The private updater key is deliberately not in this repository. Keep `~/.tauri/lemonpi-updater.key` owner-readable only, retain an encrypted backup, and never commit, print, or share it. Losing that key after a public release would prevent installed clients from accepting future updates.
 
-The private signing key is deliberately not in this repository. It lives at `~/.tauri/lemonpi-updater.key` with owner-only permissions and is stored in the repository’s `TAURI_SIGNING_PRIVATE_KEY` GitHub Actions secret. Keep an encrypted backup of that key: replacing it after a public release would prevent installed copies from accepting future updates. Do not commit, print, or share it. The public `.pub` companion may be embedded in the Tauri config.
+### Manual v0.1.1 release procedure
 
-To publish a version, make `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml` agree, commit those changes, then push the exact matching tag:
+The first release is assembled from a locally built Apple Silicon macOS app and a remotely built Windows x64 installer. Do **not** push a tag before both native builds and assembly verification pass. The source candidate must be fully committed, clean, and available on `origin/main`; both builders receive the same commit SHA.
+
+Prerequisites:
+
+- macOS Apple Silicon with the `Developer ID Application: Christopher McElvogue (4PDUNTF69S)` identity, the `AC_NOTARY` keychain profile, at least 10 GiB free, and the passwordless LemonPi updater key plus `.pub` companion at `~/.tauri/lemonpi-updater.key`.
+- SSH access to the Windows builder. The scripts default to `noise-windows` and `C:\Users\cmcel\LemonPi`; set `LEMONPI_WINDOWS_HOST` or `LEMONPI_WINDOWS_REPO` only when those defaults are intentionally different. The remote script bootstraps the checkout and provisions the updater key only when both remote key files are absent.
+- `pnpm`, Rust, Git, and the platform build prerequisites on both machines.
+
+After the v0.1.1 candidate is committed and pushed, record its SHA and build both platforms:
 
 ```bash
-# Example only; do not create a tag until the release is ready.
-git tag v0.1.0
-git push origin v0.1.0
+revision=$(git rev-parse HEAD)
+scripts/release-macos.sh v0.1.1 "$revision"
+scripts/release-windows-remote.sh "$revision"
+node scripts/assemble-desktop-release.mjs \
+  --macos-directory src-tauri/target/release/release-assets \
+  --windows-directory src-tauri/target/release/windows-assets \
+  --output-directory src-tauri/target/release/release-staging \
+  --published-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
-The tag-driven `Release LemonPi` workflow verifies the versions, creates a draft release, builds signed macOS (Intel and Apple Silicon), Windows x64, and Linux x64 artifacts, and publishes `latest.json` only after every platform build succeeds. Matrix builds deliberately disable Tauri Action’s per-job updater JSON generation so an incomplete manifest cannot be published. macOS artifacts are not notarized by this workflow; add Apple signing/notarization credentials separately before promising a seamless Gatekeeper experience.
+The staging directory must contain exactly these release assets plus `latest.json` and `SHA256SUMS.txt`:
 
-For a local signed release build, set `TAURI_SIGNING_PRIVATE_KEY` to the path or content of the protected LemonPi key before running `pnpm tauri build`. The normal development build does not require it.
+- `LemonPi_0.1.1_aarch64.app.zip` — the human macOS download.
+- `LemonPi_0.1.1_aarch64.app.tar.gz` and `.sig` — the signed macOS updater artifact.
+- `LemonPi_0.1.1_x64-setup.exe` and `.sig` — the signed Windows updater artifact.
+
+Only after the staged hashes and manifest have been independently checked should a maintainer create an annotated `v0.1.1` tag at that exact SHA, push it, create a **draft** GitHub Release, upload the staged files, download them again to verify `SHA256SUMS.txt`, and publish the draft. The release scripts never tag, push, or call GitHub Releases. Because this is the first baseline installation, the updater path itself cannot be demonstrated until a later version exists. The Windows NSIS installer is updater-signed but may be Authenticode `NotSigned`, so Microsoft SmartScreen can still warn users.
+
+`.github/workflows/release.yml` is an optional manually dispatched all-platform fallback. It retains the four-platform macOS Intel/Apple Silicon, Windows x64, and Linux x64 matrix and draft-first manifest publishing; pushing a tag does not trigger it. It is not part of the primary two-platform release procedure.
 
 ## Architecture
 
