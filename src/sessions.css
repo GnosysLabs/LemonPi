@@ -1,0 +1,81 @@
+.workspace-rail__projects {
+  max-height: 250px;
+  padding: 0 2px 4px;
+  overflow-y: auto;
+  scrollbar-color: var(--matte-line-strong) transparent;
+  scrollbar-width: thin;
+}
+
+.workspace-rail__projects .workspace-rail__label {
+  margin-right: 7px;
+  margin-left: 7px;
+}
+
+.workspace-rail__projects .project-row + .project-row {
+  margin-top: 6px;
+}
+
+.project-row[aria-current] {
+  color: var(--ink);
+  background: var(--rail-active-surface);
+  box-shadow: inset 0 0 0 1px var(--rail-active-edge);
+}
+
+.workspace-rail__sessions {
+  display: flex;
+  overflow: hidden;
+  flex-direction: column;
+}
+
+.workspace-rail__section-head {
+  flex: 0 0 auto;
+}
+
+.session-list {
+  min-height: 0;
+  margin-top: 5px;
+  padding-right: 2px;
+  flex: 1;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-color: var(--matte-line-strong) transparent;
+  scrollbar-width: thin;
+}
+
+.session-list__empty {
+  padding: 11px 9px;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.session-row {
+  align-items: center;
+}
+
+.session-row:disabled {
+  cursor: default;
+}
+
+.session-row:not([aria-current]) .session-row__dot {
+  background: transparent;
+  box-shadow: none;
+}
+
+.session-row:not([aria-current]) .session-row__dot::after {
+  background: var(--faint);
+}
+
+.session-row:not([aria-current]):hover:not(:disabled) .session-row__dot::after {
+  background: var(--muted);
+}
+
+.session-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-rail--collapsed .session-list {
+  padding-right: 0;
+}

@@ -1,0 +1,877 @@
+import { open } from "@tauri-apps/plugin-dialog";
+import { Warning, X } from "@phosphor-icons/react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { AgentActivityPanel } from "./components/AgentActivityPanel";
+import { Composer, type ComposerBehavior } from "./components/Composer";
+import { ExtensionDialog, type ExtensionUiResponse } from "./components/ExtensionDialog";
+import { SettingsSurface } from "./components/SettingsSurface";
+import { ProjectTrustDialog } from "./components/ProjectTrustDialog";
+import { StartupSplash } from "./components/StartupSplash";
+import { StatusStrip } from "./components/StatusStrip";
+import { Transcript } from "./components/Transcript";
+import { WorkspaceRail } from "./components/WorkspaceRail";
+import {
+  detectPi,
+  getSubagentActivity,
+  getSubagentRuns,
+  isTauriRuntime,
+  listPiSessions,
+  onPiEvent,
+  onPiProcessEvent,
+  onPiStderr,
+  sendPi,
+  startPi,
+} from "./lib/pi-client";
+import {
+  isExtensionUiRequest,
+  isRpcResponse,
+  type PiEvent,
+  type PiProcessInfo,
+  type PiModel,
+  type PiSessionState,
+  type PiSessionStats,
+  type PiSessionSummary,
+  type RpcExtensionUiRequest,
+  type SubagentRunStatus,
+  type SubagentActivityTarget,
+  type SubagentLiveActivity,
+  type SubagentStepStatus,
+  type ThinkingLevel,
+} from "./lib/pi-types";
+import {
+  forgetProject,
+  loadRecentProjects,
+  RECENT_PROJECTS_KEY,
+  rememberProject,
+  toggleProjectPinned,
+  type RecentProject,
+} from "./lib/projects";
+import { initialTranscriptState, reduceTranscript } from "./lib/transcript";
+import { decideStartupGate } from "./lib/startup-gate";
+import { buildPromptWithAttachments, promptImages, type ComposerAttachment } from "./lib/attachments";
+
+type ConnectionState = "offline" | "launching" | "online" | "error";
+type Toast = { id: string; message: string; tone: "info" | "warning" | "error" };
+type PendingRequest = {
+  onSuccess?: (data: unknown) => void;
+  onError?: (error: string) => void;
+  timeoutId?: number;
+};
+
+type SessionsStatus = "loading" | "ready" | "error";
+type UiPreferences = { sidebarCollapsed: boolean; sidebarWidth: number };
+
+const UI_PREFERENCES_KEY = "lemonpi.ui.v1";
+const INITIAL_STARTUP_TIMEOUT_MS = 90_000;
+const SPLASH_EXIT_MS = 180;
+
+function settleWithin<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+    operation.then(
+      (value) => {
+        window.clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error: unknown) => {
+        window.clearTimeout(timeoutId);
+        reject(error);
+      },
+    );
+  });
+}
+
+function loadUiPreferences(): UiPreferences {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(UI_PREFERENCES_KEY) ?? "{}") as Partial<UiPreferences>;
+    return {
+      sidebarCollapsed: typeof value.sidebarCollapsed === "boolean" ? value.sidebarCollapsed : false,
+      sidebarWidth: typeof value.sidebarWidth === "number" ? Math.min(420, Math.max(228, value.sidebarWidth)) : 272,
+    };
+  } catch {
+    return { sidebarCollapsed: false, sidebarWidth: 272 };
+  }
+}
+
+type UnknownRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): UnknownRecord | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as UnknownRecord : undefined;
+}
+
+function isActiveSubagentRun(run: SubagentRunStatus): boolean {
+  if (["running", "queued", "paused"].includes(run.state)) return true;
+  return run.steps?.some((step) => ["running", "queued", "pending", "paused"].includes(step.status)) ?? false;
+}
+
+function foregroundRunFromDetails(value: unknown, final: boolean): SubagentRunStatus | undefined {
+  const details = asRecord(value);
+  if (!details || typeof details.runId !== "string" || details.asyncId) return undefined;
+  const mode = details.mode === "parallel" || details.mode === "chain" ? details.mode : "single";
+  const progress = Array.isArray(details.progress) ? details.progress : [];
+  const results = Array.isArray(details.results) ? details.results : [];
+  const source = progress.length > 0 ? progress : results;
+  const steps = source.map((raw): SubagentStepStatus | undefined => {
+    const step = asRecord(raw);
+    if (!step || typeof step.agent !== "string") return undefined;
+    const rawStatus = typeof step.status === "string" ? step.status : final ? "complete" : "running";
+    const status = rawStatus === "completed" ? "complete" : rawStatus as "pending" | "running" | "complete" | "failed" | "paused" | "stopped" | "rejected";
+    const total = typeof step.tokens === "number" ? step.tokens : 0;
+    return {
+      index: typeof step.index === "number" ? step.index : undefined,
+      agent: step.agent,
+      description: typeof step.task === "string" ? step.task : undefined,
+      status,
+      transcriptPath: typeof step.transcriptPath === "string" ? step.transcriptPath : undefined,
+      lastActivityAt: typeof step.lastActivityAt === "number" ? step.lastActivityAt : undefined,
+      currentTool: typeof step.currentTool === "string" ? step.currentTool : undefined,
+      currentToolArgs: typeof step.currentToolArgs === "string" ? step.currentToolArgs : undefined,
+      currentToolStartedAt: typeof step.currentToolStartedAt === "number" ? step.currentToolStartedAt : undefined,
+      currentPath: typeof step.currentPath === "string" ? step.currentPath : undefined,
+      recentTools: Array.isArray(step.recentTools) ? step.recentTools as SubagentStepStatus["recentTools"] : undefined,
+      recentOutput: Array.isArray(step.recentOutput) ? step.recentOutput.filter((line): line is string => typeof line === "string") : undefined,
+      turnCount: typeof step.turnCount === "number" ? step.turnCount : undefined,
+      toolCount: typeof step.toolCount === "number" ? step.toolCount : undefined,
+      startedAt: typeof step.durationMs === "number" ? Date.now() - step.durationMs : Date.now(),
+      tokens: {
+        input: typeof step.inputTokens === "number" ? step.inputTokens : 0,
+        output: typeof step.outputTokens === "number" ? step.outputTokens : 0,
+        total,
+      },
+      model: typeof step.model === "string" ? step.model : undefined,
+      thinking: typeof step.thinking === "string" ? step.thinking : undefined,
+      error: typeof step.error === "string" ? step.error : undefined,
+    };
+  }).filter((step): step is NonNullable<typeof step> => Boolean(step));
+
+  const failed = steps.some((step) => step.status === "failed");
+  const stopped = steps.some((step) => step.status === "stopped");
+  const paused = steps.some((step) => step.status === "paused");
+  return {
+    runId: details.runId,
+    mode,
+    state: final ? failed ? "failed" : stopped ? "stopped" : paused ? "paused" : "complete" : "running",
+    startedAt: Math.min(...steps.map((step) => step.startedAt ?? Date.now()), Date.now()),
+    endedAt: final ? Date.now() : undefined,
+    steps,
+  };
+}
+
+export default function App() {
+  const [pi, setPi] = useState<PiProcessInfo>();
+  const [detectionError, setDetectionError] = useState<string>();
+  const [detectionSettled, setDetectionSettled] = useState(false);
+  const [startupReady, setStartupReady] = useState(false);
+  const [splashVisible, setSplashVisible] = useState(true);
+  const [splashExiting, setSplashExiting] = useState(false);
+  const [candidatePath, setCandidatePath] = useState<string>();
+  const [project, setProject] = useState<string>();
+  const [recentProjects, setRecentProjects] = useState<RecentProject[]>(loadRecentProjects);
+  const [projectTrusted, setProjectTrusted] = useState(false);
+  const [connection, setConnection] = useState<ConnectionState>("offline");
+  const [sessionState, setSessionState] = useState<PiSessionState>();
+  const [sessions, setSessions] = useState<PiSessionSummary[]>([]);
+  const [sessionsStatus, setSessionsStatus] = useState<SessionsStatus>("ready");
+  const [sessionSwitching, setSessionSwitching] = useState(false);
+  const [stats, setStats] = useState<PiSessionStats>();
+  const [availableModels, setAvailableModels] = useState<PiModel[]>([]);
+  const [availableThinkingLevels, setAvailableThinkingLevels] = useState<ThinkingLevel[]>([]);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => loadUiPreferences().sidebarCollapsed);
+  const [sidebarWidth, setSidebarWidth] = useState(() => loadUiPreferences().sidebarWidth);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [subagentRuns, setSubagentRuns] = useState<SubagentRunStatus[]>([]);
+  const [foregroundRuns, setForegroundRuns] = useState<SubagentRunStatus[]>([]);
+  const [subagentActivity, setSubagentActivity] = useState<Record<string, SubagentLiveActivity>>({});
+  const [dialogQueue, setDialogQueue] = useState<RpcExtensionUiRequest[]>([]);
+  const [injectedComposerText, setInjectedComposerText] = useState<string>();
+  const [extensionStatuses, setExtensionStatuses] = useState<Record<string, string>>({});
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [stderrTail, setStderrTail] = useState<string[]>([]);
+  const [transcript, dispatchTranscript] = useReducer(reduceTranscript, initialTranscriptState);
+  const sequenceRef = useRef(0);
+  const activePidRef = useRef<number | undefined>(undefined);
+  const detectionStartedRef = useRef(false);
+  const restoredProjectRef = useRef(false);
+  const pendingRef = useRef(new Map<string, PendingRequest>());
+
+  const finishStartup = useCallback(() => setStartupReady(true), []);
+  const addToast = useCallback((message: string, tone: Toast["tone"] = "info") => {
+    const id = crypto.randomUUID();
+    setToasts((current) => [...current.slice(-3), { id, message, tone }]);
+    window.setTimeout(() => setToasts((current) => current.filter((toast) => toast.id !== id)), 5000);
+  }, []);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
+
+  const rpc = useCallback(async (command: Record<string, unknown>, pending?: PendingRequest) => {
+    const id = crypto.randomUUID();
+    if (pending) {
+      const timeoutId = window.setTimeout(() => {
+        const waiting = pendingRef.current.get(id);
+        if (!waiting) return;
+        pendingRef.current.delete(id);
+        const message = "Pi did not answer this request within 60 seconds.";
+        waiting.onError?.(message);
+        addToast(message, "error");
+      }, 60_000);
+      pendingRef.current.set(id, { ...pending, timeoutId });
+    }
+    try {
+      await sendPi({ ...command, id, type: String(command.type) });
+    } catch (error) {
+      const waiting = pendingRef.current.get(id);
+      if (waiting?.timeoutId) window.clearTimeout(waiting.timeoutId);
+      pendingRef.current.delete(id);
+      const message = error instanceof Error ? error.message : String(error);
+      pending?.onError?.(message);
+      addToast(message, "error");
+    }
+  }, [addToast]);
+
+  const refreshSessions = useCallback(async (cwd = project) => {
+    if (!cwd) {
+      setSessions([]);
+      setSessionsStatus("ready");
+      return;
+    }
+    setSessionsStatus("loading");
+    try {
+      setSessions(await listPiSessions(cwd));
+      setSessionsStatus("ready");
+    } catch (error) {
+      console.warn("Could not refresh Pi sessions", error);
+      setSessionsStatus("error");
+    }
+  }, [project]);
+
+  const refreshState = useCallback(() => {
+    void rpc(
+      { type: "get_state" },
+      { onSuccess: (data) => setSessionState(data as PiSessionState) },
+    );
+    void rpc(
+      { type: "get_session_stats" },
+      { onSuccess: (data) => setStats(data as PiSessionStats) },
+    );
+  }, [rpc]);
+
+  const refreshModelOptions = useCallback(() => {
+    void rpc(
+      { type: "get_available_models" },
+      { onSuccess: (data) => setAvailableModels(asRecord(data)?.models as PiModel[] ?? []) },
+    );
+    void rpc(
+      { type: "get_available_thinking_levels" },
+      { onSuccess: (data) => setAvailableThinkingLevels(asRecord(data)?.levels as ThinkingLevel[] ?? []) },
+    );
+  }, [rpc]);
+
+  useEffect(() => {
+    if (connection === "online") refreshModelOptions();
+    else {
+      setAvailableModels([]);
+      setAvailableThinkingLevels([]);
+    }
+  }, [connection, refreshModelOptions]);
+
+  const handlePiEvent = useCallback((rawEvent: PiEvent) => {
+    const eventPid = typeof rawEvent.__piPid === "number" ? rawEvent.__piPid : undefined;
+    if (eventPid && activePidRef.current && eventPid !== activePidRef.current) return;
+    const event: PiEvent = { ...rawEvent, __lemonId: String(++sequenceRef.current) };
+    dispatchTranscript(event);
+
+    if ((event.type === "tool_execution_update" || event.type === "tool_execution_end") && event.toolName === "subagent") {
+      const result = asRecord(event.type === "tool_execution_update" ? event.partialResult : event.result);
+      const run = foregroundRunFromDetails(result?.details, event.type === "tool_execution_end");
+      if (run) {
+        setForegroundRuns((current) => [run, ...current.filter((candidate) => candidate.runId !== run.runId)].slice(0, 8));
+      }
+    }
+
+    if (isRpcResponse(event)) {
+      if (event.id) {
+        const pending = pendingRef.current.get(event.id);
+        if (pending?.timeoutId) window.clearTimeout(pending.timeoutId);
+        pendingRef.current.delete(event.id);
+        if (event.success) pending?.onSuccess?.(event.data);
+        else pending?.onError?.(event.error ?? "Pi rejected the request");
+      }
+      if (!event.success) addToast(event.error ?? `${event.command} failed`, "error");
+      return;
+    }
+
+    if (isExtensionUiRequest(event)) {
+      if (["select", "confirm", "input", "editor"].includes(event.method)) {
+        setDialogQueue((current) => [...current, event]);
+        return;
+      }
+      if (event.method === "notify" && event.message) {
+        addToast(event.message, event.notifyType ?? "info");
+      } else if (event.method === "setStatus" && event.statusKey) {
+        setExtensionStatuses((current) => {
+          const next = { ...current };
+          if (event.statusText) next[event.statusKey!] = event.statusText;
+          else delete next[event.statusKey!];
+          return next;
+        });
+      } else if (event.method === "setTitle" && event.title) {
+        document.title = event.title;
+      } else if (event.method === "set_editor_text") {
+        setInjectedComposerText(event.text ?? "");
+      } else if (event.method === "setWidget" && event.widgetLines?.length) {
+        addToast(event.widgetLines.join(" · "), "info");
+      }
+      return;
+    }
+
+    if (event.type === "queue_update") {
+      const steering = Array.isArray(event.steering) ? event.steering.length : 0;
+      const followUp = Array.isArray(event.followUp) ? event.followUp.length : 0;
+      setSessionState((current) => current ? {
+        ...current,
+        pendingMessageCount: steering + followUp,
+        pendingSteeringCount: steering,
+        pendingFollowUpCount: followUp,
+      } : current);
+    }
+
+    if (event.type === "agent_start") {
+      setSessionState((current) => current ? { ...current, isStreaming: true } : current);
+    }
+
+    if (event.type === "agent_settled") {
+      setSessionState((current) => current ? { ...current, isStreaming: false } : current);
+      refreshState();
+      void refreshSessions();
+    }
+  }, [addToast, refreshSessions, refreshState]);
+
+  useEffect(() => {
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+
+    if (!isTauriRuntime()) {
+      setDetectionError("LemonPi must be opened through its Tauri desktop shell.");
+      return;
+    }
+
+    void Promise.all([
+      onPiEvent(handlePiEvent),
+      onPiProcessEvent((event) => {
+        if (event.state === "started") {
+          // `openProject` applies the matching PID and online state after startPi resolves.
+          // Ignoring this uncorrelated event prevents a timed-out initial restore from
+          // revealing an online, no-project UI if its backend command completes late.
+          return;
+        }
+        if (event.state === "exited" || event.state === "stopped") {
+          if (event.pid && activePidRef.current && event.pid !== activePidRef.current) return;
+          activePidRef.current = undefined;
+          setConnection("offline");
+          setSessionSwitching(false);
+          setSessionState((current) => current ? { ...current, isStreaming: false } : current);
+          for (const pending of pendingRef.current.values()) {
+            if (pending.timeoutId) window.clearTimeout(pending.timeoutId);
+            pending.onError?.("Pi exited before the request completed.");
+          }
+          pendingRef.current.clear();
+          if (event.state === "exited" && event.code !== 0) addToast(event.message ?? `Pi exited with code ${event.code ?? "unknown"}`, "error");
+        }
+        if (event.state === "error") {
+          setConnection("error");
+          addToast(event.message ?? "The Pi process failed", "error");
+        }
+      }),
+      onPiStderr((line) => setStderrTail((current) => [...current.slice(-49), line])),
+    ]).then((listeners) => {
+      if (disposed) listeners.forEach((unlisten) => unlisten());
+      else unlisteners.push(...listeners);
+    });
+
+    return () => {
+      disposed = true;
+      unlisteners.forEach((unlisten) => unlisten());
+    };
+  }, [addToast, handlePiEvent]);
+
+  const runDetection = useCallback(async () => {
+    setDetectionError(undefined);
+    setDetectionSettled(false);
+    try {
+      setPi(await settleWithin(
+        detectPi(),
+        INITIAL_STARTUP_TIMEOUT_MS,
+        "Pi detection timed out. Check your Pi installation and try again.",
+      ));
+    } catch (error) {
+      setPi(undefined);
+      setDetectionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDetectionSettled(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (detectionStartedRef.current) return;
+    detectionStartedRef.current = true;
+    if (!isTauriRuntime()) {
+      setDetectionError("LemonPi must be opened through its Tauri desktop shell.");
+      setDetectionSettled(true);
+      return;
+    }
+    void runDetection();
+  }, [runDetection]);
+
+  useEffect(() => {
+    if (!startupReady) return;
+    setSplashExiting(true);
+    const timeoutId = window.setTimeout(() => setSplashVisible(false), SPLASH_EXIT_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [startupReady]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(recentProjects));
+    } catch {
+      // The app remains usable if OS webview storage is unavailable.
+    }
+  }, [recentProjects]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify({ sidebarCollapsed, sidebarWidth }));
+    } catch {
+      // UI preferences are best-effort.
+    }
+  }, [sidebarCollapsed, sidebarWidth]);
+
+  useEffect(() => {
+    const recent = recentProjects.reduce<RecentProject | undefined>(
+      (latest, entry) => !latest || entry.lastOpened > latest.lastOpened ? entry : latest,
+      undefined,
+    );
+    const decision = decideStartupGate({
+      detectionSettled,
+      hasPi: Boolean(pi),
+      hasRecentProject: Boolean(recent),
+      restorationInFlight: restoredProjectRef.current,
+      hasProject: Boolean(project),
+      hasCandidatePath: Boolean(candidatePath),
+    });
+    if (decision === "wait") return;
+    if (decision === "finish") {
+      finishStartup();
+      return;
+    }
+    restoredProjectRef.current = true;
+    void openProject(recent!.trusted, recent!.path, { initialRestore: true });
+  }, [candidatePath, detectionSettled, finishStartup, pi, project, recentProjects]);
+
+  useEffect(() => {
+    const sessionFile = sessionState?.sessionFile;
+    if (!sessionFile || connection !== "online") {
+      setSubagentRuns([]);
+      return;
+    }
+
+    let disposed = false;
+    let timeoutId: number | undefined;
+    const poll = async () => {
+      let nextDelay = 2500;
+      try {
+        const runs = await getSubagentRuns(sessionFile);
+        if (disposed) return;
+        setSubagentRuns(runs);
+        const activeCount = runs.reduce(
+          (count, run) => count + (run.steps?.filter((step) => ["running", "queued", "pending", "paused"].includes(step.status)).length ?? (["running", "queued", "paused"].includes(run.state) ? 1 : 0)),
+          0,
+        );
+        nextDelay = activeCount > 0 ? 700 : 2500;
+      } catch (error) {
+        console.warn("Could not refresh subagent activity", error);
+      } finally {
+        if (!disposed) timeoutId = window.setTimeout(poll, nextDelay);
+      }
+    };
+
+    void poll();
+    return () => {
+      disposed = true;
+      if (timeoutId) window.clearTimeout(timeoutId);
+    };
+  }, [connection, sessionState?.sessionFile]);
+
+  const chooseProject = useCallback(async () => {
+    const selected = await open({ directory: true, multiple: false, title: "Open a project in LemonPi" });
+    if (typeof selected === "string") setCandidatePath(selected);
+  }, []);
+
+  async function openProject(
+    trusted: boolean,
+    explicitPath?: string,
+    { initialRestore = false }: { initialRestore?: boolean } = {},
+  ) {
+    const path = explicitPath ?? candidatePath ?? project;
+    if (!path) return;
+    for (const pending of pendingRef.current.values()) {
+      if (pending.timeoutId) window.clearTimeout(pending.timeoutId);
+    }
+    pendingRef.current.clear();
+    setConnection("launching");
+    setDetectionError(undefined);
+    setSessions([]);
+    setSessionsStatus("loading");
+    try {
+      const info = await (initialRestore
+        ? settleWithin(
+          startPi(path, trusted),
+          INITIAL_STARTUP_TIMEOUT_MS,
+          "Restoring the saved project timed out. Open the project again to retry.",
+        )
+        : startPi(path, trusted));
+      const openedPath = info.cwd ?? path;
+      activePidRef.current = info.pid;
+      setPi(info);
+      setProject(openedPath);
+      setProjectTrusted(trusted);
+      setRecentProjects((current) => {
+        const existing = current.find((entry) => entry.path === path || entry.path === openedPath);
+        const withoutAlias = current.filter((entry) => entry.path !== path && entry.path !== openedPath);
+        return rememberProject(withoutAlias, {
+          path: openedPath,
+          trusted,
+          lastOpened: Date.now(),
+          pinned: existing?.pinned,
+        });
+      });
+      setCandidatePath(undefined);
+      setConnection("online");
+      setSessionState(undefined);
+      setStats(undefined);
+      setExtensionStatuses({});
+      setForegroundRuns([]);
+      setSubagentRuns([]);
+      setSubagentActivity({});
+      dispatchTranscript({ type: "lemonpi_reset" });
+      void rpc(
+        { type: "get_messages" },
+        {
+          onSuccess: (data) => {
+            const messages = asRecord(data)?.messages;
+            dispatchTranscript({ type: "lemonpi_hydrate", messages: Array.isArray(messages) ? messages : [] });
+            refreshState();
+            if (initialRestore) finishStartup();
+          },
+          onError: () => {
+            refreshState();
+            if (initialRestore) finishStartup();
+          },
+        },
+      );
+      void refreshSessions(openedPath);
+    } catch (error) {
+      setConnection("error");
+      setDetectionError(error instanceof Error ? error.message : String(error));
+      if (initialRestore) finishStartup();
+    }
+  }
+
+  function submitMessage(text: string, behavior: ComposerBehavior, attachments: ComposerAttachment[]) {
+    const images = promptImages(attachments);
+    void rpc({
+      type: behavior === "prompt" ? "prompt" : behavior === "steer" ? "steer" : "follow_up",
+      message: buildPromptWithAttachments(text, attachments),
+      ...(images.length > 0 ? { images } : {}),
+    });
+  }
+
+  const subagentSteerWhileStreaming = sessionState?.isStreaming ?? transcript.isStreaming;
+  const steerSubagent = useCallback((runId: string, index: number, message: string) => new Promise<void>((resolve, reject) => {
+    const controlMessage = `__lemonpi_subagent_steer_v1__:${JSON.stringify({ runId, index, message })}`;
+    void rpc(
+      {
+        type: "prompt",
+        message: controlMessage,
+        ...(subagentSteerWhileStreaming ? { streamingBehavior: "steer" } : {}),
+      },
+      {
+        onSuccess: () => resolve(),
+        onError: (error) => reject(new Error(error)),
+      },
+    );
+  }), [rpc, subagentSteerWhileStreaming]);
+
+  const respondToExtension = useCallback((response: ExtensionUiResponse) => {
+    setDialogQueue((current) => current.slice(1));
+    void sendPi(response);
+  }, []);
+
+  function newSession() {
+    if (!project || sessionState?.isStreaming || sessionSwitching) return;
+    setSessionSwitching(true);
+    void rpc(
+      { type: "new_session" },
+      {
+        onSuccess: (data) => {
+          setSessionSwitching(false);
+          if (!(data as { cancelled?: boolean })?.cancelled) {
+            dispatchTranscript({ type: "lemonpi_reset" });
+            setStats(undefined);
+            setForegroundRuns([]);
+            setSubagentRuns([]);
+            refreshState();
+            void refreshSessions();
+          }
+        },
+        onError: () => setSessionSwitching(false),
+      },
+    );
+  }
+
+  function selectSession(path: string) {
+    if (sessionState?.isStreaming || sessionSwitching || path === sessionState?.sessionFile) return;
+    setSessionSwitching(true);
+    void rpc(
+      { type: "switch_session", sessionPath: path },
+      {
+        onSuccess: (data) => {
+          if ((data as { cancelled?: boolean })?.cancelled) {
+            setSessionSwitching(false);
+            return;
+          }
+          dispatchTranscript({ type: "lemonpi_reset" });
+          setStats(undefined);
+          setForegroundRuns([]);
+          setSubagentRuns([]);
+          refreshState();
+          void rpc(
+            { type: "get_messages" },
+            {
+              onSuccess: (messagesData) => {
+                const messages = asRecord(messagesData)?.messages;
+                dispatchTranscript({ type: "lemonpi_hydrate", messages: Array.isArray(messages) ? messages : [] });
+                setSessionSwitching(false);
+                refreshState();
+                void refreshSessions();
+              },
+              onError: () => setSessionSwitching(false),
+            },
+          );
+        },
+        onError: () => setSessionSwitching(false),
+      },
+    );
+  }
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.repeat || dialogQueue.length > 0) return;
+      if (event.code === "Comma") {
+        event.preventDefault();
+        setSettingsOpen(true);
+      } else if (settingsOpen) {
+        return;
+      } else if (event.code === "KeyO") {
+        event.preventDefault();
+        void chooseProject();
+      } else if (event.code === "KeyB") {
+        event.preventDefault();
+        setSidebarCollapsed((value) => !value);
+      } else if (event.code === "KeyN") {
+        event.preventDefault();
+        newSession();
+      }
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, [chooseProject, dialogQueue.length, project, sessionState?.isStreaming, sessionSwitching, settingsOpen]);
+
+  const online = connection === "online";
+  const streaming = sessionState?.isStreaming ?? transcript.isStreaming;
+  const activeDialog = dialogQueue[0];
+  const visibleSubagentRuns = useMemo(() => {
+    const seen = new Set<string>();
+    return [...foregroundRuns, ...subagentRuns].filter((run) => {
+      if (seen.has(run.runId)) return false;
+      seen.add(run.runId);
+      return true;
+    });
+  }, [foregroundRuns, subagentRuns]);
+  const activityTargets = useMemo(() => visibleSubagentRuns.flatMap((run) => (
+    run.steps?.map((step, index): SubagentActivityTarget => ({
+      key: `${run.runId}:${step.index ?? index}`,
+      runId: run.runId,
+      agent: step.agent,
+      index: step.index ?? index,
+      transcriptPath: step.transcriptPath,
+    })) ?? []
+  )), [visibleSubagentRuns]);
+  const activityTargetSignature = JSON.stringify(activityTargets);
+  const hasActiveSubagents = visibleSubagentRuns.some((run) => isActiveSubagentRun(run));
+  const activeAgentNames = useMemo(() => new Set(visibleSubagentRuns.flatMap((run) => (
+    isActiveSubagentRun(run)
+      ? run.steps?.filter((step) => ["pending", "running", "paused"].includes(step.status)).map((step) => step.agent) ?? []
+      : []
+  ))), [visibleSubagentRuns]);
+
+  useEffect(() => {
+    if (!project || activityTargets.length === 0) {
+      setSubagentActivity({});
+      return;
+    }
+    let disposed = false;
+    let timeoutId: number | undefined;
+    const poll = async () => {
+      try {
+        const snapshots = await getSubagentActivity(project, activityTargets);
+        if (disposed) return;
+        setSubagentActivity(Object.fromEntries(snapshots.map((snapshot) => [snapshot.key, snapshot])));
+      } catch (error) {
+        console.warn("Could not refresh subagent transcripts", error);
+      } finally {
+        if (!disposed && hasActiveSubagents) timeoutId = window.setTimeout(poll, 650);
+      }
+    };
+    void poll();
+    return () => {
+      disposed = true;
+      if (timeoutId) window.clearTimeout(timeoutId);
+    };
+  }, [activityTargetSignature, hasActiveSubagents, project]);
+  return (
+    <div className="app-shell">
+      <WorkspaceRail
+        project={project}
+        projectTrusted={projectTrusted}
+        projects={recentProjects}
+        state={sessionState}
+        sessions={sessions}
+        sessionsStatus={sessionsStatus}
+        piVersion={pi?.version}
+        connection={connection}
+        collapsed={sidebarCollapsed}
+        width={sidebarWidth}
+        isStreaming={streaming}
+        sessionSwitching={sessionSwitching}
+        settingsOpen={settingsOpen}
+        onToggle={() => setSidebarCollapsed((value) => !value)}
+        onWidthChange={setSidebarWidth}
+        onChooseProject={() => void chooseProject()}
+        onOpenProject={(path) => {
+          const recent = recentProjects.find((entry) => entry.path === path);
+          void openProject(recent?.trusted ?? false, path);
+        }}
+        onPinProject={(path) => setRecentProjects((current) => toggleProjectPinned(current, path))}
+        onForgetProject={(path) => setRecentProjects((current) => forgetProject(current, path))}
+        onNewSession={newSession}
+        onSelectSession={selectSession}
+        onRetrySessions={() => void refreshSessions()}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
+      <main className="workbench">
+        <StatusStrip
+          state={sessionState}
+          stats={stats}
+          project={project}
+          connected={online}
+        />
+        <section className="conversation-stage">
+          <div className="conversation-scroll">
+            <Transcript
+              items={transcript.items}
+              isStreaming={streaming}
+              hasProject={Boolean(project)}
+              onChooseProject={() => void chooseProject()}
+            />
+          </div>
+          <div className="conversation-dock">
+            {Object.entries(extensionStatuses).length > 0 && (
+              <div className="extension-statuses">
+                {Object.entries(extensionStatuses).map(([key, value]) => <span key={key}><i />{value}</span>)}
+              </div>
+            )}
+            {!project && detectionError && connection !== "online" && (
+              <div className="setup-warning">
+                <Warning size={14} />
+                <span>{detectionError}</span>
+                <button type="button" onClick={() => void runDetection()}>Check again</button>
+              </div>
+            )}
+            {project && !online && connection !== "launching" && (
+              <div className="process-warning">
+                <Warning size={14} /> Pi is offline.
+                <button type="button" onClick={() => void openProject(projectTrusted)}>Restart</button>
+                {stderrTail.length > 0 && <span title={stderrTail.join("\n")}>Diagnostics available</span>}
+              </div>
+            )}
+            <Composer
+              connected={online}
+              streaming={streaming}
+              steeringCount={sessionState?.pendingSteeringCount ?? 0}
+              followUpCount={sessionState?.pendingFollowUpCount ?? 0}
+              state={sessionState}
+              stats={stats}
+              models={availableModels}
+              thinkingLevels={availableThinkingLevels}
+              injectedText={injectedComposerText}
+              onInjectedTextConsumed={() => setInjectedComposerText(undefined)}
+              onSubmit={submitMessage}
+              onAbort={() => void rpc({ type: "abort" })}
+              onSelectModel={(model) => void rpc(
+                { type: "set_model", provider: model.provider, modelId: model.id },
+                { onSuccess: refreshState },
+              )}
+              onSelectThinking={(level) => void rpc(
+                { type: "set_thinking_level", level },
+                { onSuccess: refreshState },
+              )}
+            />
+          </div>
+        </section>
+      </main>
+      <AgentActivityPanel
+        runs={visibleSubagentRuns}
+        activity={subagentActivity}
+        transcriptItems={transcript.items}
+        isStreaming={streaming}
+        state={sessionState}
+        onSteerSubagent={steerSubagent}
+      />
+      {settingsOpen && (
+        <SettingsSurface
+          hasProject={Boolean(project)}
+          models={availableModels}
+          sessionModel={sessionState?.model}
+          sessionThinking={sessionState?.thinkingLevel}
+          activeAgents={activeAgentNames}
+          onClose={closeSettings}
+          onNotice={addToast}
+        />
+      )}
+      {candidatePath && (
+        <ProjectTrustDialog
+          path={candidatePath}
+          busy={connection === "launching"}
+          onCancel={() => setCandidatePath(undefined)}
+          onOpenSafely={() => void openProject(false)}
+          onTrust={() => void openProject(true)}
+        />
+      )}
+      {activeDialog && <ExtensionDialog request={activeDialog} onRespond={respondToExtension} />}
+      <ToastStack toasts={toasts} onDismiss={(id) => setToasts((current) => current.filter((toast) => toast.id !== id))} />
+      {splashVisible && <StartupSplash exiting={splashExiting} />}
+    </div>
+  );
+}
+
+function ToastStack({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: string) => void }) {
+  return (
+    <div className="toast-stack" aria-live="polite">
+      {toasts.map((toast) => (
+        <div className={`toast toast--${toast.tone}`} key={toast.id}>
+          <span>{toast.message}</span>
+          <button type="button" onClick={() => onDismiss(toast.id)} aria-label="Dismiss"><X size={12} /></button>
+        </div>
+      ))}
+    </div>
+  );
+}

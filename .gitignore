@@ -1,0 +1,45 @@
+# Dependencies and package-manager caches
+node_modules/
+.pnpm-store/
+
+# Frontend build and test output
+dist/
+coverage/
+.nyc_output/
+.vite/
+*.tsbuildinfo
+
+# Rust and Tauri build output
+src-tauri/target/
+src-tauri/gen/
+**/*.rs.bk
+
+# Local environment and signing credentials
+.env
+.env.*
+!.env.example
+.envrc
+.direnv/
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Logs and diagnostics
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local Pi agent artifacts
+.pi-subagents/

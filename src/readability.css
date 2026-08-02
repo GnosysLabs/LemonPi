@@ -1,0 +1,357 @@
+/* Readability: the final typography pass.
+ *
+ * This file is imported LAST in main.tsx so it wins the cascade over
+ * styles.css, matte.css, rail.css, settings.css, and the activity sheets.
+ * Keep every typography floor here instead of scattering one-off bumps.
+ *
+ * Type scale contract:
+ * - 11px is the floor for genuinely secondary metadata (timestamps, labels,
+ *   badges, mono readouts). Nothing rendered may be smaller.
+ * - 12px for keyboard shortcut hints (<kbd>, composer hint) and counters or
+ *   count badges the user acts on (live count, queued count, session count).
+ * - 12px+ for primary supporting copy; 14px for reading/composing surfaces.
+ * Non-text dots, icons, and pseudo-elements keep their small dimensions.
+ */
+
+body {
+  font-size: 14px;
+}
+
+/* Shared labels */
+
+.eyebrow,
+.settings-heading .eyebrow {
+  font-size: 11px;
+}
+
+.user-message__label,
+.workspace-rail__label,
+.tool-card__label,
+.agent-output__label {
+  font-size: 11px;
+}
+
+/* Onboarding */
+
+.onboarding__pi-status code {
+  font-size: 11px;
+}
+
+.selected-project span:not(.selected-project__icon) {
+  font-size: 11px;
+}
+
+.selected-project button {
+  font-size: 11px;
+}
+
+.trust-note {
+  font-size: 11px !important;
+}
+
+/* Workspace rail */
+
+.open-project-button,
+.rail-nav-item,
+.project-row {
+  font-size: 12px;
+}
+
+.rail-nav-item i {
+  font-size: 11px;
+}
+
+.project-switcher__copy small,
+.project-option__copy small {
+  font-size: 11px;
+}
+
+.project-options__heading,
+.session-list__heading,
+.session-group__heading {
+  font-size: 11px;
+}
+
+.project-options__heading i,
+.session-group__heading i {
+  font-size: 11px;
+}
+
+.session-list__heading i {
+  padding: 2px 6px;
+  font-size: 12px;
+}
+
+.project-switcher__busy {
+  font-size: 11px;
+}
+
+/* Keyboard shortcut hints: always 12px, never microtype. */
+.project-switcher__open kbd,
+.rail-new-session kbd,
+.workspace-action kbd {
+  font-size: 12px;
+}
+
+.session-row strong {
+  font-size: 12px;
+}
+
+.session-row small,
+.session-row__copy small {
+  font-size: 11px;
+}
+
+.session-search input {
+  font-size: 12px;
+}
+
+.session-list__empty,
+.session-list__state span,
+.session-list__state button,
+.rail-empty-project span,
+.rail-empty-project button {
+  font-size: 11px;
+}
+
+.compact-rail-button i {
+  min-width: 19px;
+  height: 18px;
+  font-size: 11px;
+}
+
+.workspace-rail__footer {
+  margin-top: auto;
+  font-size: 11px;
+}
+
+.rail-settings-button strong {
+  font-size: 11px;
+}
+
+.rail-settings-button > span {
+  font-size: 12px;
+}
+
+/* Status strip */
+
+.status-strip__project,
+.connection-pill,
+.instrument {
+  font-size: 11px;
+}
+
+.status-strip__cost,
+.status-strip__tokens {
+  font-size: 11px;
+}
+
+.instrument--thinking .instrument--select__value {
+  max-width: 96px;
+}
+
+/* Empty states and transcript */
+
+.empty-workspace > p:not(.eyebrow),
+.empty-transcript > p:not(.eyebrow) {
+  font-size: 14px;
+}
+
+.workspace-action strong {
+  font-size: 13px;
+}
+
+.workspace-action small,
+.prompt-suggestions span {
+  font-size: 11px;
+}
+
+.user-message p,
+.markdown {
+  font-size: 14px;
+}
+
+.markdown pre code {
+  font-size: 12px;
+}
+
+.message-state {
+  font-size: 11px;
+}
+
+.tool-card__name {
+  font-size: 11px;
+}
+
+.tool-card__summary,
+.tool-card__body pre {
+  font-size: 11px;
+}
+
+/* Composer and dock notices */
+
+.extension-statuses span,
+.process-warning,
+.process-warning button,
+.setup-warning,
+.setup-warning button,
+.project-trust-bar,
+.project-trust-bar button {
+  font-size: 11px;
+}
+
+.project-trust-bar strong {
+  font-size: 12px;
+}
+
+.composer textarea {
+  font-size: 14px;
+}
+
+.composer-modes button {
+  font-size: 11px;
+}
+
+.composer-modes__count {
+  font-size: 12px;
+}
+
+/* Main-agent activity (inline in the transcript) */
+
+.main-agent-activity__content header > span {
+  font-size: 11px;
+}
+
+.main-agent-activity__reasoning-off,
+.main-agent-activity__reasoning-label,
+.main-agent-activity__history span {
+  font-size: 11px;
+}
+
+.main-agent-activity__reasoning-label i {
+  font-size: 11px;
+}
+
+/* Agent activity panel */
+
+.agent-activity-panel__header h2 {
+  font-size: 17px;
+}
+
+.live-count {
+  min-height: 26px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+.command-main__state {
+  font-size: 11px;
+}
+
+.command-main__meta span,
+.agent-card__meta span {
+  min-height: 22px;
+  font-size: 11px;
+}
+
+.command-section-title {
+  font-size: 11px;
+}
+
+.command-section-title small {
+  font-size: 11px;
+}
+
+.agent-activity-empty strong {
+  font-size: 12px;
+}
+
+.agent-activity-empty span {
+  font-size: 11px;
+}
+
+.agent-run__header,
+.agent-run__header code,
+.run-state,
+.agent-card__elapsed,
+.agent-activity-event,
+.agent-activity-event time,
+.agent-error,
+.agent-activity-panel__footer {
+  font-size: 11px;
+}
+
+.agent-card__identity strong {
+  font-size: 12px;
+}
+
+.agent-card__identity small {
+  font-size: 11px;
+}
+
+.agent-current,
+.agent-tools span,
+.agent-output__content {
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+/* Dialogs and toasts */
+
+.extension-dialog__message,
+.extension-dialog input,
+.extension-dialog__options button {
+  font-size: 12px;
+}
+
+.extension-dialog textarea {
+  font-size: 11px;
+}
+
+.toast {
+  font-size: 12px;
+}
+
+/* Settings surface */
+
+.settings-nav__group-label,
+.setting-row__badge,
+.agent-settings-group__heading,
+.agent-settings-group__heading i,
+.agent-shadow-notice,
+.agent-setting-row__error,
+.agent-setting-control > span,
+.agent-setting-control > span i,
+.choice-picker__hint,
+.choice-picker__option-hint,
+.choice-picker__group-label,
+.package-row__identity span,
+.package-state,
+.settings-footer {
+  font-size: 11px;
+}
+
+.settings-scope button,
+.settings-apply-note,
+.settings-toolbar > span,
+.settings-panel__header p,
+.setting-row__copy p,
+.agent-setting-row__identity p,
+.settings-error span,
+.settings-error button,
+.package-security-note,
+.advanced-settings__warning span {
+  font-size: 12px;
+}
+
+.settings-agent-count {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.agent-source,
+.agent-live-chip {
+  height: 20px;
+  padding: 0 6px;
+  font-size: 11px;
+}
