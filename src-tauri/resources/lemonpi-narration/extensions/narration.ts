@@ -183,6 +183,35 @@ function writerNotificationStatus(content: string, agent: string | undefined): "
   return undefined;
 }
 
+type WriterLifecycleStatus = "completed" | "failed" | "paused" | "stopped";
+
+function writerLifecycleStatus(value: unknown): WriterLifecycleStatus | undefined {
+  const result = asRecord(value);
+  if (!result) return undefined;
+  const children = Array.isArray(result.results) ? result.results.map(asRecord).filter(Boolean) : [];
+  const stopped = result.stopped === true
+    || result.state === "stopped"
+    || children.some((child) => child?.stopped === true || child?.status === "stopped");
+  if (stopped) return "stopped";
+  const summary = typeof result.summary === "string" ? result.summary : "";
+  const paused = result.state === "paused"
+    || (result.success !== true && result.exitCode === 0)
+    || summary.startsWith("Paused after interrupt.");
+  if (paused) return "paused";
+  if (result.success === true || result.state === "complete" || result.state === "completed") return "completed";
+  if (result.success === false || result.state === "failed" || result.state === "rejected" || children.some((child) => child?.status === "failed" || child?.status === "rejected" || child?.success === false)) {
+    return "failed";
+  }
+  return undefined;
+}
+
+function delegationRunId(value: unknown): string | undefined {
+  const result = asRecord(value);
+  const details = asRecord(result?.details);
+  const candidate = details?.runId ?? details?.asyncId ?? result?.runId ?? result?.id;
+  return typeof candidate === "string" && candidate.trim() ? candidate.trim() : undefined;
+}
+
 function verifiedAcceptanceWithoutRuntimeCommands(value: unknown): boolean {
   if (value === "verified") return true;
   const acceptance = asRecord(value);
@@ -279,6 +308,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   let reviewDispatches = 0;
   let writerOccupied = false;
   let activeWriterAgent: string | undefined;
+  let activeWriterRunId: string | undefined;
   let consecutiveWriterFailures = 0;
   let rosterInspected = false;
   let rosterGeneration = 0;
@@ -288,6 +318,33 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   const delegationToolCalls = new Set<string>();
   const rosterListToolCalls = new Map<string, number>();
   const writerToolCalls = new Map<string, { agent: string; async: boolean }>();
+  const terminalWriterRuns = new Map<string, WriterLifecycleStatus>();
+
+  const settleWriter = (status: WriterLifecycleStatus) => {
+    if (status === "paused") return;
+    const wasOccupied = writerOccupied;
+    if (activeWriterRunId) terminalWriterRuns.delete(activeWriterRunId);
+    writerOccupied = false;
+    activeWriterAgent = undefined;
+    activeWriterRunId = undefined;
+    if (status === "completed") consecutiveWriterFailures = 0;
+    if (status === "failed" && wasOccupied) consecutiveWriterFailures += 1;
+  };
+
+  pi.events.on("subagent:async-complete", (payload) => {
+    const runId = delegationRunId(payload);
+    const status = writerLifecycleStatus(payload);
+    if (runId && status) {
+      terminalWriterRuns.set(runId, status);
+      if (terminalWriterRuns.size > 64) terminalWriterRuns.delete(terminalWriterRuns.keys().next().value!);
+      if (writerOccupied && activeWriterRunId === runId) settleWriter(status);
+    }
+    const failure = delegationFailure(payload, false);
+    if (failure) {
+      delegationFailurePending = true;
+      lastDelegationFailure = failure;
+    }
+  });
 
   pi.on("before_agent_start", async (event) => ({
     systemPrompt: `${event.systemPrompt}\n\n${NARRATION_CONTRACT}\n\n${ORCHESTRATION_CONTRACT}${attentionRecovery ? `\n\n<lemonpi-attention-recovery>\nRun ${attentionRecovery.runId}${attentionRecovery.index !== undefined ? ` child ${attentionRecovery.index}` : ""} needs intervention now. Inspect and control that exact run before ending this turn.\n</lemonpi-attention-recovery>` : ""}`,
@@ -328,13 +385,6 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
     }
     return { action: "handled" };
-  });
-
-  pi.events.on("subagent:async-complete", (payload) => {
-    const failure = delegationFailure(payload, false);
-    if (!failure) return;
-    delegationFailurePending = true;
-    lastDelegationFailure = failure;
   });
 
   pi.on("tool_call", async (event) => {
@@ -432,6 +482,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       if (writers.length > 0 && input.clarify !== true) {
         writerOccupied = true;
         activeWriterAgent = writers[0]?.agent;
+        activeWriterRunId = undefined;
         writerToolCalls.set(event.toolCallId, { agent: activeWriterAgent ?? "writer", async: input.async !== false });
       }
 
@@ -488,13 +539,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     }
     if (message.customType === "subagent-notify") {
       const workerStatus = writerNotificationStatus(notification, activeWriterAgent);
-      const workerWasOccupied = writerOccupied;
-      if (workerStatus && workerStatus !== "paused") {
-        writerOccupied = false;
-        activeWriterAgent = undefined;
-      }
-      if (workerStatus === "completed") consecutiveWriterFailures = 0;
-      if (workerStatus === "failed" && workerWasOccupied) consecutiveWriterFailures += 1;
+      if (workerStatus) settleWriter(workerStatus);
       sawToolActivity = false;
       visibleExplanationAfterLastTool = false;
       lastAssistantStopReason = undefined;
@@ -527,15 +572,16 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     const failure = delegationFailure(event.result, event.isError);
     if (!failure) {
       if (writerCall?.async === false) {
-        writerOccupied = false;
-        activeWriterAgent = undefined;
+        settleWriter("completed");
+      } else if (writerCall && writerOccupied) {
+        activeWriterRunId = delegationRunId(event.result);
+        const terminalStatus = activeWriterRunId ? terminalWriterRuns.get(activeWriterRunId) : undefined;
+        if (terminalStatus) settleWriter(terminalStatus);
       }
       return;
     }
     if (writerCall) {
-      writerOccupied = false;
-      activeWriterAgent = undefined;
-      consecutiveWriterFailures += 1;
+      settleWriter("failed");
     }
     delegationFailurePending = true;
     lastDelegationFailure = failure;
