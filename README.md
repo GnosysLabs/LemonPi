@@ -11,8 +11,9 @@ A native desktop workspace for the [Pi coding agent](https://pi.dev), built with
 - Supports prompt, steer, follow-up, abort, model cycling, and thinking-level cycling.
 - Handles Pi extension dialogs and notifications through the RPC extension UI protocol.
 - Displays session context and cost statistics.
-- Shows a live Agent Activity drawer with child role, task, model, effort, elapsed time, token usage, current tool, recent tools, and child-visible output.
+- Shows a live Command center with child role, task, model, effort, elapsed time, token usage, current tool, child-visible output, direct steering, and stop controls on active agents.
 - Narrates the main agent's live work with current actions, auto-expanded running tools, and a transient token-by-token stream of provider-surfaced reasoning.
+- Keeps Main Pi in a read-only supervisor role and requires broad implementation work to proceed through bounded, sequential worker chunks with an inspection checkpoint after each one.
 - Lists saved Pi sessions for the active project and reopens them through Pi's `switch_session` RPC without copying or migrating session data.
 - Remembers recent projects, their trust choices, and the last active workspace across launches.
 - Exposes Pi's user and project settings in a native categorized GUI, with a raw JSON escape hatch for new or extension-defined settings.

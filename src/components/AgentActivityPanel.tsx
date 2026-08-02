@@ -5,6 +5,7 @@ import {
   Clock,
   Robot,
   Signpost,
+  Stop,
   TerminalWindow,
   Warning,
 } from "@phosphor-icons/react";
@@ -131,6 +132,7 @@ function AgentCard({
   now,
   activity,
   onSteer,
+  onStop,
 }: {
   run: SubagentRunStatus;
   step: SubagentStepStatus;
@@ -138,11 +140,14 @@ function AgentCard({
   now: number;
   activity?: SubagentLiveActivity;
   onSteer: (runId: string, index: number, message: string) => Promise<void>;
+  onStop: (runId: string) => Promise<void>;
 }) {
   const active = isActive(step.status);
+  const groupedRun = (run.steps?.length ?? 0) > 1;
   const [expanded, setExpanded] = useState(false);
   const [steerText, setSteerText] = useState("");
   const [steering, setSteering] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [steerError, setSteerError] = useState<string>();
   const output = step.recentOutput?.filter(Boolean).slice(-8) ?? [];
   const model = shortModel(step.model);
@@ -195,16 +200,44 @@ function AgentCard({
     }
   }
 
+  async function stopAgent() {
+    if (stopping) return;
+    setStopping(true);
+    setSteerError(undefined);
+    try {
+      await onStop(run.runId);
+      window.setTimeout(() => setStopping(false), 8_000);
+    } catch (error) {
+      setSteerError(error instanceof Error ? error.message : String(error));
+      setStopping(false);
+    }
+  }
+
   return (
     <article className={`agent-card agent-card--${step.status}`}>
-      <button className="agent-card__summary" type="button" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
-        <span className="agent-card__status"><StatusIcon status={step.status} /></span>
-        <span className="agent-card__identity">
-          <strong>{step.label ?? step.agent}</strong>
-          <small title={step.description}>{collapsedStatus}</small>
-        </span>
-        <span className="agent-card__elapsed"><Clock size={10} />{formatElapsed(step.startedAt ?? run.startedAt, step.endedAt, now)}</span>
-      </button>
+      <div className="agent-card__header">
+        <button className="agent-card__summary" type="button" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
+          <span className="agent-card__status"><StatusIcon status={step.status} /></span>
+          <span className="agent-card__identity">
+            <strong>{step.label ?? step.agent}</strong>
+            <small title={step.description}>{collapsedStatus}</small>
+          </span>
+          <span className="agent-card__elapsed"><Clock size={10} />{formatElapsed(step.startedAt ?? run.startedAt, step.endedAt, now)}</span>
+        </button>
+        {active && run.statusPath && (
+          <button
+            className="agent-card__stop"
+            type="button"
+            onClick={() => void stopAgent()}
+            disabled={stopping}
+            title={groupedRun ? "Permanently stop this entire delegated run" : "Permanently stop this agent"}
+            aria-label={groupedRun ? `Stop the run containing ${step.label ?? step.agent}` : `Stop ${step.label ?? step.agent}`}
+          >
+            {stopping ? <CircleNotch className="spin" size={11} /> : <Stop size={11} weight="fill" />}
+            <span>{stopping ? "Stopping" : groupedRun ? "Stop run" : "Stop"}</span>
+          </button>
+        )}
+      </div>
 
       {expanded && (
         <div className="agent-card__detail">
@@ -242,9 +275,9 @@ function AgentCard({
                   value={steerText}
                   onChange={(event) => setSteerText(event.target.value)}
                   placeholder="Correct direction or add context…"
-                  disabled={steering}
+                  disabled={steering || stopping}
                 />
-                <button type="submit" disabled={!steerText.trim() || steering}>
+                <button type="submit" disabled={!steerText.trim() || steering || stopping}>
                   {steering ? <CircleNotch className="spin" size={11} /> : <Signpost size={11} />}
                   {steering ? "Sending" : "Steer"}
                 </button>
@@ -289,6 +322,7 @@ export function AgentActivityPanel({
   isStreaming,
   state,
   onSteerSubagent,
+  onStopSubagent,
 }: {
   runs: SubagentRunStatus[];
   activity: Record<string, SubagentLiveActivity>;
@@ -296,6 +330,7 @@ export function AgentActivityPanel({
   isStreaming: boolean;
   state?: PiSessionState;
   onSteerSubagent: (runId: string, index: number, message: string) => Promise<void>;
+  onStopSubagent: (runId: string) => Promise<void>;
 }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -343,7 +378,7 @@ export function AgentActivityPanel({
               </div>
               {(run.steps?.length ? run.steps : [{ agent: "subagent", status: run.state, startedAt: run.startedAt, error: run.error } as SubagentStepStatus]).map((step, index) => {
                 const childIndex = step.index ?? index;
-                return <AgentCard key={`${run.runId}-${childIndex}`} run={run} step={step} index={childIndex} now={now} activity={activity[`${run.runId}:${childIndex}`]} onSteer={onSteerSubagent} />;
+                return <AgentCard key={`${run.runId}-${childIndex}`} run={run} step={step} index={childIndex} now={now} activity={activity[`${run.runId}:${childIndex}`]} onSteer={onSteerSubagent} onStop={onStopSubagent} />;
               })}
             </section>
           ))

@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const SUBAGENT_STEER_PREFIX = "__lemonpi_subagent_steer_v1__:";
+const SUBAGENT_STOP_PREFIX = "__lemonpi_subagent_stop_v1__:";
 const SUBAGENT_RPC_REQUEST_EVENT = "subagents:rpc:v1:request";
 const SUBAGENT_RPC_REPLY_PREFIX = "subagents:rpc:v1:reply:";
 const SUBAGENT_RPC_TIMEOUT_MS = 6_000;
@@ -24,20 +25,22 @@ You are Main Pi, the read-only supervisor and integration owner. You do not impl
 
 Routing policy:
 
-1. Fast worker path — use exactly one configured worker for a bounded, well-understood, low-risk implementation. Examples include UI polish across markup/styles/state, labels and icons, a startup splash, localized interaction fixes, small configuration changes, and straightforward bugs with an established cause. Give the worker the complete small outcome, avoid specialists and reviewers, inspect the result, and run one proportionate validation pass. Efficiency comes from one clean handoff, not from Main Pi coding.
-2. Standard worker path — delegate exactly one coherent implementation slice when work is broad, uncertain, specialized, or long-running. The worker role resolves its coding model through the user's Pi configuration; do not override it unless the user asks. Main Pi owns requirements, architecture, narration, integration judgment, and the final explanation, but never edits project/source files itself.
-3. Specialist path — use a scout, researcher, designer, planner, oracle, or reviewer only for a concrete unknown or specialized risk Main Pi cannot resolve efficiently. Specialists are not mandatory pipeline stages. Never relay a small task serially through designer, worker, reviewer, repair worker, and reviewer.
-4. Review gate — independent review is justified only when the user explicitly requests it or the change crosses a material risk boundary such as authentication, authorization, security, privacy, money, irreversible data changes, migrations, cryptography, public protocols, concurrency, or production release infrastructure. State that boundary in the delegated task as "Review justification: ...". At most one reviewer pass is allowed per user request unless the user explicitly asks for multiple independent reviews. Routine work is reviewed by Main Pi while inspecting the diff.
-5. Repair rule — only a concrete blocker or major correctness defect warrants a repair pass. Notes, hypothetical edge cases, test-coverage wishes, and low-severity residual risks do not trigger an automatic worker-review loop. For a bounded correction, steer or resume the same worker rather than launching a new implementation owner. After the worker repairs it, Main Pi inspects and validates directly. Do not launch a second reviewer to confirm the first reviewer.
-6. Parallelism rule — parallelize only independent work. In a shared checkout keep exactly one writer; concurrent work must be read-only and useful regardless of the writer's result. Do not wait while independent work remains, and do not create serial handoffs that add no information.
-7. Validation rule — validate in proportion to blast radius and run each relevant check once after the workspace is stable. Do not make every participant rerun the same tests or demand structured acceptance reports for routine local changes. Main Pi owns final acceptance.
-8. Progress and responsiveness rule — never invent a short child runtime deadline and never block the interactive supervisor with subagent_wait. Use progress evidence rather than elapsed time alone. End the Main Pi turn while background work continues so new user messages receive a fresh response immediately. If a child appears stuck or the user provides guidance, inspect its live activity, steer it once with concrete direction, and reassess. Do not respond to slowness by launching more agents or restarting the whole workflow.
+1. Decomposition rule — first decide whether the request is already one small, independently verifiable outcome. If it is broader, divide it into ordered vertical chunks before dispatch: each chunk should leave the workspace coherent, be reviewable on its own, and reduce uncertainty for the next chunk. Prefer boundaries such as foundation, one behavior, integration, then polish; do not split into arbitrary file-by-file chores or tiny edits that add handoff overhead.
+2. Chunk contract — every worker task must state exactly four fields: \`Chunk outcome:\`, \`In scope:\`, \`Done when:\`, and \`Out of scope:\`. Give the worker only the current chunk, plus enough surrounding context to avoid incompatible decisions. Explicitly exclude later chunks. A chunk should normally cover one user-visible behavior or one architectural seam and have a short, observable acceptance condition.
+3. Fast worker path — a bounded, well-understood, low-risk request is one chunk. Examples include cohesive UI polish across markup/styles/state, labels and icons, a startup splash, localized interaction fixes, small configuration changes, and straightforward bugs with an established cause. Give one configured worker that complete small outcome, avoid specialists and reviewers, inspect the result, and run one proportionate validation pass.
+4. Sequential worker path — for broader work, dispatch only the first chunk. When it completes, inspect the actual diff and worker evidence before doing anything else. Confirm the chunk's acceptance condition, identify regressions or newly learned constraints, and either steer/resume the same worker for a bounded correction or dispatch the next chunk with updated context. Never hand the worker the entire backlog "for completeness." The worker role resolves its coding model through the user's Pi configuration; do not override it unless the user asks.
+5. Checkpoint review — Main Pi reviews every completed chunk directly: inspect what changed, compare it with the stated scope and out-of-scope boundary, and perform the smallest useful check. Report the concrete checkpoint to the user before continuing. Run a final holistic validation once after all chunks are integrated; do not rerun the full suite after every small chunk unless its risk requires that.
+6. Specialist path — use a scout, researcher, designer, planner, oracle, or reviewer only for a concrete unknown or specialized risk Main Pi cannot resolve efficiently. Specialists are not mandatory pipeline stages. Never relay a small task serially through designer, worker, reviewer, repair worker, and reviewer.
+7. Review gate — independent review is justified only when the user explicitly requests it or the change crosses a material risk boundary such as authentication, authorization, security, privacy, money, irreversible data changes, migrations, cryptography, public protocols, concurrency, or production release infrastructure. State that boundary in the delegated task as "Review justification: ...". At most one reviewer pass is allowed per user request unless the user explicitly asks for multiple independent reviews. Routine work is reviewed by Main Pi at each chunk checkpoint.
+8. Repair rule — only a concrete blocker or major correctness defect warrants a repair pass. Notes, hypothetical edge cases, test-coverage wishes, and low-severity residual risks do not trigger an automatic worker-review loop. For a bounded correction, steer or resume the same worker rather than launching a new implementation owner. After the worker repairs it, Main Pi inspects and validates directly. Do not launch a second reviewer to confirm the first reviewer.
+9. Parallelism rule — parallelize only independent work. In a shared checkout keep exactly one writer; concurrent work must be read-only and useful regardless of the writer's result. A new user message never authorizes a second writer while the current worker is running or paused: respond to the user, then steer the existing worker if needed.
+10. Progress and responsiveness rule — never invent a short child runtime deadline and never block the interactive supervisor with subagent_wait. Use progress evidence rather than elapsed time alone. End the Main Pi turn while background work continues so new user messages receive a fresh response immediately. If a child appears stuck or the user provides guidance, inspect its live activity, steer it once with concrete direction, and reassess. Do not respond to slowness by launching more agents or restarting the whole workflow.
 
 Main Pi may use read-only inspection, search, status, test, build, and git-management operations. It must not call file editing/writing tools or use shell commands to mutate project files. Launch implementation asynchronously, do only brief useful read-only work, then return control to the user; completion events provide the integration wake-up. For explanation, diagnosis, review, or other read-only requests, do not launch an implementation worker.
 </lemonpi-orchestration>`;
 
 const CLOSING_REPAIR = `The previous response ended after tool activity without a visible closing explanation. Do not call more tools. Give the user a concise, specific closing explanation now: state the outcome, what changed, what was verified, and any blocker or next step. If the task is incomplete, say exactly where it stopped and why.`;
-const DELEGATION_RECOVERY = `A delegated run failed and no replacement delegation was launched before the turn settled. Own the failure now: inspect the exact status/error and any partial output, identify whether the cause was a parent-imposed timeout, unavailable model/tool, configuration problem, or task failure, preserve valid partial work, and re-delegate the remaining coherent slice with corrected instructions and realistic limits. Do not set a tight timeout. If retrying cannot help because the blocker is external, give the user the exact blocker and the evidence instead of claiming recovery.`;
+const DELEGATION_RECOVERY = `A delegated run failed and no replacement delegation was launched before the turn settled. Own the failure now: inspect the exact status/error and any partial output, identify whether the cause was a parent-imposed timeout, unavailable model/tool, configuration problem, or task failure, preserve valid partial work, and re-delegate only the next bounded chunk with corrected instructions, the required chunk-contract fields, and realistic limits. Do not set a tight timeout. If retrying cannot help because the blocker is external, give the user the exact blocker and the evidence instead of claiming recovery.`;
 
 function visibleText(content: unknown): string {
   if (typeof content === "string") return content.trim();
@@ -50,7 +53,11 @@ function visibleText(content: unknown): string {
     .trim();
 }
 
-function requestSubagentSteer(pi: ExtensionAPI, id: string, index: number, message: string): Promise<void> {
+function requestSubagentControl(
+  pi: ExtensionAPI,
+  method: "steer" | "stop",
+  params: { id: string; index?: number; message?: string },
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const requestId = globalThis.crypto.randomUUID();
     let settled = false;
@@ -62,22 +69,30 @@ function requestSubagentSteer(pi: ExtensionAPI, id: string, index: number, messa
       clearTimeout(timeoutId);
       unsubscribe();
       if (reply.success === true) resolve();
-      else reject(new Error(reply.error?.message ?? "The subagent rejected the steering message."));
+      else reject(new Error(reply.error?.message ?? `The subagent rejected the ${method} request.`));
     });
     timeoutId = setTimeout(() => {
       if (settled) return;
       settled = true;
       unsubscribe();
-      reject(new Error("The subagent did not acknowledge the steering message."));
+      reject(new Error(`The subagent did not acknowledge the ${method} request.`));
     }, SUBAGENT_RPC_TIMEOUT_MS);
 
     pi.events.emit(SUBAGENT_RPC_REQUEST_EVENT, {
       version: 1,
       requestId,
-      method: "steer",
-      params: { id, index, message },
+      method,
+      params,
     });
   });
+}
+
+function requestSubagentSteer(pi: ExtensionAPI, id: string, index: number, message: string): Promise<void> {
+  return requestSubagentControl(pi, "steer", { id, index, message });
+}
+
+function requestSubagentStop(pi: ExtensionAPI, id: string): Promise<void> {
+  return requestSubagentControl(pi, "stop", { id });
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -88,7 +103,10 @@ const MATERIAL_RISK_REQUEST = /\b(?:security|authentication|authorization|permis
 const EXPLICIT_REVIEW_REQUEST = /\b(?:review|audit|second opinion|independent verification|threat model)\b/i;
 const EXPLICIT_MULTI_REVIEW_REQUEST = /\b(?:multiple|several|two|three|parallel|independent)\b.{0,32}\b(?:reviews?|reviewers?|audits?)\b|\b(?:reviews?|reviewers?|audits?)\b.{0,32}\b(?:multiple|several|two|three|parallel|independent)\b/i;
 const REVIEW_JUSTIFICATION = /\breview justification:\s*(?!none\b|n\/a\b)[^\n]{8,}/i;
-const REPAIR_TASK = /\b(?:repair|fix(?:ing)?|address(?:ing)?|resolve|blocker|major defect)\b/i;
+const CHUNK_OUTCOME = /\bchunk outcome\s*:/i;
+const CHUNK_IN_SCOPE = /\bin scope\s*:/i;
+const CHUNK_DONE_WHEN = /\bdone when\s*:/i;
+const CHUNK_OUT_OF_SCOPE = /\bout of scope\s*:/i;
 const IMPLEMENTATION_AGENTS = new Set(["worker", "designer", "delegate"]);
 const MAIN_MUTATION_TOOLS = new Set(["edit", "write", "apply_patch", "patch", "write_file", "edit_file", "create_file", "delete_file", "move_file"]);
 const IMPLEMENTATION_TASK = /\b(?:implement|code|edit|write|change|fix|add|remove|refactor|create|update|modify|wire|style|replace|rename)\b/i;
@@ -116,6 +134,20 @@ function delegatedSpecs(value: unknown): DelegatedSpec[] {
   };
   visit(value);
   return specs;
+}
+
+function hasBoundedChunkContract(task: string): boolean {
+  return CHUNK_OUTCOME.test(task)
+    && CHUNK_IN_SCOPE.test(task)
+    && CHUNK_DONE_WHEN.test(task)
+    && CHUNK_OUT_OF_SCOPE.test(task);
+}
+
+function workerNotificationStatus(content: string): "completed" | "failed" | "paused" | "stopped" | undefined {
+  const single = content.match(/^(?:Background task|Detached foreground task) (completed|failed|paused|stopped): \*\*worker\*\*/m);
+  if (single) return single[1] as "completed" | "failed" | "paused" | "stopped";
+  if (/^Background tasks completed \(\d+\):.*\*\*worker\*\*/m.test(content)) return "completed";
+  return undefined;
 }
 
 function shellMutatesProject(input: Record<string, unknown>): boolean {
@@ -174,31 +206,46 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   let lastDelegationFailure: string | undefined;
   let latestUserRequest = "";
   let reviewDispatches = 0;
-  let writerDispatches = 0;
+  let writerOccupied = false;
+  let consecutiveWriterFailures = 0;
   const delegationToolCalls = new Set<string>();
+  const writerToolCalls = new Map<string, boolean>();
 
   pi.on("before_agent_start", async (event) => ({
     systemPrompt: `${event.systemPrompt}\n\n${NARRATION_CONTRACT}\n\n${ORCHESTRATION_CONTRACT}`,
   }));
 
   pi.on("input", async (event, ctx) => {
-    if (event.source !== "rpc" || !event.text.startsWith(SUBAGENT_STEER_PREFIX)) return { action: "continue" };
+    if (event.source !== "rpc") return { action: "continue" };
+
+    const isSteerRequest = event.text.startsWith(SUBAGENT_STEER_PREFIX);
+    const isStopRequest = event.text.startsWith(SUBAGENT_STOP_PREFIX);
+    if (!isSteerRequest && !isStopRequest) return { action: "continue" };
 
     try {
-      const payload = JSON.parse(event.text.slice(SUBAGENT_STEER_PREFIX.length)) as {
+      const prefix = isSteerRequest ? SUBAGENT_STEER_PREFIX : SUBAGENT_STOP_PREFIX;
+      const payload = JSON.parse(event.text.slice(prefix.length)) as {
         runId?: unknown;
         index?: unknown;
         message?: unknown;
       };
       const runId = typeof payload.runId === "string" ? payload.runId.trim() : "";
-      const index = typeof payload.index === "number" ? payload.index : -1;
-      const message = typeof payload.message === "string" ? payload.message.trim() : "";
-      if (!/^[A-Za-z0-9-]{4,128}$/.test(runId) || !Number.isInteger(index) || index < 0 || !message || message.length > 4_000) {
-        throw new Error("The subagent steering request was malformed.");
+      if (!/^[A-Za-z0-9-]{4,128}$/.test(runId)) {
+        throw new Error(`The subagent ${isSteerRequest ? "steering" : "stop"} request was malformed.`);
       }
 
-      await requestSubagentSteer(pi, runId, index, message);
-      ctx.ui.notify("Steer delivered directly to the subagent.", "info");
+      if (isSteerRequest) {
+        const index = typeof payload.index === "number" ? payload.index : -1;
+        const message = typeof payload.message === "string" ? payload.message.trim() : "";
+        if (!Number.isInteger(index) || index < 0 || !message || message.length > 4_000) {
+          throw new Error("The subagent steering request was malformed.");
+        }
+        await requestSubagentSteer(pi, runId, index, message);
+        ctx.ui.notify("Steer delivered directly to the subagent.", "info");
+      } else {
+        await requestSubagentStop(pi, runId);
+        ctx.ui.notify("Stop requested directly for the subagent.", "info");
+      }
     } catch (error) {
       ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
     }
@@ -251,6 +298,14 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         };
       }
 
+      const unboundedWorkerTask = writers.find((spec) => spec.agent === "worker" && !hasBoundedChunkContract(spec.task));
+      if (unboundedWorkerTask) {
+        return {
+          block: true,
+          reason: "LemonPi requires a bounded worker chunk. Rewrite the task with `Chunk outcome:`, `In scope:`, `Done when:`, and `Out of scope:`. Delegate only the current independently reviewable chunk, not the remaining backlog.",
+        };
+      }
+
       if (reviewers.length > 0 && !requestExplicitlyRequestsReview && !requestHasMaterialRisk && !taskJustifiesReview) {
         return {
           block: true,
@@ -269,22 +324,23 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           reason: "LemonPi dispatch policy allows only one writer in a shared checkout. Use one coherent implementation owner, or explicit isolated worktrees for genuinely independent parallel slices.",
         };
       }
-      const justifiedRepair = hadPriorReview && writers.some((spec) => REPAIR_TASK.test(spec.task));
-      const replacingFailedWriter = delegationFailurePending;
-      if (writers.length > 0 && writerDispatches > 0 && !justifiedRepair && !replacingFailedWriter) {
+      if (writers.length > 0 && writerOccupied) {
         return {
           block: true,
-          reason: "LemonPi dispatch policy already launched an implementation owner for this request. Main Pi must steer or resume that worker for the bounded remainder instead of coding directly or creating a serial writer handoff.",
+          reason: "LemonPi already has a running or paused writer in this checkout. Respond to the user and steer that worker if direction changed; do not launch another writer until the current chunk completes, fails, or is stopped.",
         };
       }
-      if (writers.length > 0 && writerDispatches >= 2) {
+      if (writers.length > 0 && consecutiveWriterFailures >= 2) {
         return {
           block: true,
-          reason: "LemonPi dispatch policy stopped a third implementation launch. Two writer attempts already occurred; report the exact blocker or ask the user before starting another automatic recovery cycle.",
+          reason: "LemonPi stopped a third consecutive writer attempt after two failed chunks. Report the exact blocker or ask the user before starting another automatic recovery cycle.",
         };
       }
       if (reviewers.length > 0) reviewDispatches += reviewers.length;
-      if (writers.length > 0) writerDispatches += writers.length;
+      if (writers.length > 0 && input.clarify !== true) {
+        writerOccupied = true;
+        writerToolCalls.set(event.toolCallId, input.async !== false);
+      }
 
       const routineDelegation = !requestExplicitlyRequestsReview && !requestHasMaterialRisk && !taskJustifiesReview;
       if (routineDelegation && input.acceptance === undefined) {
@@ -310,7 +366,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   pi.on("message_start", async (event) => {
     const message = event.message as typeof event.message & { customType?: string };
     const notification = visibleText(message.content);
-    if (event.message.role === "user") {
+    if (event.message.role === "user" && message.customType == null) {
       sawToolActivity = false;
       visibleExplanationAfterLastTool = false;
       lastAssistantStopReason = undefined;
@@ -319,9 +375,14 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       lastDelegationFailure = undefined;
       latestUserRequest = notification;
       reviewDispatches = 0;
-      writerDispatches = 0;
+      consecutiveWriterFailures = 0;
     }
     if (message.customType === "subagent-notify") {
+      const workerStatus = workerNotificationStatus(notification);
+      const workerWasOccupied = writerOccupied;
+      if (workerStatus && workerStatus !== "paused") writerOccupied = false;
+      if (workerStatus === "completed") consecutiveWriterFailures = 0;
+      if (workerStatus === "failed" && workerWasOccupied) consecutiveWriterFailures += 1;
       sawToolActivity = false;
       visibleExplanationAfterLastTool = false;
       lastAssistantStopReason = undefined;
@@ -343,9 +404,18 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_end", async (event) => {
+    const writerWasAsync = writerToolCalls.get(event.toolCallId);
+    writerToolCalls.delete(event.toolCallId);
     if (!delegationToolCalls.delete(event.toolCallId)) return;
     const failure = delegationFailure(event.result, event.isError);
-    if (!failure) return;
+    if (!failure) {
+      if (writerWasAsync === false) writerOccupied = false;
+      return;
+    }
+    if (writerWasAsync !== undefined) {
+      writerOccupied = false;
+      consecutiveWriterFailures += 1;
+    }
     delegationFailurePending = true;
     lastDelegationFailure = failure;
   });

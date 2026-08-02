@@ -273,11 +273,17 @@
   border-left: 2px solid var(--danger);
 }
 
+.agent-card__header {
+  display: flex;
+  align-items: stretch;
+}
+
 .agent-card__summary {
   display: grid;
-  width: 100%;
+  min-width: 0;
   min-height: 51px;
   padding: 7px 9px;
+  flex: 1;
   align-items: center;
   grid-template-columns: 18px minmax(0, 1fr) auto;
   gap: 7px;
@@ -290,6 +296,39 @@
 
 .agent-card__summary:hover {
   background: var(--bg-subtle);
+}
+
+.agent-card__stop {
+  display: inline-flex;
+  min-width: 50px;
+  height: 28px;
+  margin: auto 7px auto 0;
+  padding: 0 7px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--matte-line));
+  border-radius: 4px;
+  color: color-mix(in srgb, var(--danger) 85%, var(--ink));
+  background: color-mix(in srgb, var(--danger) 7%, var(--bg-base));
+  cursor: pointer;
+  font-size: 8px;
+  font-weight: 650;
+}
+
+.agent-card__stop:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 58%, var(--matte-line));
+  background: color-mix(in srgb, var(--danger) 14%, var(--bg-base));
+}
+
+.agent-card__stop:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--danger) 72%, var(--ink));
+  outline-offset: 1px;
+}
+
+.agent-card__stop:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .agent-card__status {

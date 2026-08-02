@@ -663,6 +663,21 @@ export default function App() {
     );
   }), [rpc, subagentSteerWhileStreaming]);
 
+  const stopSubagent = useCallback((runId: string) => new Promise<void>((resolve, reject) => {
+    const controlMessage = `__lemonpi_subagent_stop_v1__:${JSON.stringify({ runId })}`;
+    void rpc(
+      {
+        type: "prompt",
+        message: controlMessage,
+        ...(subagentSteerWhileStreaming ? { streamingBehavior: "steer" } : {}),
+      },
+      {
+        onSuccess: () => resolve(),
+        onError: (error) => reject(new Error(error)),
+      },
+    );
+  }), [rpc, subagentSteerWhileStreaming]);
+
   const respondToExtension = useCallback((response: ExtensionUiResponse) => {
     setDialogQueue((current) => current.slice(1));
     void sendPi(response);
@@ -903,6 +918,7 @@ export default function App() {
         isStreaming={streaming}
         state={sessionState}
         onSteerSubagent={steerSubagent}
+        onStopSubagent={stopSubagent}
       />
       {settingsOpen && (
         <SettingsSurface
