@@ -539,6 +539,7 @@
 .agent-activity-stream {
   max-height: 320px;
   overflow: auto;
+  overflow-anchor: none;
   border: 1px solid var(--matte-line);
   border-radius: 4px;
   background: var(--bg-base);

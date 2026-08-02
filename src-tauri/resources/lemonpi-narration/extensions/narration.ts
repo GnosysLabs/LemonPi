@@ -20,20 +20,20 @@ Delegated work is asynchronous by default in LemonPi. After launching subagents,
 
 const ORCHESTRATION_CONTRACT = `
 <lemonpi-orchestration>
-You are Main Pi, the supervisor and integration owner. Optimize for the shortest reliable path to the user's outcome. Delegation has real coordination cost; use it only when it buys useful parallelism, specialization, or context isolation. File count alone never makes work large.
+You are Main Pi, the read-only supervisor and integration owner. You do not implement changes in project files. Optimize for the shortest reliable path to the user's outcome by giving one capable coding worker a clear, coherent slice, then inspecting and validating its result. File count alone never makes work large.
 
 Routing policy:
 
-1. Fast path — work directly. Use this for a bounded, well-understood, low-risk change plausibly finishable in roughly ten minutes by one capable agent. Examples include UI polish across markup/styles/state, labels and icons, a startup splash, localized interaction fixes, small configuration changes, and straightforward bugs with an established cause. Inspect only the relevant surface, make the coherent edit, and run one proportionate validation pass. Do not launch a worker, specialist, reviewer, or acceptance workflow for ceremony.
-2. Worker path — delegate exactly one coherent implementation slice when work is genuinely broad, uncertain, specialized, long-running, or benefits materially from a separate coding context. The worker role resolves its model through the user's Pi configuration; do not override it unless the user asks. Main Pi owns requirements, architecture, narration, integration, and the final explanation.
+1. Fast worker path — use exactly one configured worker for a bounded, well-understood, low-risk implementation. Examples include UI polish across markup/styles/state, labels and icons, a startup splash, localized interaction fixes, small configuration changes, and straightforward bugs with an established cause. Give the worker the complete small outcome, avoid specialists and reviewers, inspect the result, and run one proportionate validation pass. Efficiency comes from one clean handoff, not from Main Pi coding.
+2. Standard worker path — delegate exactly one coherent implementation slice when work is broad, uncertain, specialized, or long-running. The worker role resolves its coding model through the user's Pi configuration; do not override it unless the user asks. Main Pi owns requirements, architecture, narration, integration judgment, and the final explanation, but never edits project/source files itself.
 3. Specialist path — use a scout, researcher, designer, planner, oracle, or reviewer only for a concrete unknown or specialized risk Main Pi cannot resolve efficiently. Specialists are not mandatory pipeline stages. Never relay a small task serially through designer, worker, reviewer, repair worker, and reviewer.
 4. Review gate — independent review is justified only when the user explicitly requests it or the change crosses a material risk boundary such as authentication, authorization, security, privacy, money, irreversible data changes, migrations, cryptography, public protocols, concurrency, or production release infrastructure. State that boundary in the delegated task as "Review justification: ...". At most one reviewer pass is allowed per user request unless the user explicitly asks for multiple independent reviews. Routine work is reviewed by Main Pi while inspecting the diff.
-5. Repair rule — only a concrete blocker or major correctness defect warrants a repair pass. Notes, hypothetical edge cases, test-coverage wishes, and low-severity residual risks are reported or handled by Main Pi; they do not trigger an automatic worker-review loop. After a repair, Main Pi inspects and validates it directly. Do not launch a second reviewer to confirm the first reviewer.
+5. Repair rule — only a concrete blocker or major correctness defect warrants a repair pass. Notes, hypothetical edge cases, test-coverage wishes, and low-severity residual risks do not trigger an automatic worker-review loop. For a bounded correction, steer or resume the same worker rather than launching a new implementation owner. After the worker repairs it, Main Pi inspects and validates directly. Do not launch a second reviewer to confirm the first reviewer.
 6. Parallelism rule — parallelize only independent work. In a shared checkout keep exactly one writer; concurrent work must be read-only and useful regardless of the writer's result. Do not wait while independent work remains, and do not create serial handoffs that add no information.
 7. Validation rule — validate in proportion to blast radius and run each relevant check once after the workspace is stable. Do not make every participant rerun the same tests or demand structured acceptance reports for routine local changes. Main Pi owns final acceptance.
 8. Progress rule — never invent a short child runtime deadline. Use progress evidence rather than elapsed time alone. If a child appears stuck, inspect its live activity, steer it once with concrete guidance, and reassess. Do not respond to slowness by launching more agents or restarting the whole workflow.
 
-Launch asynchronously when delegation is justified, continue safe independent work, and wait only at the real integration barrier. For explanation, diagnosis, review, or other read-only requests, do not launch an implementation worker.
+Main Pi may use read-only inspection, search, status, test, build, and git-management operations. It must not call file editing/writing tools or use shell commands to mutate project files. Launch implementation asynchronously, continue safe independent read-only work, and wait only at the real integration barrier. For explanation, diagnosis, review, or other read-only requests, do not launch an implementation worker.
 </lemonpi-orchestration>`;
 
 const CLOSING_REPAIR = `The previous response ended after tool activity without a visible closing explanation. Do not call more tools. Give the user a concise, specific closing explanation now: state the outcome, what changed, what was verified, and any blocker or next step. If the task is incomplete, say exactly where it stopped and why.`;
@@ -90,6 +90,8 @@ const EXPLICIT_MULTI_REVIEW_REQUEST = /\b(?:multiple|several|two|three|parallel|
 const REVIEW_JUSTIFICATION = /\breview justification:\s*(?!none\b|n\/a\b)[^\n]{8,}/i;
 const REPAIR_TASK = /\b(?:repair|fix(?:ing)?|address(?:ing)?|resolve|blocker|major defect)\b/i;
 const IMPLEMENTATION_AGENTS = new Set(["worker", "designer", "delegate"]);
+const MAIN_MUTATION_TOOLS = new Set(["edit", "write", "apply_patch", "patch", "write_file", "edit_file", "create_file", "delete_file", "move_file"]);
+const IMPLEMENTATION_TASK = /\b(?:implement|code|edit|write|change|fix|add|remove|refactor|create|update|modify|wire|style|replace|rename)\b/i;
 
 interface DelegatedSpec {
   agent: string;
@@ -114,6 +116,25 @@ function delegatedSpecs(value: unknown): DelegatedSpec[] {
   };
   visit(value);
   return specs;
+}
+
+function shellMutatesProject(input: Record<string, unknown>): boolean {
+  const command = typeof input.command === "string"
+    ? input.command
+    : typeof input.cmd === "string"
+      ? input.cmd
+      : "";
+  if (!command) return false;
+  if (/\bcargo\s+fmt\b/i.test(command) && !/--check\b/i.test(command)) return true;
+  return [
+    /(?:^|[;&|]\s*)(?:rm|mv|cp|mkdir|touch|install|truncate|mkfifo|ln)\b/m,
+    /\b(?:sed\s+-[^\n]*i|perl\s+-[^\n]*pi)\b/i,
+    /\b(?:prettier\b[^\n]*--write|eslint\b[^\n]*--fix|gofmt\b[^\n]*-w|rustfmt\b(?![^\n]*--check))\b/i,
+    /\b(?:npm|pnpm|yarn|bun)\s+(?:add|install|remove|uninstall|update)\b/i,
+    /\b(?:tee|patch|git\s+(?:apply|am))\b/i,
+    /(?:^|[;&|]\s*)(?:echo|printf|cat)\b[^\n]*(?<![0-9])>{1,2}(?!>)/m,
+    /\b(?:Set-Content|Add-Content|Out-File|New-Item|Remove-Item|Move-Item|Copy-Item)\b/i,
+  ].some((pattern) => pattern.test(command));
 }
 
 function delegationFailure(result: unknown, isError: boolean): string | undefined {
@@ -192,9 +213,17 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", async (event) => {
-    if (process.env.PI_SUBAGENT_CHILD === "1" || event.toolName !== "subagent") return;
+    if (process.env.PI_SUBAGENT_CHILD === "1") return;
 
     const input = event.input as Record<string, unknown>;
+    if (MAIN_MUTATION_TOOLS.has(event.toolName) || (["bash", "shell"].includes(event.toolName) && shellMutatesProject(input))) {
+      return {
+        block: true,
+        reason: "Main Pi is LemonPi's read-only orchestrator and may not mutate project files. Delegate the implementation to the configured `worker`, or steer/resume the existing worker for a correction. Main Pi should inspect and validate the result.",
+      };
+    }
+    if (event.toolName !== "subagent") return;
+
     const isManagementAction = typeof input.action === "string" && input.action.trim().length > 0;
     const specs = delegatedSpecs(input);
     const isDelegation = specs.length > 0;
@@ -202,11 +231,19 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (isDelegation && !isManagementAction) {
       const reviewers = specs.filter((spec) => spec.agent === "reviewer");
       const writers = specs.filter((spec) => IMPLEMENTATION_AGENTS.has(spec.agent));
+      const misroutedImplementation = writers.find((spec) => spec.agent !== "worker" && IMPLEMENTATION_TASK.test(spec.task));
       const taskJustifiesReview = reviewers.some((spec) => REVIEW_JUSTIFICATION.test(spec.task));
       const requestExplicitlyRequestsReview = EXPLICIT_REVIEW_REQUEST.test(latestUserRequest);
       const requestHasMaterialRisk = MATERIAL_RISK_REQUEST.test(latestUserRequest);
       const requestExplicitlyRequestsMultipleReviews = EXPLICIT_MULTI_REVIEW_REQUEST.test(latestUserRequest);
       const hadPriorReview = reviewDispatches > 0;
+
+      if (misroutedImplementation) {
+        return {
+          block: true,
+          reason: `LemonPi routes project implementation through the configured worker coding role, not ${misroutedImplementation.agent}. Use specialists read-only for concrete unknowns, then give the coherent coding slice to \`worker\`.`,
+        };
+      }
 
       if (reviewers.length > 0 && !requestExplicitlyRequestsReview && !requestHasMaterialRisk && !taskJustifiesReview) {
         return {
@@ -231,7 +268,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       if (writers.length > 0 && writerDispatches > 0 && !justifiedRepair && !replacingFailedWriter) {
         return {
           block: true,
-          reason: "LemonPi dispatch policy already launched an implementation owner for this request. Main Pi must integrate or finish the bounded remainder directly instead of creating a serial writer handoff.",
+          reason: "LemonPi dispatch policy already launched an implementation owner for this request. Main Pi must steer or resume that worker for the bounded remainder instead of coding directly or creating a serial writer handoff.",
         };
       }
       if (writers.length > 0 && writerDispatches >= 2) {

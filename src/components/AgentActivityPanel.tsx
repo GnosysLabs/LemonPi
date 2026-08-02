@@ -147,6 +147,7 @@ function AgentCard({
   const output = step.recentOutput?.filter(Boolean).slice(-8) ?? [];
   const model = shortModel(step.model);
   const activityEvents = activity?.events ?? [];
+  const newestActivityEvents = [...activityEvents].reverse();
   const latestEvent = activityEvents.at(-1);
   const latestReasoning = [...activityEvents].reverse().find((event) => event.kind === "reasoning");
   const healthState = step.activityState ?? run.activityState;
@@ -256,8 +257,8 @@ function AgentCard({
             <div className="agent-output">
               <div className="agent-output__label">Activity stream</div>
               <div className="agent-activity-stream" aria-live="polite">
-                {activityEvents.map((event, eventIndex) => (
-                  <div className={`agent-activity-event agent-activity-event--${event.kind}`} key={`${event.at}-${eventIndex}`}>
+                {newestActivityEvents.map((event) => (
+                  <div className={`agent-activity-event agent-activity-event--${event.kind}`} key={`${event.at}-${event.kind}-${event.text}`}>
                     <span className="agent-activity-event__icon">
                       {event.kind === "tool" || event.kind === "result" ? <TerminalWindow size={11} /> : event.kind === "error" ? <Warning size={11} /> : <Brain size={11} />}
                     </span>

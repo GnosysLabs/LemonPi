@@ -852,8 +852,8 @@ export default function App() {
           path={candidatePath}
           busy={connection === "launching"}
           onCancel={() => setCandidatePath(undefined)}
-          onOpenSafely={() => void openProject(false)}
-          onTrust={() => void openProject(true)}
+          onOpenWithoutConfig={() => void openProject(false)}
+          onOpenWithConfig={() => void openProject(true)}
         />
       )}
       {activeDialog && <ExtensionDialog request={activeDialog} onRespond={respondToExtension} />}

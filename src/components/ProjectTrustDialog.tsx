@@ -1,26 +1,25 @@
-import { FolderOpen, ShieldCheck, ShieldWarning, X } from "@phosphor-icons/react";
+import { FolderOpen, SlidersHorizontal, ToggleLeft, ToggleRight, X } from "@phosphor-icons/react";
 import { useEffect, useRef } from "react";
 
 export function ProjectTrustDialog({
   path,
   busy,
   onCancel,
-  onOpenSafely,
-  onTrust,
+  onOpenWithoutConfig,
+  onOpenWithConfig,
 }: {
   path: string;
   busy: boolean;
   onCancel: () => void;
-  onOpenSafely: () => void;
-  onTrust: () => void;
+  onOpenWithoutConfig: () => void;
+  onOpenWithConfig: () => void;
 }) {
   const dialogRef = useRef<HTMLElement>(null);
-  const safeButtonRef = useRef<HTMLButtonElement>(null);
   const name = path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
-    const frame = window.requestAnimationFrame(() => safeButtonRef.current?.focus());
+    const frame = window.requestAnimationFrame(() => dialogRef.current?.focus());
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !busy) {
         event.preventDefault();
@@ -32,7 +31,7 @@ export function ProjectTrustDialog({
       const first = focusable[0];
       const last = focusable.at(-1);
       if (!first || !last) return;
-      if (event.shiftKey && document.activeElement === first) {
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current)) {
         event.preventDefault();
         last.focus();
       } else if (!event.shiftKey && document.activeElement === last) {
@@ -52,50 +51,51 @@ export function ProjectTrustDialog({
     <div className="project-trust-backdrop">
       <section
         className="project-trust-dialog"
-        role="alertdialog"
+        role="dialog"
         aria-modal="true"
         aria-labelledby="project-trust-title"
         aria-describedby="project-trust-description"
         aria-busy={busy || undefined}
         ref={dialogRef}
+        tabIndex={-1}
       >
         <header className="project-trust-dialog__header">
-          <span className="project-trust-dialog__mark"><ShieldWarning size={24} weight="fill" /></span>
+          <span className="project-trust-dialog__mark"><SlidersHorizontal size={24} weight="bold" /></span>
           <div>
-            <p className="eyebrow">Workspace security</p>
-            <h2 id="project-trust-title">Trust this workspace?</h2>
+            <p className="eyebrow">Workspace setup</p>
+            <h2 id="project-trust-title">Open workspace</h2>
           </div>
           <button type="button" className="project-trust-dialog__close" onClick={onCancel} disabled={busy} aria-label="Cancel opening workspace"><X size={16} /></button>
         </header>
 
         <div className="project-trust-dialog__body">
-          <p id="project-trust-description">This decision controls whether Pi can load and execute configuration supplied by this folder.</p>
+          <p id="project-trust-description">Choose whether Pi loads project-specific configuration from this folder.</p>
           <div className="project-trust-dialog__path" title={path}>
             <FolderOpen size={17} weight="fill" />
             <span><strong>{name}</strong><small>{path}</small></span>
           </div>
 
           <div className="project-trust-choices">
-            <button ref={safeButtonRef} type="button" className="project-trust-choice project-trust-choice--safe" onClick={onOpenSafely} disabled={busy}>
-              <span className="project-trust-choice__icon"><ShieldCheck size={22} weight="fill" /></span>
+            <button type="button" className="project-trust-choice" onClick={onOpenWithoutConfig} disabled={busy}>
+              <span className="project-trust-choice__icon"><ToggleLeft size={22} weight="bold" /></span>
               <span className="project-trust-choice__copy">
-                <span><strong>{busy ? "Opening…" : "Open safely"}</strong><i>Recommended</i></span>
-                <small>Ignore project-local Pi settings, extensions, skills, and packages. Agent tools can still read and change files in this folder.</small>
+                <strong>{busy ? "Opening…" : "Open without project config"}</strong>
+                <small>Pi ignores this folder’s settings, extensions, skills, and packages. Agent tools can still access workspace files.</small>
               </span>
             </button>
 
-            <button type="button" className="project-trust-choice project-trust-choice--trusted" onClick={onTrust} disabled={busy}>
-              <span className="project-trust-choice__icon"><ShieldWarning size={22} weight="fill" /></span>
+            <button type="button" className="project-trust-choice" onClick={onOpenWithConfig} disabled={busy}>
+              <span className="project-trust-choice__icon"><ToggleRight size={22} weight="bold" /></span>
               <span className="project-trust-choice__copy">
-                <span><strong>{busy ? "Opening…" : "Trust and open"}</strong><i>Full access</i></span>
-                <small>Load this folder’s Pi configuration and packages. Project extensions execute code with your operating-system permissions.</small>
+                <strong>{busy ? "Opening…" : "Open with project config"}</strong>
+                <small>Pi loads this folder’s settings, extensions, skills, and packages. Project extensions can run with your user permissions.</small>
               </span>
             </button>
           </div>
         </div>
 
         <footer className="project-trust-dialog__footer">
-          <span>Choose Trust only for code you recognize.</span>
+          <span>Select how Pi should handle this folder’s project configuration.</span>
           <button type="button" onClick={onCancel} disabled={busy}>Cancel</button>
         </footer>
       </section>
