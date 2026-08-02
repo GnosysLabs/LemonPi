@@ -4,8 +4,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildUpdaterManifest, MANUAL_REQUIRED_PLATFORMS } from "./create-updater-manifest.mjs";
 
-export const RELEASE_VERSION = "0.1.1";
-export const RELEASE_TAG = "v0.1.1";
+export const RELEASE_VERSION = "0.1.2";
+export const RELEASE_TAG = "v0.1.2";
 export const RELEASE_REPOSITORY = "GnosysLabs/LemonPi";
 
 function sha256(path) {
@@ -50,7 +50,7 @@ export function verifyChecksumFile(directory) {
 
 export function assembleDesktopRelease({ macosDirectory, windowsDirectory, outputDirectory, publishedAt, version = RELEASE_VERSION, tag = RELEASE_TAG, repository = RELEASE_REPOSITORY }) {
   if (version !== RELEASE_VERSION || tag !== RELEASE_TAG || repository !== RELEASE_REPOSITORY) {
-    throw new Error(`This first-release assembler only accepts ${REPOSITORY_LABEL()}.`);
+    throw new Error(`This release assembler only accepts ${REPOSITORY_LABEL()}.`);
   }
   if (!publishedAt || Number.isNaN(Date.parse(publishedAt))) throw new Error("publishedAt must be a valid RFC 3339 timestamp.");
   const macos = requireDirectory(macosDirectory, "macOS artifact directory");
@@ -58,12 +58,12 @@ export function assembleDesktopRelease({ macosDirectory, windowsDirectory, outpu
   const output = resolve(outputDirectory);
   if (output === macos || output === windows) throw new Error("Release staging directory must differ from source artifact directories.");
 
-  const macZipName = `LemonPi_${version}_aarch64.app.zip`;
-  const macUpdaterName = `LemonPi_${version}_aarch64.app.tar.gz`;
+  const macZipName = `LemonPi_${version}_macOS-Apple-Silicon.zip`;
+  const macUpdaterName = `LemonPi_${version}_macOS-Apple-Silicon_aarch64.app.tar.gz`;
   const windowsInstallerName = `LemonPi_${version}_x64-setup.exe`;
-  const macZip = requireAsset(macos, macZipName, /^LemonPi_.+_aarch64\.app\.zip$/, "macOS artifact directory");
-  const macUpdater = requireAsset(macos, macUpdaterName, /^LemonPi_.+_aarch64\.app\.tar\.gz$/, "macOS artifact directory");
-  const macSignature = requireAsset(macos, `${macUpdaterName}.sig`, /^LemonPi_.+_aarch64\.app\.tar\.gz\.sig$/, "macOS artifact directory");
+  const macZip = requireAsset(macos, macZipName, /^LemonPi_.+_macOS-Apple-Silicon\.zip$/, "macOS artifact directory");
+  const macUpdater = requireAsset(macos, macUpdaterName, /^LemonPi_.+_macOS-Apple-Silicon_aarch64\.app\.tar\.gz$/, "macOS artifact directory");
+  const macSignature = requireAsset(macos, `${macUpdaterName}.sig`, /^LemonPi_.+_macOS-Apple-Silicon_aarch64\.app\.tar\.gz\.sig$/, "macOS artifact directory");
   const windowsInstaller = requireAsset(windows, windowsInstallerName, /^LemonPi_.+_x64-setup\.exe$/, "Windows artifact directory");
   const windowsSignature = requireAsset(windows, `${windowsInstallerName}.sig`, /^LemonPi_.+_x64-setup\.exe\.sig$/, "Windows artifact directory");
 

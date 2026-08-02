@@ -48,38 +48,69 @@ cd src-tauri && cargo test
 
 LemonPi verifies every updater artifact against the public key embedded in `src-tauri/tauri.conf.json`. The private updater key is deliberately not in this repository. Keep `~/.tauri/lemonpi-updater.key` owner-readable only, retain an encrypted backup, and never commit, print, or share it. Losing that key after a public release would prevent installed clients from accepting future updates.
 
-### Manual v0.1.1 release procedure
+### Manual v0.1.2 release procedure
 
-The first release is assembled from a locally built Apple Silicon macOS app and a remotely built Windows x64 installer. Do **not** push a tag before both native builds and assembly verification pass. The source candidate must be fully committed, clean, and available on `origin/main`; both builders receive the same commit SHA.
+The v0.1.2 candidate is assembled from a detached, locally built Apple Silicon macOS app and a GitHub-hosted Windows x64 NSIS build. Do **not** tag, upload, or publish until both native outputs and the assembled hashes have been independently verified. The source candidate must be fully committed, clean, and already reachable from `origin/main`; both builders use the same exact 40-character commit SHA.
 
 Prerequisites:
 
 - macOS Apple Silicon with the `Developer ID Application: Christopher McElvogue (4PDUNTF69S)` identity, the `AC_NOTARY` keychain profile, at least 10 GiB free, and the passwordless LemonPi updater key plus `.pub` companion at `~/.tauri/lemonpi-updater.key`.
-- SSH access to the Windows builder. The scripts default to `noise-windows` and `C:\Users\cmcel\LemonPi`; set `LEMONPI_WINDOWS_HOST` or `LEMONPI_WINDOWS_REPO` only when those defaults are intentionally different. The remote script bootstraps the checkout and provisions the updater key only when both remote key files are absent.
-- `pnpm`, Rust, Git, and the platform build prerequisites on both machines.
+- A repository maintainer permitted to manually dispatch GitHub Actions and access the `TAURI_SIGNING_PRIVATE_KEY` Actions secret. The hosted workflow uses that signing key only; it neither accepts a key password nor creates or edits a GitHub Release.
+- `pnpm`, Rust, Git, and the macOS platform prerequisites.
 
-After the v0.1.1 candidate is committed and pushed, record its SHA and build both platforms:
+After the v0.1.2 candidate is committed and pushed, record its SHA and build macOS in a unique detached `/tmp` worktree so the main checkout remains untouched:
 
 ```bash
 revision=$(git rev-parse HEAD)
-scripts/release-macos.sh v0.1.1 "$revision"
-scripts/release-windows-remote.sh "$revision"
+repo_root=$(git rev-parse --show-toplevel)
+git -C "$repo_root" fetch origin main
+worktree=$(mktemp -d /tmp/lemonpi-v0.1.2.XXXXXX)
+rmdir "$worktree"
+git -C "$repo_root" worktree add --detach "$worktree" "$revision"
+(
+  set -e
+  cd "$worktree"
+  git merge-base --is-ancestor "$revision" origin/main
+  pnpm install --frozen-lockfile
+  node scripts/verify-release-version.mjs --tag v0.1.2
+  scripts/release-macos.sh v0.1.2 "$revision"
+)
+printf 'Retain release worktree: %s\n' "$worktree"
+```
+
+Record the printed worktree path and keep that detached worktree through the Windows artifact download, assembly, draft re-download verification, and publication; do not remove it automatically after the macOS build.
+
+In GitHub Actions, manually dispatch `.github/workflows/release-windows.yml` (the **Build LemonPi Windows x64 NSIS candidate** workflow) with `revision` set to that exact lowercase 40-character SHA and `expected_version` set to `0.1.2`. It checks out that SHA with full history, rejects a dirty or non-`origin/main` candidate, runs the NSIS-only Windows x64 build, and uploads a seven-day artifact named `lemonpi-windows-x64-nsis-<revision>` where `<revision>` is the full SHA. Download and extract that artifact without changing its contents. Before assembly, inspect `windows-build-metadata.json`: its `revision`, `version`, and `name` must be the requested SHA, `0.1.2`, and `LemonPi_0.1.2_x64-setup.exe`; recompute and compare both SHA-256 values in `hashes`. Keep the recorded `run`, `runner`, and `time` fields with the release evidence. After verification, preserve `windows-build-metadata.json` in that evidence location outside the assembler input directory, then copy only the verified `.exe` and `.exe.sig` into a fresh Windows assembler directory.
+
+Assemble only the verified macOS output and downloaded Windows artifact:
+
+```bash
 node scripts/assemble-desktop-release.mjs \
   --macos-directory src-tauri/target/release/release-assets \
-  --windows-directory src-tauri/target/release/windows-assets \
+  --windows-directory /path/to/windows-assembler-input \
   --output-directory src-tauri/target/release/release-staging \
   --published-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+(cd src-tauri/target/release/release-staging && shasum -a 256 -c SHA256SUMS.txt)
 ```
 
 The staging directory must contain exactly these release assets plus `latest.json` and `SHA256SUMS.txt`:
 
-- `LemonPi_0.1.1_aarch64.app.zip` — the human macOS download.
-- `LemonPi_0.1.1_aarch64.app.tar.gz` and `.sig` — the signed macOS updater artifact.
-- `LemonPi_0.1.1_x64-setup.exe` and `.sig` — the signed Windows updater artifact.
+- `LemonPi_0.1.2_macOS-Apple-Silicon.zip` — the human macOS download.
+- `LemonPi_0.1.2_macOS-Apple-Silicon_aarch64.app.tar.gz` and `.sig` — the signed macOS updater artifact; the `_aarch64` token is required by the updater manifest.
+- `LemonPi_0.1.2_x64-setup.exe` and `.sig` — the signed Windows updater artifact.
 
-Only after the staged hashes and manifest have been independently checked should a maintainer create an annotated `v0.1.1` tag at that exact SHA, push it, create a **draft** GitHub Release, upload the staged files, download them again to verify `SHA256SUMS.txt`, and publish the draft. The release scripts never tag, push, or call GitHub Releases. Because this is the first baseline installation, the updater path itself cannot be demonstrated until a later version exists. The Windows NSIS installer is updater-signed but may be Authenticode `NotSigned`, so Microsoft SmartScreen can still warn users.
+Only after the staged manifest, asset names, and checksums are independently checked should a maintainer create and push an annotated `v0.1.2` tag at that exact SHA, create a **draft** GitHub Release, upload the staged files, and download the draft assets again for a second `SHA256SUMS.txt` verification. Publish the draft only after that re-download succeeds. For example, the release sequence is `git tag -a v0.1.2 "$revision"`, `git push origin v0.1.2`, draft creation/upload, authenticated draft re-download, checksum verification, then publication. The release scripts and hosted Windows workflow never tag, push, upload release assets, or publish.
 
-`.github/workflows/release.yml` is an optional manually dispatched all-platform fallback. It retains the four-platform macOS Intel/Apple Silicon, Windows x64, and Linux x64 matrix and draft-first manifest publishing; pushing a tag does not trigger it. It is not part of the primary two-platform release procedure.
+After publication and preservation of the release evidence, remove the retained worktree and prune stale worktree metadata:
+
+```bash
+git -C "$repo_root" worktree remove --force "$worktree"
+git -C "$repo_root" worktree prune
+```
+
+The Windows NSIS installer is updater-signed but may be Authenticode `NotSigned`, so Microsoft SmartScreen can still warn users. The hosted build deliberately performs no prepublication antivirus scan or sample submission; do not treat an AV verdict as a publication gate or upload release candidates to third-party scanners from this procedure. Release `v0.1.1` remains an unpublished draft retained as incident evidence and must not be deleted, altered, or republished. The retired `scripts/release-windows.ps1` and `scripts/release-windows-remote.sh` procedures are pinned to v0.1.1 and must not be used for v0.1.2 or later.
+
+`.github/workflows/release.yml` is unchanged: it remains an optional manually dispatched all-platform fallback with the macOS Intel/Apple Silicon, Windows x64, and Linux x64 matrix and draft-first manifest publishing. Pushing a tag does not trigger it, and it is not part of this primary two-platform procedure.
 
 ## Architecture
 

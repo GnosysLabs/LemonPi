@@ -1,0 +1,217 @@
+name: Build LemonPi Windows x64 NSIS candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Exact 40-character lowercase commit SHA to build.
+        required: true
+        type: string
+      expected_version:
+        description: Expected LemonPi version for this candidate.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: lemonpi-windows-nsis-${{ inputs.revision }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows-nsis:
+    name: Build Windows x64 NSIS installer
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      INPUT_REVISION: ${{ inputs.revision }}
+      INPUT_EXPECTED_VERSION: ${{ inputs.expected_version }}
+    steps:
+      - name: Check out the requested revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision }}
+          fetch-depth: 0
+
+      - name: Guard the requested candidate revision
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $revision = $env:INPUT_REVISION
+          $expectedVersion = $env:INPUT_EXPECTED_VERSION
+          if ($revision -cnotmatch "^[0-9a-f]{40}$") { throw "revision must be an exact 40-character lowercase SHA." }
+          if ($expectedVersion -cne "0.1.2") { throw "expected_version must be exactly 0.1.2." }
+          if ((git rev-parse HEAD).Trim() -cne $revision) { throw "Checkout HEAD does not match the requested revision." }
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if ($LASTEXITCODE -ne 0) { throw "Could not fetch origin/main." }
+          git merge-base --is-ancestor $revision origin/main
+          if ($LASTEXITCODE -ne 0) { throw "Requested revision is not an ancestor of origin/main." }
+          if (git status --porcelain --untracked-files=all) { throw "Checkout must be clean." }
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Set up the stable Windows x64 Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Guard the active Rust host
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $rustcVersion = @(rustc -vV)
+          if ($LASTEXITCODE -ne 0) { throw "rustc -vV failed." }
+          $hostLines = @($rustcVersion | Where-Object { $_ -match "^host:\s*\S+\s*$" })
+          if ($hostLines.Count -ne 1) { throw "rustc -vV must report exactly one host line." }
+          $rustHost = ($hostLines[0] -replace "^host:\s*", "").Trim()
+          if ($rustHost -cne "x86_64-pc-windows-msvc") { throw "Rust host must be x86_64-pc-windows-msvc." }
+
+      - name: Verify the candidate version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = (node scripts/verify-release-version.mjs --tag "v$env:INPUT_EXPECTED_VERSION").Trim()
+          if ($version -cne $env:INPUT_EXPECTED_VERSION) { throw "Verified version does not match expected_version." }
+
+      - name: Build signed NSIS installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: pnpm tauri build --ci --target x86_64-pc-windows-msvc --bundles nsis
+
+      - name: Verify installer outputs and prepare safe metadata
+        id: artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          function Get-PeInfo([string]$Path) {
+            [byte[]]$bytes = [System.IO.File]::ReadAllBytes($Path)
+            if ($bytes.Length -lt 256 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) { throw "$Path is not an MZ executable." }
+            $peOffset = [System.BitConverter]::ToInt32($bytes, 0x3c)
+            if ($peOffset -lt 0 -or $peOffset + 112 -gt $bytes.Length) { throw "$Path has an invalid PE header offset." }
+            if ($bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or $bytes[$peOffset + 2] -ne 0 -or $bytes[$peOffset + 3] -ne 0) { throw "$Path is missing the PE signature." }
+            $machine = [System.BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            $optionalHeader = $peOffset + 24
+            $magic = [System.BitConverter]::ToUInt16($bytes, $optionalHeader)
+            $subsystemOffset = switch ($magic) {
+              0x10b { $optionalHeader + 68; break }
+              0x20b { $optionalHeader + 68; break }
+              default { throw "$Path has an unsupported PE optional-header magic." }
+            }
+            if ($subsystemOffset + 2 -gt $bytes.Length) { throw "$Path has a truncated PE optional header." }
+            [pscustomobject]@{
+              Machine = $machine
+              Magic = $magic
+              Subsystem = [System.BitConverter]::ToUInt16($bytes, $subsystemOffset)
+            }
+          }
+
+          $bundleRoot = Join-Path $env:GITHUB_WORKSPACE "src-tauri\target\x86_64-pc-windows-msvc\release\bundle"
+          $nsisDirectory = Join-Path $bundleRoot "nsis"
+          if (-not (Test-Path -LiteralPath $nsisDirectory -PathType Container)) { throw "NSIS bundle directory is missing." }
+          $installers = @(Get-ChildItem -LiteralPath $nsisDirectory -File -Filter "*.exe")
+          $signatures = @(Get-ChildItem -LiteralPath $nsisDirectory -File -Filter "*.exe.sig")
+          $msiFiles = @(Get-ChildItem -LiteralPath $bundleRoot -Recurse -File -Filter "*.msi")
+          if ($installers.Count -ne 1 -or $signatures.Count -ne 1) { throw "Expected exactly one NSIS installer and one updater signature." }
+          if ($installers[0].Length -eq 0 -or $signatures[0].Length -eq 0) { throw "Installer and updater signature must be nonempty." }
+          if ($msiFiles.Count -ne 0) { throw "MSI output is not permitted for this NSIS-only build." }
+
+          $installer = $installers[0]
+          $signature = $signatures[0]
+          $expectedInstallerName = "LemonPi_$($env:INPUT_EXPECTED_VERSION)_x64-setup.exe"
+          if ($installer.Name -cne $expectedInstallerName) { throw "NSIS installer name does not match the candidate version." }
+          if ($signature.Name -cne "$($installer.Name).sig") { throw "Updater signature must correspond to the installer." }
+          $installerVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($installer.FullName).ProductVersion
+          if ($installerVersion -notmatch "^0\.1\.2(?:\.0)?$") { throw "Installer ProductVersion must be 0.1.2." }
+          $installerPe = Get-PeInfo $installer.FullName
+          if (($installerPe.Machine -ne 0x014c -and $installerPe.Machine -ne 0x8664) -or $installerPe.Subsystem -ne 2) { throw "Installer must be a GUI PE; an x86 NSIS stub or x64 PE is required." }
+          if (($installerPe.Machine -eq 0x014c -and $installerPe.Magic -ne 0x10b) -or ($installerPe.Machine -eq 0x8664 -and $installerPe.Magic -ne 0x20b)) { throw "Installer PE architecture and optional header do not agree." }
+
+          $application = Join-Path $env:GITHUB_WORKSPACE "src-tauri\target\x86_64-pc-windows-msvc\release\lemonpi.exe"
+          if (-not (Test-Path -LiteralPath $application -PathType Leaf)) { throw "Built lemonpi.exe is missing." }
+          $applicationPe = Get-PeInfo $application
+          if ($applicationPe.Machine -ne 0x8664 -or $applicationPe.Magic -ne 0x20b -or $applicationPe.Subsystem -ne 2) { throw "lemonpi.exe must be an AMD64 PE32+ GUI executable." }
+
+          $revision = $env:INPUT_REVISION
+          $version = $env:INPUT_EXPECTED_VERSION
+          $installerName = $installer.Name
+          $installerSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer.FullName).Hash.ToLowerInvariant()
+          $signatureSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $signature.FullName).Hash.ToLowerInvariant()
+          $payloadArchitecture = if ($applicationPe.Machine -eq 0x8664) { "x86_64" } else { throw "Payload architecture is not AMD64." }
+          $runnerOs = $env:RUNNER_OS
+          $runnerArchitecture = $env:RUNNER_ARCH
+          $runId = $env:GITHUB_RUN_ID
+          $buildTime = (Get-Date).ToUniversalTime().ToString("o")
+
+          $artifactDirectory = Join-Path $env:RUNNER_TEMP "lemonpi-windows-x64-nsis"
+          New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
+          Copy-Item -LiteralPath $installer.FullName -Destination $artifactDirectory
+          Copy-Item -LiteralPath $signature.FullName -Destination $artifactDirectory
+          $metadata = [ordered]@{
+            revision = $revision
+            version = $version
+            name = $installerName
+            hashes = [ordered]@{
+              installer_sha256 = $installerSha256
+              signature_sha256 = $signatureSha256
+            }
+            run = [ordered]@{
+              id = $runId
+              number = $env:GITHUB_RUN_NUMBER
+              attempt = $env:GITHUB_RUN_ATTEMPT
+            }
+            runner = [ordered]@{
+              os = $runnerOs
+              architecture = $runnerArchitecture
+              name = $env:RUNNER_NAME
+            }
+            time = $buildTime
+          }
+          $metadata | ConvertTo-Json -Depth 4 | Set-Content -NoNewline -Encoding utf8 (Join-Path $artifactDirectory "windows-build-metadata.json")
+          $summaryRows = @(
+            "| Field | Value |",
+            "| --- | --- |",
+            "| Revision | $revision |",
+            "| Version | $version |",
+            "| Installer name | $installerName |",
+            "| Installer SHA-256 | $installerSha256 |",
+            "| Signature SHA-256 | $signatureSha256 |",
+            "| Payload architecture | $payloadArchitecture |",
+            "| Runner OS / architecture | $runnerOs / $runnerArchitecture |",
+            "| Run ID | $runId |",
+            "| UTC build time | $buildTime |"
+          )
+          $summaryRows | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          "WINDOWS_ARTIFACT_DIRECTORY=$artifactDirectory" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Upload installer, signature, and metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: lemonpi-windows-x64-nsis-${{ inputs.revision }}
+          path: |
+            ${{ env.WINDOWS_ARTIFACT_DIRECTORY }}\*.exe
+            ${{ env.WINDOWS_ARTIFACT_DIRECTORY }}\*.exe.sig
+            ${{ env.WINDOWS_ARTIFACT_DIRECTORY }}\windows-build-metadata.json
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Attest Windows installer
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ env.WINDOWS_ARTIFACT_DIRECTORY }}\LemonPi_0.1.2_x64-setup.exe

@@ -12,8 +12,8 @@ identity=${APPLE_SIGNING_IDENTITY:-"Developer ID Application: Christopher McElvo
 assets_dir="$repo_root/src-tauri/target/release/release-assets"
 bundle_dir="$repo_root/src-tauri/target/release/bundle/macos"
 app_bundle="$bundle_dir/LemonPi.app"
-zip_asset="$assets_dir/LemonPi_${version}_aarch64.app.zip"
-updater_archive="$assets_dir/LemonPi_${version}_aarch64.app.tar.gz"
+zip_asset="$assets_dir/LemonPi_${version}_macOS-Apple-Silicon.zip"
+updater_archive="$assets_dir/LemonPi_${version}_macOS-Apple-Silicon_aarch64.app.tar.gz"
 temporary_dir=$(mktemp -d /tmp/lemonpi-release.XXXXXX)
 
 cleanup() {

@@ -11,6 +11,7 @@ const macos = source("scripts/release-macos.sh");
 const windows = source("scripts/release-windows.ps1");
 const remote = source("scripts/release-windows-remote.sh");
 const workflow = source(".github/workflows/release.yml");
+const windowsWorkflow = source(".github/workflows/release-windows.yml");
 const finalizeKeyScript = remote.match(/cat > "\$finalize_key_script" <<'PS'\n([\s\S]*?)\nPS\n/);
 
 describe("release script contracts", () => {
@@ -68,5 +69,70 @@ describe("release script contracts", () => {
 
   it("uses noninteractive Tauri build signing in the manual fallback workflow", () => {
     assert.match(workflow, /args: --ci --target \$\{\{ matrix\.target \}\} --bundles \$\{\{ matrix\.bundles \}\}/);
+  });
+
+  it("makes the hosted Windows candidate an explicitly dispatched, SHA-scoped job", () => {
+    assert.match(windowsWorkflow, /^on:\n  workflow_dispatch:\n    inputs:\n/m);
+    assert.match(windowsWorkflow, /revision:\n        description: Exact 40-character lowercase commit SHA to build\.\n        required: true\n        type: string/);
+    assert.match(windowsWorkflow, /expected_version:\n        description: Expected LemonPi version for this candidate\.\n        required: true\n        type: string/);
+    assert.doesNotMatch(windowsWorkflow, /^\s+(?:push|pull_request|schedule):/m);
+    assert.match(windowsWorkflow, /contents: read/);
+    assert.match(windowsWorkflow, /id-token: write/);
+    assert.match(windowsWorkflow, /attestations: write/);
+    assert.match(windowsWorkflow, /group: lemonpi-windows-nsis-\$\{\{ inputs\.revision \}\}/);
+    assert.match(windowsWorkflow, /cancel-in-progress: false/);
+    assert.match(windowsWorkflow, /runs-on: windows-2022/);
+    assert.match(windowsWorkflow, /timeout-minutes: 60/);
+    assert.match(windowsWorkflow, /uses: actions\/checkout@v4\n        with:\n          ref: \$\{\{ inputs\.revision \}\}\n          fetch-depth: 0/);
+    assert.match(windowsWorkflow, /\$revision -cnotmatch "\^\[0-9a-f\]\{40\}\$"/);
+    assert.match(windowsWorkflow, /git rev-parse HEAD/);
+    assert.match(windowsWorkflow, /git merge-base --is-ancestor \$revision origin\/main/);
+    assert.match(windowsWorkflow, /git status --porcelain --untracked-files=all/);
+    assert.match(windowsWorkflow, /\$expectedVersion -cne "0\.1\.2"/);
+    assert.match(windowsWorkflow, /verify-release-version\.mjs --tag "v\$env:INPUT_EXPECTED_VERSION"/);
+  });
+
+  it("uses the exact signed NSIS build toolchain without password, release, or AV paths", () => {
+    assert.match(windowsWorkflow, /uses: pnpm\/action-setup@v4\n        with:\n          version: 10\.30\.3/);
+    assert.match(windowsWorkflow, /uses: actions\/setup-node@v4\n        with:\n          node-version: 22/);
+    assert.match(windowsWorkflow, /pnpm install --frozen-lockfile/);
+    assert.match(windowsWorkflow, /uses: dtolnay\/rust-toolchain@stable\n        with:\n          targets: x86_64-pc-windows-msvc/);
+    assert.doesNotMatch(windowsWorkflow, /toolchain: stable-x86_64-pc-windows-msvc/);
+    assert.match(windowsWorkflow, /\$rustcVersion = @\(rustc -vV\)/);
+    assert.match(windowsWorkflow, /\$hostLines = @\(\$rustcVersion \| Where-Object \{ \$_ -match "\^host:\\s\*\\S\+\\s\*\$" \}\)/);
+    assert.match(windowsWorkflow, /\$rustHost -cne "x86_64-pc-windows-msvc"/);
+    assert.match(windowsWorkflow, /pnpm tauri build --ci --target x86_64-pc-windows-msvc --bundles nsis/);
+    assert.doesNotMatch(windowsWorkflow, /--bundles\s+msi/);
+    assert.match(windowsWorkflow, /-Filter "\*\.msi"/);
+    assert.match(windowsWorkflow, /TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}/);
+    assert.equal((windowsWorkflow.match(/\$\{\{\s*secrets\./g) ?? []).length, 1);
+    assert.doesNotMatch(windowsWorkflow, /password/i);
+    assert.doesNotMatch(windowsWorkflow, /\bgh\s+(?:release|api)\b|tauri-action|actions\/create-release/i);
+    assert.doesNotMatch(windowsWorkflow, /defender|antivirus|antimalware|mpcmdrun/i);
+  });
+
+  it("requires exact NSIS artifacts, validates both PEs, and retains only safe evidence", () => {
+    assert.match(windowsWorkflow, /Expected exactly one NSIS installer and one updater signature/);
+    assert.match(windowsWorkflow, /Installer and updater signature must be nonempty/);
+    assert.match(windowsWorkflow, /\$expectedInstallerName = "LemonPi_\$\(\$env:INPUT_EXPECTED_VERSION\)_x64-setup\.exe"/);
+    assert.match(windowsWorkflow, /Installer ProductVersion must be 0\.1\.2/);
+    assert.match(windowsWorkflow, /0x10b \{ \$optionalHeader \+ 68; break \}/);
+    assert.match(windowsWorkflow, /0x20b \{ \$optionalHeader \+ 68; break \}/);
+    assert.doesNotMatch(windowsWorkflow, /\$optionalHeader \+ 88/);
+    assert.match(windowsWorkflow, /Installer must be a GUI PE; an x86 NSIS stub or x64 PE is required/);
+    assert.match(windowsWorkflow, /Built lemonpi\.exe is missing/);
+    assert.match(windowsWorkflow, /lemonpi\.exe must be an AMD64 PE32\+ GUI executable/);
+    assert.match(windowsWorkflow, /windows-build-metadata\.json/);
+    assert.match(windowsWorkflow, /\$summaryRows \| Add-Content -LiteralPath \$env:GITHUB_STEP_SUMMARY -Encoding utf8/);
+    for (const label of ["Revision", "Version", "Installer name", "Installer SHA-256", "Signature SHA-256", "Payload architecture", "Runner OS \/ architecture", "Run ID", "UTC build time"]) {
+      assert.ok(windowsWorkflow.includes(`"| ${label} |`), `missing safe summary row: ${label}`);
+    }
+    for (const field of ["revision", "version", "name", "hashes", "run", "runner", "time"]) {
+      assert.match(windowsWorkflow, new RegExp(`\\b${field}\\s=`));
+    }
+    assert.match(windowsWorkflow, /uses: actions\/upload-artifact@v4/);
+    assert.match(windowsWorkflow, /retention-days: 7/);
+    assert.match(windowsWorkflow, /if-no-files-found: error/);
+    assert.match(windowsWorkflow, /continue-on-error: true\n        uses: actions\/attest-build-provenance@v2/);
   });
 });
