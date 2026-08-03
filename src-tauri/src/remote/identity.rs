@@ -36,15 +36,34 @@ impl HostIdentity {
         &self.hostname
     }
 
-    /// SHA-256 of the certificate DER, represented as lowercase hexadecimal.
+    /// SHA-256 of the certificate DER, represented as lowercase hexadecimal for local diagnostics.
     pub(crate) fn certificate_fingerprint(&self) -> &str {
         &self.certificate_fingerprint
+    }
+
+    /// The QR/manual protocol uses the same DER digest encoded as unpadded base64url.
+    pub(crate) fn certificate_pin_base64url(&self) -> RemoteResult<String> {
+        Ok(URL_SAFE_NO_PAD.encode(Sha256::digest(self.certificate_der()?)))
     }
 
     pub(crate) fn certificate_der(&self) -> RemoteResult<Vec<u8>> {
         URL_SAFE_NO_PAD
             .decode(&self.certificate_der)
             .map_err(|_| RemoteError::InvalidIdentity("certificate encoding is invalid".into()))
+    }
+
+    /// Returns TLS-only DER material to the local server constructor. This is intentionally
+    /// crate-private and never derives `Debug`, preventing private-key material from crossing UI,
+    /// diagnostics, or wire boundaries.
+    pub(crate) fn tls_der(&self) -> RemoteResult<(Vec<u8>, Vec<u8>)> {
+        let certificate = self.certificate_der()?;
+        let private_key = URL_SAFE_NO_PAD
+            .decode(&self.private_key_der)
+            .map_err(|_| RemoteError::InvalidIdentity("private key encoding is invalid".into()))?;
+        if private_key.is_empty() {
+            return Err(RemoteError::InvalidIdentity("private key is empty".into()));
+        }
+        Ok((certificate, private_key))
     }
 
     fn create() -> RemoteResult<Self> {
@@ -88,13 +107,7 @@ impl HostIdentity {
         if self.hostname.trim().is_empty() {
             return Err(RemoteError::InvalidIdentity("hostname is empty".into()));
         }
-        let certificate_der = self.certificate_der()?;
-        let private_key_der = URL_SAFE_NO_PAD
-            .decode(&self.private_key_der)
-            .map_err(|_| RemoteError::InvalidIdentity("private key encoding is invalid".into()))?;
-        if private_key_der.is_empty() {
-            return Err(RemoteError::InvalidIdentity("private key is empty".into()));
-        }
+        let (certificate_der, _) = self.tls_der()?;
         if self.certificate_fingerprint != fingerprint(&certificate_der) {
             return Err(RemoteError::InvalidIdentity(
                 "certificate fingerprint does not match the certificate".into(),

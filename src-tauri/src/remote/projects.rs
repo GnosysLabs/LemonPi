@@ -303,7 +303,8 @@ impl ProjectCatalog {
         .then_some(current_session)
     }
 
-    fn safe_projects(&self, active: Option<&Path>) -> Vec<RemoteProjectSummary> {
+    /// Safe wire-ready summaries; no filesystem locations are exposed.
+    pub(crate) fn safe_projects(&self, active: Option<&Path>) -> Vec<RemoteProjectSummary> {
         self.document
             .projects
             .iter()

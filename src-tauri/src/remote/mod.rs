@@ -1,15 +1,18 @@
-//! Private, persistence-only foundations for a future LemonPi remote bridge.
+//! Private foundations and the deliberately opt-in LemonPi remote bridge.
 //!
-//! This module intentionally owns no listener, socket, Tauri command, or runtime state.
-//! Its types are exercised only by unit tests until a later opt-in service layer is added.
+//! The managed TLS listener remains disabled unless a local desktop user explicitly enables it.
+//! This module exposes only the narrow v1 health, pairing, and project-catalog host surface.
 
-mod auth;
-mod config;
+pub(crate) mod auth;
+pub(crate) mod commands;
+pub(crate) mod config;
 pub(crate) mod events;
-mod identity;
-mod policy;
+pub(crate) mod identity;
+pub(crate) mod policy;
 pub(crate) mod projects;
 pub(crate) mod protocol;
+pub(crate) mod server;
+pub(crate) mod service;
 
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
@@ -29,6 +32,7 @@ pub(crate) enum RemoteError {
     InvalidIdentity(String),
     InvalidToken,
     DeviceLimitReached,
+    DeviceAlreadyPaired,
 }
 
 impl std::fmt::Display for RemoteError {
@@ -47,6 +51,7 @@ impl std::fmt::Display for RemoteError {
                 formatter,
                 "The maximum number of paired devices has been reached"
             ),
+            Self::DeviceAlreadyPaired => write!(formatter, "The device is already paired"),
         }
     }
 }

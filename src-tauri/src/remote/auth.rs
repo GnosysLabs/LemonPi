@@ -42,11 +42,13 @@ struct DeviceRecord {
     token_digest: String,
 }
 
-/// Non-secret device metadata that may be displayed by a later remote settings UI.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Non-secret device metadata that may be displayed by the local remote settings surface or
+/// returned to an already-authorized caller. It deliberately contains no token material.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DeviceSummary {
     pub(crate) id: String,
-    pub(crate) label: String,
+    pub(crate) display_name: String,
     pub(crate) paired_at: u64,
 }
 
@@ -54,7 +56,7 @@ impl From<&DeviceRecord> for DeviceSummary {
     fn from(record: &DeviceRecord) -> Self {
         Self {
             id: record.id.clone(),
-            label: record.label.clone(),
+            display_name: record.label.clone(),
             paired_at: record.paired_at,
         }
     }
@@ -124,19 +126,33 @@ impl DeviceStore {
         Ok(true)
     }
 
-    fn add_device(
+    /// Persists exactly the client-generated canonical UUID after first proving it is not paired.
+    /// The caller owns plaintext-token lifetime; only its digest reaches the document.
+    pub(crate) fn add_device(
         &mut self,
-        label: String,
+        device_id: String,
+        display_name: String,
         plaintext_token: &str,
         paired_at: u64,
     ) -> RemoteResult<DeviceSummary> {
+        let device_id = Uuid::parse_str(&device_id)
+            .map_err(|_| RemoteError::InvalidConfiguration("device ID is not a UUID".into()))?
+            .to_string();
+        if self
+            .document
+            .devices
+            .iter()
+            .any(|device| device.id == device_id)
+        {
+            return Err(RemoteError::DeviceAlreadyPaired);
+        }
         if self.document.devices.len() >= MAX_DEVICES {
             return Err(RemoteError::DeviceLimitReached);
         }
         let digest = token_digest(plaintext_token)?;
         let record = DeviceRecord {
-            id: Uuid::new_v4().to_string(),
-            label,
+            id: device_id,
+            label: display_name,
             paired_at,
             token_digest: URL_SAFE_NO_PAD.encode(digest),
         };
@@ -231,6 +247,7 @@ pub(crate) enum PairingAttempt {
     AttemptsExceeded,
     Closed,
     DeviceLimitReached,
+    DeviceAlreadyPaired,
     StorageFailure,
 }
 
@@ -258,10 +275,15 @@ impl PairingWindow {
         (!self.closed).then_some(self.code.as_str())
     }
 
+    pub(crate) fn expires_at(&self) -> u64 {
+        self.expires_at
+    }
+
     pub(crate) fn attempt(
         &mut self,
         supplied_code: &str,
-        device_label: String,
+        device_id: String,
+        display_name: String,
         now: u64,
         devices: &mut DeviceStore,
     ) -> PairingAttempt {
@@ -284,7 +306,7 @@ impl PairingWindow {
             }
         } else {
             let token = mint_device_token();
-            match devices.add_device(device_label, &token, now) {
+            match devices.add_device(device_id, display_name, &token, now) {
                 Ok(device) => {
                     self.closed = true;
                     PairingAttempt::Success {
@@ -293,6 +315,7 @@ impl PairingWindow {
                     }
                 }
                 Err(RemoteError::DeviceLimitReached) => PairingAttempt::DeviceLimitReached,
+                Err(RemoteError::DeviceAlreadyPaired) => PairingAttempt::DeviceAlreadyPaired,
                 // Do not claim that the window closed when persistence failed: the host can
                 // surface a generic retry action while the pairing window remains valid.
                 Err(_) => PairingAttempt::StorageFailure,
@@ -305,6 +328,10 @@ impl PairingWindow {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn device_id(value: u128) -> String {
+        Uuid::from_u128(value).to_string()
+    }
 
     #[test]
     fn minted_tokens_are_32_random_bytes_in_unpadded_base64url() {
@@ -320,7 +347,9 @@ mod tests {
         let directory = tempdir().unwrap();
         let mut devices = DeviceStore::load_or_create(directory.path()).unwrap();
         let token = mint_device_token();
-        devices.add_device("My iPhone".into(), &token, 12).unwrap();
+        devices
+            .add_device(device_id(1), "My iPhone".into(), &token, 12)
+            .unwrap();
 
         let stored = std::fs::read_to_string(devices.path()).unwrap();
         assert!(!stored.contains(&token));
@@ -334,11 +363,14 @@ mod tests {
         let directory = tempdir().unwrap();
         let mut devices = DeviceStore::load_or_create(directory.path()).unwrap();
         let first_token = mint_device_token();
-        let first = devices.add_device("First".into(), &first_token, 1).unwrap();
+        let first = devices
+            .add_device(device_id(1), "First".into(), &first_token, 1)
+            .unwrap();
 
         for index in 1..MAX_DEVICES {
             devices
                 .add_device(
+                    device_id(index as u128 + 1),
                     format!("Device {index}"),
                     &mint_device_token(),
                     index as u64,
@@ -347,7 +379,7 @@ mod tests {
         }
         assert_eq!(devices.list().len(), MAX_DEVICES);
         assert!(matches!(
-            devices.add_device("Too many".into(), &mint_device_token(), 99),
+            devices.add_device(device_id(99), "Too many".into(), &mint_device_token(), 99),
             Err(RemoteError::DeviceLimitReached)
         ));
 
@@ -371,7 +403,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let mut devices = DeviceStore::load_or_create(directory.path()).unwrap();
         devices
-            .add_device("Phone".into(), &mint_device_token(), 1)
+            .add_device(device_id(1), "Phone".into(), &mint_device_token(), 1)
             .unwrap();
 
         assert_eq!(
@@ -391,21 +423,22 @@ mod tests {
         let mut window = PairingWindow::open_at(1_000);
         let code = window.display_code_at(1_000).unwrap().to_string();
 
-        let token = match window.attempt(&code, "My iPhone".into(), 1_001, &mut devices) {
-            PairingAttempt::Success {
-                device,
-                device_token,
-            } => {
-                assert_eq!(device.label, "My iPhone");
-                device_token
-            }
-            _ => panic!("the correct pairing code must succeed"),
-        };
+        let token =
+            match window.attempt(&code, device_id(1), "My iPhone".into(), 1_001, &mut devices) {
+                PairingAttempt::Success {
+                    device,
+                    device_token,
+                } => {
+                    assert_eq!(device.display_name, "My iPhone");
+                    device_token
+                }
+                _ => panic!("the correct pairing code must succeed"),
+            };
 
         assert!(devices.verifies(&token));
         assert!(window.display_code_at(1_002).is_none());
         assert!(matches!(
-            window.attempt(&code, "My iPhone".into(), 1_002, &mut devices),
+            window.attempt(&code, device_id(1), "My iPhone".into(), 1_002, &mut devices),
             PairingAttempt::Closed
         ));
     }
@@ -420,6 +453,7 @@ mod tests {
         assert!(matches!(
             expired.attempt(
                 &valid_code,
+                device_id(1),
                 "Phone".into(),
                 PAIRING_LIFETIME_SECONDS,
                 &mut devices
@@ -430,16 +464,16 @@ mod tests {
         let mut capped = PairingWindow::open_at(0);
         for _ in 0..(MAX_PAIRING_FAILURES - 1) {
             assert!(matches!(
-                capped.attempt("INVALID!", "Phone".into(), 1, &mut devices),
+                capped.attempt("INVALID!", device_id(1), "Phone".into(), 1, &mut devices),
                 PairingAttempt::InvalidCode { .. }
             ));
         }
         assert!(matches!(
-            capped.attempt("INVALID!", "Phone".into(), 1, &mut devices),
+            capped.attempt("INVALID!", device_id(1), "Phone".into(), 1, &mut devices),
             PairingAttempt::AttemptsExceeded
         ));
         assert!(matches!(
-            capped.attempt("INVALID!", "Phone".into(), 1, &mut devices),
+            capped.attempt("INVALID!", device_id(1), "Phone".into(), 1, &mut devices),
             PairingAttempt::Closed
         ));
     }

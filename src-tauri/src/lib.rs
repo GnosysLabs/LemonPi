@@ -16,14 +16,13 @@ use tokio::{
     sync::{oneshot, Mutex},
 };
 
-// Private persistence, policy, catalog, and transport-neutral event helpers for a future opt-in
-// remote bridge. This module starts no listener; its local catalog-sync command cannot enable it.
-#[allow(dead_code)]
+// Private persistence, policy, catalog, event, and opt-in TLS bridge helpers.
 mod remote;
 
 use remote::{
     events::{EventHub, EventKind},
     projects::{KnownProjectInput, ProjectCatalog, RemoteProjectSummary, SessionSyncInput},
+    service::RemoteService,
 };
 
 const MAX_RPC_RECORD_BYTES: usize = 8 * 1024 * 1024;
@@ -39,7 +38,7 @@ const MAX_SETTINGS_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_AGENT_FILE_BYTES: u64 = 256 * 1024;
 
 #[derive(Default)]
-struct PiManager {
+pub(crate) struct PiManager {
     registry: Mutex<PiRegistry>,
     events: EventHub,
 }
@@ -49,6 +48,14 @@ struct PiRegistry {
     active_project: Option<PathBuf>,
     active_trusted: Option<bool>,
     processes: HashMap<PathBuf, ManagedPi>,
+}
+
+impl PiManager {
+    /// Read-only active-project snapshot for the remote bridge. It cannot start processes,
+    /// mutate trust, access stdin, or expose a filesystem path outside crate-private code.
+    pub(crate) async fn remote_active_project(&self) -> Option<PathBuf> {
+        self.registry.lock().await.active_project.clone()
+    }
 }
 
 struct ManagedPi {
@@ -3201,6 +3208,20 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Arc::new(PiManager::default()))
+        .setup(|app| {
+            let storage = remote_storage_directory(app.handle()).map_err(std::io::Error::other)?;
+            let manager = app.state::<Arc<PiManager>>().inner().clone();
+            let remote =
+                Arc::new(RemoteService::load(storage, manager).map_err(std::io::Error::other)?);
+            let startup_remote = Arc::clone(&remote);
+            app.manage(remote);
+            // Only a previously persisted local explicit enablement may start the listener.
+            // Startup failures remain local status state; they never create a plaintext fallback.
+            tauri::async_runtime::spawn(async move {
+                let _ = startup_remote.start_if_enabled().await;
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             detect_pi,
             start_pi,
@@ -3217,7 +3238,14 @@ pub fn run() {
             replace_pi_settings,
             get_pi_packages,
             run_pi_package_action,
-            stop_pi
+            stop_pi,
+            remote::commands::get_remote_config,
+            remote::commands::set_remote_config,
+            remote::commands::start_remote_pairing,
+            remote::commands::cancel_remote_pairing,
+            remote::commands::list_remote_devices,
+            remote::commands::revoke_remote_device,
+            remote::commands::get_remote_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running LemonPi");
