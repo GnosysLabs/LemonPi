@@ -26,9 +26,12 @@ body {
 
 .user-message__label,
 .workspace-rail__label,
-.tool-card__label,
-.agent-output__label {
+.tool-card__label {
   font-size: 11px;
+}
+
+.agent-output__label {
+  font-size: 12px;
 }
 
 /* Onboarding */
@@ -274,11 +277,15 @@ body {
 .agent-run__header code,
 .run-state,
 .agent-card__elapsed,
-.agent-activity-event,
-.agent-activity-event time,
+.agent-activity-event__meta,
+.agent-activity-event__meta time,
 .agent-error,
 .agent-activity-panel__footer {
   font-size: 11px;
+}
+
+.agent-activity-event__text {
+  font-size: 12px;
 }
 
 .agent-card__identity strong {

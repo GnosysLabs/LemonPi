@@ -525,17 +525,46 @@ function AgentCard({
           {activityEvents.length > 0 && (
             <div className="agent-output">
               <div className="agent-output__label">Activity stream</div>
-              <div className="agent-activity-stream" aria-live="polite">
-                {newestActivityEvents.map((event) => (
-                  <div className={`agent-activity-event agent-activity-event--${event.kind}`} key={`${event.at}-${event.kind}-${event.text}`}>
-                    <span className="agent-activity-event__icon">
-                      {event.kind === "tool" || event.kind === "result" ? <TerminalWindow size={11} /> : event.kind === "error" ? <Warning size={11} /> : <Brain size={11} />}
-                    </span>
-                    <span className="agent-activity-event__text">{event.text}</span>
-                    <time>{formatElapsed(event.at, undefined, now)} ago</time>
-                  </div>
-                ))}
-              </div>
+              <ol className="agent-activity-stream" aria-live="polite">
+                {newestActivityEvents.map((event, eventIndex) => {
+                  const label = event.kind === "reasoning"
+                    ? "Reasoning"
+                    : event.kind === "tool"
+                      ? "Tool call"
+                      : event.kind === "result"
+                        ? "Completed"
+                        : event.kind === "error"
+                          ? "Needs attention"
+                          : "Update";
+                  return (
+                    <li
+                      className={`agent-activity-event agent-activity-event--${event.kind}${eventIndex === 0 ? " agent-activity-event--latest" : ""}`}
+                      key={`${event.at}-${event.kind}-${event.text}`}
+                    >
+                      <span className="agent-activity-event__icon" aria-hidden="true">
+                        {event.kind === "tool"
+                          ? <TerminalWindow size={12} />
+                          : event.kind === "result"
+                            ? <Check size={12} weight="bold" />
+                            : event.kind === "error"
+                              ? <Warning size={12} />
+                              : event.kind === "message"
+                                ? <Circle size={7} weight="fill" />
+                                : <Brain size={12} />}
+                      </span>
+                      <div className="agent-activity-event__body">
+                        <div className="agent-activity-event__meta">
+                          <span>{label}</span>
+                          <time>{formatElapsed(event.at, undefined, now)} ago</time>
+                        </div>
+                        <div className="agent-activity-event__text">
+                          <ReactMarkdown>{event.text}</ReactMarkdown>
+                        </div>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
             </div>
           )}
 

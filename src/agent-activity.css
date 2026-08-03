@@ -958,16 +958,15 @@
 }
 
 .agent-output {
-  margin-top: 8px;
+  margin-top: 11px;
 }
 
 .agent-output__label {
-  margin-bottom: 4px;
+  margin: 0 2px 6px;
   color: var(--faint);
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  font-size: 12px;
+  font-weight: 620;
+  letter-spacing: 0.01em;
 }
 
 .agent-output__content {
@@ -986,57 +985,160 @@
 }
 
 .agent-activity-stream {
+  display: grid;
   max-height: 320px;
+  margin: 0;
+  padding: 4px;
   overflow: auto;
   overflow-anchor: none;
   border: 1px solid var(--matte-line);
-  border-radius: 4px;
-  background: var(--bg-base);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-subtle) 42%, var(--bg-base));
+  gap: 3px;
+  list-style: none;
+  scrollbar-color: var(--matte-line-strong) transparent;
+  scrollbar-width: thin;
 }
 
 .agent-activity-event {
   display: grid;
-  min-height: 40px;
-  padding: 9px 8px;
-  grid-template-columns: 14px minmax(0, 1fr) auto;
+  min-height: 48px;
+  padding: 8px;
+  grid-template-columns: 24px minmax(0, 1fr);
   align-items: start;
-  gap: 6px;
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
   color: var(--muted);
-  font-family: var(--mono);
-  font-size: 11px;
-  line-height: 1.45;
+  background: transparent;
+  transition: background 140ms ease, border-color 140ms ease;
 }
 
 .agent-activity-event + .agent-activity-event {
-  border-top: 1px solid var(--matte-line);
+  margin-top: 0;
+}
+
+.agent-activity-event:hover {
+  border-color: color-mix(in srgb, var(--matte-line-strong) 52%, transparent);
+  background: var(--bg-canvas);
+}
+
+.agent-activity-event--latest {
+  border-color: color-mix(in srgb, var(--lemon) 16%, var(--matte-line));
+  background: color-mix(in srgb, var(--lemon) 4%, var(--bg-canvas));
 }
 
 .agent-activity-event__icon {
   display: grid;
-  padding-top: 1px;
+  width: 24px;
+  height: 24px;
   place-items: center;
+  border: 1px solid var(--matte-line);
+  border-radius: 5px;
   color: var(--faint);
+  background: var(--bg-subtle);
+  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+}
+
+.agent-activity-event__body {
+  min-width: 0;
+}
+
+.agent-activity-event__meta {
+  display: flex;
+  min-height: 20px;
+  margin-bottom: 2px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 610;
 }
 
 .agent-activity-event__text {
   color: var(--ink);
-  white-space: pre-wrap;
-  word-break: break-word;
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.48;
+  overflow-wrap: anywhere;
 }
 
-.agent-activity-event time {
+.agent-activity-event__meta time {
   color: var(--faint);
+  font-family: var(--mono);
   font-size: 11px;
+  font-weight: 450;
   white-space: nowrap;
 }
 
-.agent-activity-event--reasoning .agent-activity-event__icon {
+.agent-activity-event__text > :first-child {
+  margin-top: 0;
+}
+
+.agent-activity-event__text > :last-child {
+  margin-bottom: 0;
+}
+
+.agent-activity-event__text p,
+.agent-activity-event__text ul,
+.agent-activity-event__text ol,
+.agent-activity-event__text pre {
+  margin: 0 0 5px;
+}
+
+.agent-activity-event__text ul,
+.agent-activity-event__text ol {
+  padding-left: 17px;
+}
+
+.agent-activity-event__text strong {
+  font-weight: 680;
+}
+
+.agent-activity-event__text code {
+  padding: 1px 3px;
+  border-radius: 3px;
+  background: var(--bg-subtle);
+  font-family: var(--mono);
+  font-size: 0.92em;
+}
+
+.agent-activity-event__text h1,
+.agent-activity-event__text h2,
+.agent-activity-event__text h3,
+.agent-activity-event__text h4 {
+  margin: 0 0 4px;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.agent-activity-event--reasoning .agent-activity-event__icon,
+.agent-activity-event--latest.agent-activity-event--reasoning .agent-activity-event__icon {
+  border-color: color-mix(in srgb, var(--lemon) 28%, var(--matte-line));
   color: var(--lemon);
+  background: color-mix(in srgb, var(--lemon) 6%, var(--bg-subtle));
+}
+
+.agent-activity-event--result .agent-activity-event__icon {
+  border-color: color-mix(in srgb, var(--success) 24%, var(--matte-line));
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 6%, var(--bg-subtle));
+}
+
+.agent-activity-event--tool .agent-activity-event__text,
+.agent-activity-event--result .agent-activity-event__text {
+  color: var(--muted);
 }
 
 .agent-activity-event--error .agent-activity-event__icon,
 .agent-activity-event--error .agent-activity-event__text {
   color: var(--danger);
+}
+
+.agent-activity-event--error .agent-activity-event__icon {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--matte-line));
+  background: color-mix(in srgb, var(--danger) 6%, var(--bg-subtle));
 }
 
 .agent-error {
