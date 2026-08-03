@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  asyncWriterLaunchFailure,
   appendCheckoutSnapshot,
   applyDelegationSafetyContracts,
   checkoutSnapshotPolicyIssue,
@@ -149,8 +150,23 @@ Child checklist:
 assert.equal(parallelWriterPolicyIssue({ tasks: [lane("API", "src/api/"), lane("UI", "src/ui/")], worktree: true }), undefined);
 assert.match(parallelWriterPolicyIssue({ tasks: [lane("API", "src/"), lane("UI", "src/ui/")], worktree: true }), /overlaps at src/);
 assert.match(parallelWriterPolicyIssue({ tasks: [lane("API", "src/api/"), lane("UI", "src/ui/")] }), /worktree: true/);
-assert.match(parallelWriterPolicyIssue({ tasks: [lane("1", "src/1"), lane("2", "src/2"), lane("3", "src/3"), lane("4", "src/4"), lane("5", "src/5")], worktree: true }), /at most 4/);
+assert.equal(parallelWriterPolicyIssue({ tasks: [lane("1", "src/1"), lane("2", "src/2"), lane("3", "src/3"), lane("4", "src/4"), lane("5", "src/5")], worktree: true }), undefined);
 assert.match(parallelWriterPolicyIssue({ tasks: [{ ...lane("Repeated", "src/repeated"), count: 2 }], worktree: true }), /cannot use count/);
+
+const crossRepositoryWave = {
+  tasks: [
+    { ...lane("Desktop", "src/desktop"), cwd: "/repo/desktop" },
+    { ...lane("Apple", "App/Features"), cwd: "/repo/apple" },
+  ],
+};
+compileDelegationContracts(crossRepositoryWave);
+assert.equal(crossRepositoryWave.worktree, false);
+assert.equal(crossRepositoryWave.concurrency, 2);
+assert.equal(parallelWriterPolicyIssue(crossRepositoryWave), undefined);
+assert.match(parallelWriterPolicyIssue({ ...crossRepositoryWave, tasks: crossRepositoryWave.tasks.map((task) => ({ ...task, cwd: "/repo/desktop" })) }), /distinct task cwd/);
+
+assert.match(asyncWriterLaunchFailure({ content: [{ type: "text", text: "worktree isolation uses the shared cwd" }] }, false), /worktree isolation/);
+assert.equal(asyncWriterLaunchFailure({ details: { runId: "run-123" } }, false), undefined);
 
 const singleton = (reason, detail = "The change is one atomic outcome with one inseparable write surface.", paths) => ({
   agent: "worker",
@@ -193,7 +209,7 @@ const compiledParallelLaunch = {
 };
 compileDelegationContracts(compiledParallelLaunch);
 assert.equal(compiledParallelLaunch.worktree, true);
-assert.equal(compiledParallelLaunch.concurrency, 4);
+assert.equal(compiledParallelLaunch.concurrency, 2);
 assert.equal(compiledParallelLaunch.artifacts, true);
 assert.match(compiledParallelLaunch.tasks[0].task, /^Depends on: none/m);
 assert.match(compiledParallelLaunch.tasks[1].task, /^Depends on: none/m);
