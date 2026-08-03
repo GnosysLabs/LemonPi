@@ -11,6 +11,7 @@ import {
   missionHasActiveOwnership,
   parallelWriterPolicyIssue,
   remainingPlanFromTodoResult,
+  retainWorkConservingLanes,
   replayMissionState,
   restoredStatusAction,
   shouldSuppressStatusPoll,
@@ -18,6 +19,7 @@ import {
   singleWriterDispatch,
   singletonWriterPolicyIssue,
   subagentStatusDisposition,
+  workConservingLaneSelection,
 } from "../src-tauri/resources/lemonpi-narration/extensions/narration.ts";
 
 const planningTask = `Execution mode: read-only
@@ -152,6 +154,11 @@ assert.match(parallelWriterPolicyIssue({ tasks: [lane("API", "src/"), lane("UI",
 assert.match(parallelWriterPolicyIssue({ tasks: [lane("API", "src/api/"), lane("UI", "src/ui/")] }), /worktree: true/);
 assert.equal(parallelWriterPolicyIssue({ tasks: [lane("1", "src/1"), lane("2", "src/2"), lane("3", "src/3"), lane("4", "src/4"), lane("5", "src/5")], worktree: true }), undefined);
 assert.match(parallelWriterPolicyIssue({ tasks: [{ ...lane("Repeated", "src/repeated"), count: 2 }], worktree: true }), /cannot use count/);
+const multilineLane = (outcome, paths) => ({
+  ...lane(outcome, paths.join(", ")),
+  task: lane(outcome, paths.join(", ")).task.replace(`Owned paths: ${paths.join(", ")}`, `Owned paths:\n${paths.map((path) => `- ${path}`).join("\n")}`),
+});
+assert.equal(parallelWriterPolicyIssue({ tasks: [multilineLane("API", ["src/api/", "src/shared/api.ts"]), lane("UI", "src/ui/")], worktree: true }), undefined);
 
 const crossRepositoryWave = {
   tasks: [
@@ -167,6 +174,26 @@ assert.match(parallelWriterPolicyIssue({ ...crossRepositoryWave, tasks: crossRep
 
 assert.match(asyncWriterLaunchFailure({ content: [{ type: "text", text: "worktree isolation uses the shared cwd" }] }, false), /worktree isolation/);
 assert.equal(asyncWriterLaunchFailure({ details: { runId: "run-123" } }, false), undefined);
+assert.deepEqual(workConservingLaneSelection(["dirty checkout", undefined, "inspection failed", undefined]), {
+  launchIndexes: [1, 3],
+  deferred: [
+    { index: 0, reason: "dirty checkout" },
+    { index: 2, reason: "inspection failed" },
+  ],
+});
+const degradedCrossRepositoryWave = {
+  tasks: [
+    { ...lane("Dirty desktop", "src-tauri/src/remote/"), cwd: "/repo/desktop" },
+    { ...lane("Clean Apple", "App/Features/"), cwd: "/repo/apple" },
+  ],
+  concurrency: 2,
+  worktree: false,
+};
+const degradedSelection = workConservingLaneSelection(["dirty checkout", undefined]);
+retainWorkConservingLanes(degradedCrossRepositoryWave, degradedCrossRepositoryWave.tasks, degradedSelection);
+assert.equal(degradedCrossRepositoryWave.tasks.length, 1);
+assert.equal(degradedCrossRepositoryWave.tasks[0].cwd, "/repo/apple");
+assert.equal(degradedCrossRepositoryWave.concurrency, 1);
 
 const singleton = (reason, detail = "The change is one atomic outcome with one inseparable write surface.", paths) => ({
   agent: "worker",
@@ -176,9 +203,14 @@ Single-writer detail: ${detail}${paths ? `\nOwned paths: ${paths}` : ""}`,
 });
 assert.match(singletonWriterPolicyIssue({ agent: "worker", task: implementationTask }, "I’m using a single writer because this is atomic."), /Single-writer reason/);
 assert.match(singletonWriterPolicyIssue(singleton("guess"), "I’m using a single writer because this is atomic."), /Unknown Single-writer reason/);
+assert.match(singletonWriterPolicyIssue(singleton("overlapping_ownership"), "I’m using a single writer because these files overlap."), /cannot justify leaving other lanes idle/);
 assert.match(singletonWriterPolicyIssue(singleton("atomic", "Too short"), "I’m using a single writer because this is atomic."), /concrete/);
-assert.match(singletonWriterPolicyIssue(singleton("atomic"), "Launching the worker now."), /tell the user why/);
-assert.equal(singletonWriterPolicyIssue(singleton("atomic"), "I’m using a single writer because the behavior is one inseparable state transition."), undefined);
+assert.equal(singletonWriterPolicyIssue(singleton("atomic"), "Launching the worker now."), undefined);
+const substantialSingleton = {
+  agent: "worker",
+  task: `${substantialWorkerLaunch.task}\nSingle-writer reason: atomic\nSingle-writer detail: This endpoint set is claimed as one atomic outcome.`,
+};
+assert.match(singletonWriterPolicyIssue(substantialSingleton), /mechanically substantial/);
 assert.deepEqual(singleWriterDispatch(singleton("dependency_blocked", "The later lane requires this schema to exist before it can compile.")), {
   rawReason: "dependency_blocked",
   reason: "dependency_blocked",
@@ -194,6 +226,9 @@ assert.match(checkoutSnapshotPolicyIssue({ tasks: [lane("API", "src/api/"), lane
 assert.match(checkoutSnapshotPolicyIssue(singleton("unsafe_checkout"), dirtySnapshot), /Owned paths/);
 assert.match(checkoutSnapshotPolicyIssue(singleton("unsafe_checkout", undefined, "src/ui/"), dirtySnapshot), /do not overlap/);
 assert.equal(checkoutSnapshotPolicyIssue(singleton("unsafe_checkout", undefined, "src/api/"), dirtySnapshot), undefined);
+const multilineUnsafe = singleton("unsafe_checkout", undefined, "src/api/, src/shared/");
+multilineUnsafe.task = multilineUnsafe.task.replace("Owned paths: src/api/, src/shared/", "Owned paths:\n- src/api/\n- src/shared/");
+assert.equal(checkoutSnapshotPolicyIssue(multilineUnsafe, dirtySnapshot), undefined);
 
 const snapshotLaunch = singleton("atomic");
 appendCheckoutSnapshot(snapshotLaunch, cleanSnapshot);

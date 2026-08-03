@@ -86,21 +86,21 @@ const ORCHESTRATION_CONTRACT = `
 <lemonpi-orchestration>
 You are Main Pi, the read-only supervisor and integration owner. You do not implement changes in project files. Optimize for the shortest reliable path to the user's outcome by selecting the best currently available subagent for each necessary phase, giving each writer a clear coherent slice, then inspecting, integrating, and validating its result. File count alone never makes work large.
 
-Parallel execution is the normal operating mode, not a rare optimization. For every non-trivial implementation request, the default first implementation action is one concurrent wave containing every useful dependency-ready lane. Keep every independent lane moving as later work becomes ready. The burden is entirely on sequential execution: use one worker only when the request is genuinely one small coherent outcome, write ownership overlaps, a real dependency blocks all other useful lanes, the checkout cannot be normalized safely without risking unowned work, or dispatch and integration overhead would erase the wall-time benefit. Before choosing a singleton, actively look for a second independent implementation, validation-preparation, platform, or product-surface lane. Do not serialize merely because one lane is easiest to describe first or touches a shared file. Do not manufacture duplicate or ceremonial work merely to increase concurrency.
+Parallel execution is the normal operating mode, not a rare optimization. For every non-trivial implementation request, the default first implementation action is one concurrent wave containing every useful dependency-ready implementation lane. Keep every independent implementation lane moving as later work becomes ready. Read-only scouts, planners, and reviewers are useful when they shorten the critical path, but they do not count as concurrent workers and never justify leaving an implementation lane idle. The burden is entirely on sequential execution: use one worker only when the request is genuinely one small coherent outcome, a real dependency blocks all other useful lanes, the checkout cannot be normalized safely without risking unowned work, or dispatch and integration overhead would erase the wall-time benefit. Before choosing a singleton, actively look for a second independent implementation, validation-preparation, platform, or product-surface lane. Overlap inside one lane does not prove that no other lane is ready elsewhere. Do not serialize merely because one lane is easiest to describe first or touches a shared file. Do not manufacture duplicate or ceremonial work merely to increase concurrency.
 
 Routing policy:
 
-1. Fast path — for a genuinely single, bounded, well-understood implementation outcome, call the built-in \`worker\` immediately with a concise outcome and completion condition. A singleton implementation task must include \`Single-writer reason:\` with exactly one of \`atomic\`, \`overlapping_ownership\`, \`dependency_blocked\`, \`unsafe_checkout\`, or \`overhead_exceeds_benefit\`, plus a concrete \`Single-writer detail:\`. Before the tool call, visibly tell the user \`I’m using a single writer because ...\` with the same real constraint. LemonPi rejects an unexplained singleton. Do not create a plan, inspect the roster, or launch a planner first for truly atomic work. LemonPi compiles execution mode, chunk fields, acceptance defaults, async behavior, and the initial child checklist automatically. Aim to launch in the first Main turn. This singleton path is an exception for work too small or indivisible to benefit from parallelism, not the default for a broader request.
+1. Fast path — for a genuinely single, bounded, well-understood implementation outcome, call the built-in \`worker\` immediately with a concise outcome and completion condition. A singleton implementation task must include \`Single-writer reason:\` with exactly one of \`atomic\`, \`dependency_blocked\`, \`unsafe_checkout\`, or \`overhead_exceeds_benefit\`, plus a concrete \`Single-writer detail:\`. LemonPi rejects unexplained or mechanically substantial atomic/overhead singleton chunks. Do not use internal file overlap as a singleton reason: draw that work as one lane, then continue searching the rest of the task graph for other ready workers. Do not create a plan, inspect the roster, or launch a planner first for truly atomic work. LemonPi compiles execution mode, chunk fields, acceptance defaults, async behavior, and the initial child checklist automatically. Aim to launch in the first Main turn. This singleton path is an exception for work too small or indivisible to benefit from parallelism, not the default for a broader request.
 2. Parallel-first decomposition — for broader work, spend only a brief inspection identifying outcome-sized vertical lanes, their exact ownership, and real dependencies. Collect every lane that is ready now. When multiple ready lanes have disjoint write ownership, dispatch the full useful wave immediately. Do not launch the first obvious lane and postpone other independent lanes until it completes. Dependent or overlapping lanes move to a later wave. Do not split by file merely to create more agents.
 3. Planning and roster — use a planner only when architecture, ordering, or ambiguity cannot be resolved by brief direct inspection. The planner must answer a concrete decision and must never be a ritual before ordinary coding. The built-in \`worker\` is the default executor. Call \`subagent({ action: "list" })\` only when a specialist or custom agent may materially improve the result, then reuse that roster for the task instead of rediscovering it.
-4. Semantic dispatch — tell each child the actual outcome, scope, completion condition, and meaningful constraints in plain language. You do not need to reproduce LemonPi's mechanical execution declaration, acceptance boilerplate, or one-item checklist; the runtime compiles missing fields. For parallel writers, include \`Owned paths:\` with exact repo-relative files or directories. An \`unsafe_checkout\` singleton must also declare exact \`Owned paths:\`. If ownership cannot be assigned confidently, use \`overlapping_ownership\` only when the overlap is real and explain it specifically. Give each worker only focused validation for its lane; do not paste the repository's entire test matrix into every child.
+4. Semantic dispatch — tell each child the actual outcome, scope, completion condition, and meaningful constraints in plain language. You do not need to reproduce LemonPi's mechanical execution declaration, acceptance boilerplate, or one-item checklist; the runtime compiles missing fields. For parallel writers, include \`Owned paths:\` with exact repo-relative files or directories, either inline or as a Markdown bullet list. An \`unsafe_checkout\` singleton must also declare exact \`Owned paths:\`. If two desired outcomes truly require the same files, they form one implementation lane; that does not prevent launching other disjoint lanes in the same wave. Give each worker only focused validation for its lane; do not paste the repository's entire test matrix into every child.
 5. Child progress — LemonPi initializes a child checklist automatically. For every delegated lane with two to five meaningful internal milestones, author those concrete milestones in \`Child checklist:\` before launch; do not collapse substantial multi-step work into one generic outcome row. Omit the custom checklist only for a genuinely atomic lane. LemonPi derives a safety-net checklist from named work sections when one is omitted, and an atomic fallback is named after the real chunk outcome. Do not create checklist items for tool calls or final-response delivery.
 6. Useful specialists — read-only planning, research, review, and analysis must answer a concrete question that changes the next decision. Run useful independent read-only work concurrently with writers when it shortens the critical path, such as preparing the next dependency-ready wave while implementation proceeds. Never launch ceremonial, duplicative, or make-work agents merely to occupy a slot.
 7. Execution path and checkout hygiene — inspect \`git status --porcelain\` during the brief dispatch pass, but never trust a status or HEAD remembered from before a reload, reset, compaction, or another turn. Immediately before every implementation launch, LemonPi independently reads each target repository's current HEAD and working tree and appends an authoritative checkout snapshot to its child task. If multiple disjoint implementation lanes are ready in one repository, launch all of them as one top-level \`tasks\` call and LemonPi adds worktree isolation. Lanes in distinct repositories already have physical checkout isolation and may share the same parallel call without managed worktrees. A dirty checkout is a cleanup task, not a sequential-execution excuse. Classify every dirty path first; validate and commit completed in-scope work, use a path-scoped dry run before removing confirmed rebuildable noise, or preserve unrelated changes in a clearly labeled recoverable checkpoint commit when that is safe. Never discard, overwrite, or silently hide user work. LemonPi permits \`unsafe_checkout\` only when the fresh dirty paths actually overlap the singleton's exact owned paths and cannot be normalized safely. Useful independent read-only subagents should still run alongside it when they save time.
 8. Checkpoint and integration review — Main Pi reviews every completed chunk directly: inspect what changed, compare it with the stated scope, owned paths, and out-of-scope boundary, and perform the smallest useful check. For a worktree wave, read the versioned manifest at \`parallelHandoff.path\`; require the expected base commit, a completed child status, a non-error patch, and changed paths confined to that lane's ownership. Apply accepted patches to the primary checkout one at a time with \`git apply --check\` followed by \`git apply --3way\`. This narrow patch application is git integration, not implementation. Never apply a failed, stale-base, out-of-lane, overlapping, or conflict-producing patch blindly; preserve its artifact and re-delegate only that bounded lane after the accepted patches are integrated. Report the concrete checkpoint to the user before continuing. Run a final holistic validation once after all chunks are integrated; do not rerun the full suite after every small chunk unless its risk requires that.
 9. Review gate — independent review is justified only when the user explicitly requests it or the change crosses a material risk boundary such as authentication, authorization, security, privacy, money, irreversible data changes, migrations, cryptography, public protocols, concurrency, or production release infrastructure. State that boundary in the delegated task as "Review justification: ...". At most one reviewer pass is allowed per user request unless the user explicitly asks for multiple independent reviews. Routine work is reviewed by Main Pi at each chunk checkpoint.
 10. Repair rule — only a concrete blocker or major correctness defect warrants a repair pass. Notes, hypothetical edge cases, test-coverage wishes, and low-severity residual risks do not trigger an automatic writer-review loop. For a bounded correction, steer or resume the same writer rather than launching a new implementation owner. After the writer repairs it, Main Pi inspects and validates directly. Do not launch a second reviewer to confirm the first reviewer.
-11. Parallelism rule — target the largest useful dependency-ready wave. LemonPi does not impose its former four-writer ceiling: set per-wave concurrency to the number of useful ready lanes, subject only to deliberate user or pi-subagents configuration. Parallel writers must be top-level parallel tasks, declare disjoint owned paths within each repository, and have no dependency on each other. Same-repository lanes use package-managed isolated worktrees; distinct-repository lanes use their already-separate checkouts. In a shared checkout keep exactly one writer. Only a confirmed live implementation run owns a writer slot: read-only agents and rejected launch attempts never block writers. Do not start an overlapping writer wave while confirmed implementation ownership remains active; respond to new user guidance, then steer the relevant existing child. Read-only specialists may run alongside writers when their results are independent and useful. Main Pi owns synthesis and patch integration; children never merge sibling work. Never reduce a safe ready wave to one worker out of habit, because sequential dispatch is simpler, or merely because the checkout was initially dirty.
+11. Parallelism rule — target the largest useful dependency-ready implementation wave. LemonPi does not impose its former four-writer ceiling: set per-wave concurrency to the number of useful ready writer lanes, subject only to deliberate user or pi-subagents configuration. Parallel writers must be top-level parallel tasks, declare disjoint owned paths within each repository, and have no dependency on each other. Same-repository lanes use package-managed isolated worktrees; distinct-repository lanes use their already-separate checkouts. In a shared checkout keep exactly one writer. Only a confirmed live implementation run owns a writer slot: read-only agents and rejected launch attempts never block writers or satisfy the concurrency target. A blocked or dirty lane must not suppress valid lanes: launch every worker that passes preflight now and defer only the concrete blocked lane. Do not start an overlapping writer wave while confirmed implementation ownership remains active; respond to new user guidance, then steer the relevant existing child. Read-only specialists may run alongside writers when their results are independent and useful. Main Pi owns synthesis and patch integration; children never merge sibling work. Never reduce a safe ready wave to one worker out of habit, because sequential dispatch is simpler, merely because one lane was rejected, or merely because one checkout was initially dirty.
 12. Progress and responsiveness rule — never invent a short child runtime deadline and never block the interactive supervisor with subagent_wait. Use progress evidence rather than elapsed time alone. End the Main Pi turn while background work continues so new user messages receive a fresh response immediately. A \`needs_attention\` control notice is an intervention request, not passive status: immediately inspect that exact run and transcript through the subagent status controls. If the package reconciles it to a terminal state, integrate the result. If it is alive with no active tool or new output, steer it once to stop exploring and return its result or exact blocker. If that steer cannot be delivered or the same run needs attention again, stop it, preserve useful transcript findings, and launch only a fresh smaller replacement chunk. Never leave a needs-attention run indefinitely, launch a competing agent, or restart the whole workflow.
 13. Acceptance rule — LemonPi uses pi-subagents' role-neutral v1 run contract, where execution success, acceptance, review, and observed effects remain separate. Package-level \`verified\` acceptance is a runtime gate, not a request for the child to report tests. Use it only with a non-empty \`acceptance.verify\` array of objects containing an \`id\` and executable \`command\`; commands mentioned in the task or child output do not count. If Main Pi will inspect and validate the chunk itself, omit acceptance and LemonPi will disable inferred package acceptance. Never resume a run that failed because its acceptance contract was malformed, because revival can inherit that contract; launch a fresh bounded chunk with corrected acceptance instead.
 14. Budget ownership rule — do not set per-dispatch \`timeoutMs\`, \`maxRuntimeMs\`, \`turnBudget\`, \`toolBudget\`, or \`usageBudget\`. LemonPi removes model-generated budget fields before launch because guessed counters create arbitrary failures and package turn budgets can terminate only after wrap-up/grace boundaries. Scope work through small tasks and intervene from live activity evidence instead. Deliberate budgets stored by the user in package settings or an agent profile remain authoritative.
@@ -186,11 +186,9 @@ const CHUNK_OUTCOME = /(?:^|\n)\s*chunk outcome\s*:\s*\S/i;
 const CHUNK_IN_SCOPE = /(?:^|\n)\s*in scope\s*:\s*\S/i;
 const CHUNK_DONE_WHEN = /(?:^|\n)\s*done when\s*:\s*\S/i;
 const CHUNK_OUT_OF_SCOPE = /(?:^|\n)\s*out of scope\s*:\s*\S/i;
-const OWNED_PATHS = /(?:^|\n)\s*owned paths\s*:\s*([^\n]+)/i;
 const NO_DEPENDENCIES = /(?:^|\n)\s*depends on\s*:\s*none\s*(?:\n|$)/i;
 const SINGLE_WRITER_REASON = /(?:^|\n)\s*single-writer reason\s*:\s*([^\n]+)/i;
 const SINGLE_WRITER_DETAIL = /(?:^|\n)\s*single-writer detail\s*:\s*([^\n]+)/i;
-const SINGLE_WRITER_VISIBLE_NARRATION = /\b(?:i(?:['’]m| am)|we(?:['’]re| are))\s+(?:using|launching|keeping|choosing)\s+(?:a\s+)?single\s+writer\s+because\b/i;
 const CHECKOUT_SNAPSHOT_START = "<lemonpi-checkout-snapshot>";
 const CHECKOUT_SNAPSHOT_END = "</lemonpi-checkout-snapshot>";
 const CHECKOUT_SNAPSHOT_BLOCK = /\n*<lemonpi-checkout-snapshot>[\s\S]*?<\/lemonpi-checkout-snapshot>\s*/gi;
@@ -205,7 +203,7 @@ interface DelegatedSpec {
   task: string;
 }
 
-export type SingleWriterReason = "atomic" | "overlapping_ownership" | "dependency_blocked" | "unsafe_checkout" | "overhead_exceeds_benefit";
+export type SingleWriterReason = "atomic" | "dependency_blocked" | "unsafe_checkout" | "overhead_exceeds_benefit";
 
 export interface CheckoutSnapshot {
   root: string;
@@ -215,7 +213,6 @@ export interface CheckoutSnapshot {
 
 const SINGLE_WRITER_REASONS = new Set<SingleWriterReason>([
   "atomic",
-  "overlapping_ownership",
   "dependency_blocked",
   "unsafe_checkout",
   "overhead_exceeds_benefit",
@@ -460,12 +457,29 @@ export function compileDelegationContracts(input: Record<string, unknown>): void
   }
 }
 
+function ownedPathFieldValues(task: string): string[] | undefined {
+  const lines = task.split(/\r?\n/);
+  const fieldIndex = lines.findIndex((line) => /^\s*owned paths\s*:/i.test(line));
+  if (fieldIndex < 0) return undefined;
+
+  const firstLine = lines[fieldIndex]!.replace(/^\s*owned paths\s*:\s*/i, "").trim();
+  const values: string[] = firstLine ? [firstLine] : [];
+  for (let index = fieldIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    if (!line.trim()) break;
+    const bullet = /^\s*[-*]\s+(.+?)\s*$/.exec(line);
+    if (!bullet) break;
+    values.push(bullet[1]!);
+  }
+
+  return values.flatMap((value) => value.split(","));
+}
+
 function normalizedOwnedPaths(task: string): string[] | undefined {
-  const match = OWNED_PATHS.exec(task);
-  if (!match) return undefined;
-  const paths = match[1]
-    .split(",")
-    .map((value) => value.trim().normalize("NFC").replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+$/, ""))
+  const values = ownedPathFieldValues(task);
+  if (!values) return undefined;
+  const paths = values
+    .map((value) => value.trim().replace(/^`|`$/g, "").normalize("NFC").replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+$/, ""))
     .filter(Boolean);
   if (paths.length === 0 || paths.some((value) =>
     value === "."
@@ -568,18 +582,54 @@ export function singletonWriterPolicyIssue(input: Record<string, unknown>, visib
   const dispatch = singleWriterDispatch(input);
   if (!dispatch) return undefined;
   if (!dispatch.rawReason) {
-    return "A singleton implementation launch needs `Single-writer reason:` set to atomic, overlapping_ownership, dependency_blocked, unsafe_checkout, or overhead_exceeds_benefit. Parallel implementation is the default; otherwise redraw the task as a top-level worktree wave.";
+    return "A singleton implementation launch needs `Single-writer reason:` set to atomic, dependency_blocked, unsafe_checkout, or overhead_exceeds_benefit. Parallel implementation is the default; otherwise redraw the task as a top-level worktree wave.";
   }
   if (!dispatch.reason) {
-    return `Unknown Single-writer reason: ${dispatch.rawReason}. Use atomic, overlapping_ownership, dependency_blocked, unsafe_checkout, or overhead_exceeds_benefit.`;
+    return `Unknown Single-writer reason: ${dispatch.rawReason}. Internal ownership overlap can define one lane but cannot justify leaving other lanes idle. Use atomic, dependency_blocked, unsafe_checkout, or overhead_exceeds_benefit.`;
   }
   if (!dispatch.detail || dispatch.detail.length < 16) {
     return "A singleton implementation launch needs a concrete `Single-writer detail:` explaining the actual constraint in at least one specific sentence.";
   }
-  if (!SINGLE_WRITER_VISIBLE_NARRATION.test(visibleNarration)) {
-    return "Before launching one implementation writer, tell the user why in visible narration using the form `I’m using a single writer because ...`, matching the structured Single-writer reason and detail. Then retry the same bounded launch.";
+  const checklistCount = parseChildChecklist(implementationSpecs(input)[0]!.task, "worker").length;
+  if ((dispatch.reason === "atomic" || dispatch.reason === "overhead_exceeds_benefit") && checklistCount > 2) {
+    return `The proposed ${dispatch.reason} singleton has ${checklistCount} meaningful milestones, so it is mechanically substantial. Decompose it into the largest useful parallel implementation wave; read-only scouts do not satisfy this requirement.`;
   }
+  // Visible narration remains prompt policy, not a brittle exact-phrase runtime blocker. Requiring
+  // the explanation in the same assistant fragment caused valid retries to fail mechanically.
+  void visibleNarration;
   return undefined;
+}
+
+export function workConservingLaneSelection(issues: Array<string | undefined>): {
+  launchIndexes: number[];
+  deferred: Array<{ index: number; reason: string }>;
+} {
+  const launchIndexes: number[] = [];
+  const deferred: Array<{ index: number; reason: string }> = [];
+  issues.forEach((reason, index) => {
+    if (reason) deferred.push({ index, reason });
+    else launchIndexes.push(index);
+  });
+  return { launchIndexes, deferred };
+}
+
+export function retainWorkConservingLanes(
+  input: Record<string, unknown>,
+  writerRecords: Record<string, unknown>[],
+  selection: ReturnType<typeof workConservingLaneSelection>,
+): void {
+  if (selection.deferred.length === 0) return;
+  const blockedRecords = new Set(selection.deferred.map(({ index }) => writerRecords[index]!));
+  const originalTasks = Array.isArray(input.tasks) ? input.tasks : [];
+  input.tasks = originalTasks.filter((candidate) => {
+    const record = asRecord(candidate);
+    return !record || !blockedRecords.has(record);
+  });
+  const remainingTaskCount = input.tasks.length;
+  const requestedConcurrency = typeof input.concurrency === "number" && Number.isFinite(input.concurrency)
+    ? Math.max(1, Math.floor(input.concurrency))
+    : remainingTaskCount;
+  input.concurrency = Math.max(1, Math.min(requestedConcurrency, remainingTaskCount));
 }
 
 function normalizedDirtyPaths(entry: string): string[] {
@@ -1049,6 +1099,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   const resumeToolCalls = new Map<string, { implementation: boolean }>();
   let activeDelegationHandoffPending = false;
   const writerToolCalls = new Map<string, { agent: string; async: boolean }>();
+  const deferredWriterLanesByToolCall = new Map<string, string[]>();
+  const deferredWriterLanesByRun = new Map<string, string[]>();
   const terminalWriterRuns = new Map<string, WriterLifecycleStatus>();
   const integratedTerminalRuns = new Set<string>();
   const restoreInterventionMissions = new Set<string>();
@@ -1282,10 +1334,12 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (integratedTerminalRuns.has(key) && !force) return;
     if (mission?.phase === "paused") return;
     rememberTerminalRun(key);
+    const deferred = deferredWriterLanesByRun.get(runId) ?? [];
+    deferredWriterLanesByRun.delete(runId);
     pi.sendMessage(
       {
         customType: "lemonpi-subagent-integration",
-        content: `Delegated run ${runId}${agent ? ` (${agent})` : ""} reached terminal state ${status}. Inspect that exact run's status and result, integrate its findings or changes, perform the appropriate validation, and give the user a concrete progress or completion explanation. Do not launch a duplicate worker for the same completed chunk.`,
+        content: `Delegated run ${runId}${agent ? ` (${agent})` : ""} reached terminal state ${status}. Inspect that exact run's status and result, integrate its findings or changes, perform the appropriate validation, and give the user a concrete progress or completion explanation. Do not launch a duplicate worker for the same completed chunk.${deferred.length > 0 ? `\n\nThe original wave was work-conservingly degraded instead of rejected. These lanes were deferred while valid workers launched:\n- ${deferred.join("\n- ")}\nCorrect only those concrete preflight issues, then dispatch the remaining ready lanes; do not rerun successful work.` : ""}`,
         display: false,
       },
       { deliverAs: "followUp", triggerTurn: true },
@@ -1541,27 +1595,53 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           && directWriterRecords.length > 1
           && directWriterRecords.every((record) => typeof record.cwd === "string" && record.cwd.trim());
         if (crossRepositoryWave) {
-          let snapshots: CheckoutSnapshot[];
-          try {
-            snapshots = await Promise.all(directWriterRecords.map((record) => inspectCheckoutSnapshot(pi, record.cwd, ctx.cwd)));
-          } catch (error) {
+          const inspections = await Promise.allSettled(
+            directWriterRecords.map((record) => inspectCheckoutSnapshot(pi, record.cwd, ctx.cwd)),
+          );
+          const issues: Array<string | undefined> = inspections.map((result) => result.status === "rejected"
+            ? `Checkout inspection failed: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`
+            : undefined);
+
+          const indexesByRoot = new Map<string, number[]>();
+          inspections.forEach((result, index) => {
+            if (result.status !== "fulfilled") return;
+            const indexes = indexesByRoot.get(result.value.root) ?? [];
+            indexes.push(index);
+            indexesByRoot.set(result.value.root, indexes);
+          });
+          for (const [root, indexes] of indexesByRoot) {
+            if (indexes.length < 2) continue;
+            indexes.forEach((index) => {
+              issues[index] = `Declared cross-repository cwd resolves to the same Git repository (${root}); this lane needs a same-repository worktree wave.`;
+            });
+          }
+
+          inspections.forEach((result, index) => {
+            if (result.status !== "fulfilled" || issues[index]) return;
+            issues[index] = checkoutSnapshotPolicyIssue(directWriterRecords[index]!, result.value);
+          });
+          const selection = workConservingLaneSelection(issues);
+          if (selection.launchIndexes.length === 0) {
             return {
               block: true,
-              reason: `LemonPi could not verify every target checkout immediately before dispatch: ${error instanceof Error ? error.message : String(error)} No implementation worker was launched.`,
+              reason: `No implementation lane passed fresh checkout preflight:\n- ${selection.deferred.map(({ index, reason }) => `${conciseTaskSummary(String(directWriterRecords[index]?.task ?? "worker lane"))}: ${reason}`).join("\n- ")}`,
             };
           }
-          if (new Set(snapshots.map((snapshot) => snapshot.root)).size !== snapshots.length) {
-            return {
-              block: true,
-              reason: "Two parallel task cwd values resolve to the same Git repository. Use one package-managed worktree wave for those lanes instead.",
-            };
-          }
-          for (let index = 0; index < directWriterRecords.length; index += 1) {
-            const record = directWriterRecords[index]!;
-            const snapshot = snapshots[index]!;
-            const checkoutIssue = checkoutSnapshotPolicyIssue(record, snapshot);
-            if (checkoutIssue) return { block: true, reason: checkoutIssue };
-            appendCheckoutSnapshot(record, snapshot);
+
+          selection.launchIndexes.forEach((index) => {
+            const result = inspections[index]!;
+            if (result.status === "fulfilled") appendCheckoutSnapshot(directWriterRecords[index]!, result.value);
+          });
+          if (selection.deferred.length > 0) {
+            retainWorkConservingLanes(input, directWriterRecords, selection);
+            const deferred = selection.deferred.map(({ index, reason }) =>
+              `${conciseTaskSummary(String(directWriterRecords[index]?.task ?? "worker lane"))}: ${reason}`,
+            );
+            deferredWriterLanesByToolCall.set(event.toolCallId, deferred);
+            ctx.ui.notify(
+              `Launching ${selection.launchIndexes.length} ready implementation worker${selection.launchIndexes.length === 1 ? "" : "s"}; deferred ${deferred.length} blocked lane${deferred.length === 1 ? "" : "s"} without suppressing valid work.`,
+              "warning",
+            );
           }
         } else {
           let checkoutSnapshot: CheckoutSnapshot;
@@ -1753,6 +1833,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     }
     const writerCall = writerToolCalls.get(event.toolCallId);
     writerToolCalls.delete(event.toolCallId);
+    const deferredWriterLanes = deferredWriterLanesByToolCall.get(event.toolCallId) ?? [];
+    deferredWriterLanesByToolCall.delete(event.toolCallId);
     if (!delegationToolCalls.delete(event.toolCallId)) return;
     const failure = writerCall && writerCall.async !== false
       ? asyncWriterLaunchFailure(event.result, event.isError)
@@ -1761,6 +1843,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       const runId = delegationRunId(event.result);
       if (runId) {
         activeDelegationRuns.add(runId);
+        if (deferredWriterLanes.length > 0) deferredWriterLanesByRun.set(runId, deferredWriterLanes);
         activeDelegationHandoffPending = true;
         const currentMission = ensureMission("delegated");
         if (!currentMission.activeRunIds.includes(runId)) currentMission.activeRunIds.push(runId);
