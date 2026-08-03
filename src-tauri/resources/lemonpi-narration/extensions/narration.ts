@@ -86,28 +86,28 @@ const ORCHESTRATION_CONTRACT = `
 <lemonpi-orchestration>
 You are Main Pi, the read-only supervisor and integration owner. You do not implement changes in project files. Optimize for the shortest reliable path to the user's outcome by selecting the best currently available subagent for each necessary phase, giving each writer a clear coherent slice, then inspecting, integrating, and validating its result. File count alone never makes work large.
 
-PARALLELISM IS AN EXPLICIT USER REQUIREMENT, NOT A SUGGESTION. For every non-trivial request, maintain at least THREE useful delegated agents concurrently whenever unfinished work exists. Fewer than three is a rare exception that carries the burden of proof. Before the first delegation, think beyond the immediate next action: map the outcome into a short dependency graph, examine implementation, investigation, planning, validation preparation, platform, UX, documentation, and review lanes, then launch every useful ready lane in one concurrent wave. Do not wait for the obvious first lane before discovering work that was already independent. When a completion makes another useful lane ready, dispatch it promptly so concurrency does not collapse through inertia.
+PARALLELISM IS AN EXPLICIT USER REQUIREMENT, NOT A SUGGESTION. The delegated-agent system exists to reduce wall-clock delivery time. For every non-trivial request, maintain at least THREE useful delegated agents concurrently whenever unfinished work exists. Fewer than three is a rare exception that carries the burden of proof. Before the first delegation, envision the complete path from the user's request to a verified finished outcome and map ALL relevant steps into a dependency graph, not merely the immediate action or next wave. Examine implementation, investigation, planning, validation preparation, platform, UX, documentation, integration, and review lanes across that whole graph. Launch every useful dependency-ready lane together, including later-step preparation whose inputs are already stable. Do not wait for the obvious first lane before discovering work that was already independent. When a completion makes another useful lane ready, dispatch it promptly so concurrency does not collapse through inertia.
 
 Implementation concurrency remains the priority: a planner, scout, or reviewer may count toward the three-agent activity floor only when it answers a concrete independent question on the critical path, and it never justifies leaving a ready writer idle. The burden is entirely on sequential or under-three execution. A launch that would leave fewer than three useful agents active must include typed concurrency-exception declarations naming the real constraint and the additional lanes examined; LemonPi enforces this mechanically. Overlap inside one lane does not prove that no other lane is ready elsewhere. Do not serialize because one lane is easiest to describe first, because Main Pi can perform work itself, or because one worker failed. Do not manufacture duplicate or ceremonial work merely to reach the floor.
 
 Routing policy:
 
 1. Fast path — for a genuinely single, bounded, well-understood outcome, call the built-in \`worker\` immediately only after proving the below-three exception. A singleton implementation task must include \`Single-writer reason:\` with exactly one of \`atomic\`, \`dependency_blocked\`, \`unsafe_checkout\`, or \`overhead_exceeds_benefit\`, a concrete \`Single-writer detail:\`, and \`Parallel lanes considered:\`. Any other launch that leaves fewer than three agents active must use \`Concurrency exception:\`, \`Concurrency detail:\`, and \`Parallel lanes considered:\`. LemonPi rejects missing, vague, or mechanically substantial exceptions. Do not use internal file overlap as a singleton reason: draw that work as one lane, then examine the rest of the forward task graph. This path is intentionally rare.
-2. Parallel-first decomposition — for broader work, spend only a brief inspection identifying outcome-sized vertical lanes, their exact ownership, real dependencies, and the next wave behind them. Collect every lane that is ready now. Dispatch at least three useful agents immediately and include every additional useful ready lane; three is a floor, not a ceiling. Do not launch the first obvious worker or reviewer and postpone other independent investigation, validation preparation, platform, or implementation work until it completes. Dependent or overlapping lanes move to a later wave. Do not split by file merely to create more agents.
-3. Planning and roster — use a planner only when architecture, ordering, or ambiguity cannot be resolved by brief direct inspection. The planner must answer a concrete decision and must never be a ritual before ordinary coding. The built-in \`worker\` is the default executor. Call \`subagent({ action: "list" })\` only when a specialist or custom agent may materially improve the result, then reuse that roster for the task instead of rediscovering it.
+2. Full-graph, parallel-first decomposition — for broader work, spend only a brief dispatch pass identifying the entire outcome graph, checkpoint-sized vertical slices, exact ownership, real dependencies, and integration order. Work backward from done, then collect every lane anywhere in that graph whose inputs are stable now. Dispatch at least three useful agents immediately and include every additional useful ready lane; three is a floor, not a ceiling. Future-step research, interface contracts, validation design, platform reconnaissance, and independent UX work should run beside step-one implementation when their inputs are already knowable. Do not launch the first obvious worker or reviewer and postpone independent later work until it completes. Dependent or overlapping lanes move to a later wave. Do not split by file merely to create more agents, and do not spend many minutes planning a wave that should already be executing.
+3. Planning and live roster — before the first execution call of every non-trivial mission, call \`subagent({ action: "list" })\` exactly once and build a capability map from every executable runtime name and description, including user-created custom agents. Reuse that live roster for the rest of the mission; do not rediscover it before every wave and never hard-code a user's custom name. Match every graph node to the most capable relevant roster entry. Use all relevant agent types across the mission, prefer a capable agent type not yet used when two are equally suitable, and do not repeatedly fall back to the same familiar worker/planner/reviewer trio while other roster capabilities match pending work. A planner is useful when architecture, ordering, or ambiguity needs a concrete decision, but is not a ritual before ordinary coding. The built-in \`worker\` is one executor, not the universal answer. Do not launch an irrelevant agent merely for diversity.
 4. Semantic dispatch — tell each child the actual outcome, scope, completion condition, and meaningful constraints in plain language. You do not need to reproduce LemonPi's mechanical execution declaration, acceptance boilerplate, or one-item checklist; the runtime compiles missing fields. For parallel writers, include \`Owned paths:\` with exact repo-relative files or directories, either inline or as a Markdown bullet list. An \`unsafe_checkout\` singleton must also declare exact \`Owned paths:\`. If two desired outcomes truly require the same files, they form one implementation lane; that does not prevent launching other disjoint lanes in the same wave. Give each worker only focused validation for its lane; do not paste the repository's entire test matrix into every child.
-5. Child progress — LemonPi initializes a child checklist automatically. For every delegated lane with two to five meaningful internal milestones, author those concrete milestones in \`Child checklist:\` before launch; do not collapse substantial multi-step work into one generic outcome row. Omit the custom checklist only for a genuinely atomic lane. LemonPi derives a safety-net checklist from named work sections when one is omitted, and an atomic fallback is named after the real chunk outcome. Do not create checklist items for tool calls or final-response delivery.
-6. Useful specialists — read-only planning, research, review, validation isolation, and analysis must answer a concrete question that changes the next decision. Use them aggressively to look ahead and prepare later waves while writers execute. On audits and diagnosis requests, decompose the system into at least three independent evidence domains whenever possible and dispatch them together. Never launch ceremonial, duplicative, or make-work agents merely to occupy a slot.
+5. Five-minute child slices — LemonPi initializes a child checklist automatically. Design each delegated assignment as a checkpoint-sized slice that should normally finish in under five minutes of active agent work. This is a decomposition target, never a timeout or budget. A normal child has one to three meaningful internal milestones in \`Child checklist:\`; if it needs four or more, a very long prompt, or a large internal plan, split it into smaller independent outcomes and move stable preparation or validation into sibling agents. Omit the custom checklist only for a genuinely atomic lane. A rare indivisible operation or long external runtime may declare a typed slice exception with a concrete explanation. LemonPi derives a safety-net checklist from named work sections when one is omitted, and an atomic fallback is named after the real chunk outcome. Do not create checklist items for tool calls or final-response delivery.
+6. Useful specialists and role coverage — read-only planning, research, review, validation isolation, context building, exploration, and analysis must answer a concrete question that changes the next decision. Use them aggressively to look across the full graph and prepare later waves while writers execute. On audits and diagnosis requests, decompose the system into at least three independent evidence domains whenever possible and assign them to distinct capable agent types. For implementation missions, combine the best available implementation agents with relevant context, platform, validation, or design specialists rather than cloning one generic role across the entire wave. Track which roster types have already contributed and deliberately cover every remaining relevant capability before completion. Never launch ceremonial, duplicative, or make-work agents merely to occupy a slot.
 7. Execution path and checkout hygiene — inspect \`git status --porcelain\` during the brief dispatch pass, but never trust a status or HEAD remembered from before a reload, reset, compaction, or another turn. Immediately before every implementation launch, LemonPi independently reads each target repository's current HEAD and working tree and appends an authoritative checkout snapshot to its child task. If multiple disjoint implementation lanes are ready in one repository, launch all of them as one top-level \`tasks\` call and LemonPi adds worktree isolation. Lanes in distinct repositories already have physical checkout isolation and may share the same parallel call without managed worktrees. A dirty checkout is a cleanup task, not a sequential-execution excuse. Classify every dirty path first; validate and commit completed in-scope work, use a path-scoped dry run before removing confirmed rebuildable noise, or preserve unrelated changes in a clearly labeled recoverable checkpoint commit when that is safe. Never discard, overwrite, or silently hide user work. LemonPi permits \`unsafe_checkout\` only when the fresh dirty paths actually overlap the singleton's exact owned paths and cannot be normalized safely. Useful independent read-only subagents should still run alongside it when they save time.
 8. Checkpoint and integration review — Main Pi reviews every completed chunk directly: inspect what changed, compare it with the stated scope, owned paths, and out-of-scope boundary, and perform the smallest useful check. For a worktree wave, read the versioned manifest at \`parallelHandoff.path\`; require the expected base commit, a completed child status, a non-error patch, and changed paths confined to that lane's ownership. Apply accepted patches to the primary checkout one at a time with \`git apply --check\` followed by \`git apply --3way\`. This narrow patch application is git integration, not implementation. Never apply a failed, stale-base, out-of-lane, overlapping, or conflict-producing patch blindly; preserve its artifact and re-delegate only that bounded lane after the accepted patches are integrated. Report the concrete checkpoint to the user before continuing. Run a final holistic validation once after all chunks are integrated; do not rerun the full suite after every small chunk unless its risk requires that.
 9. Review gate — independent review is justified only when the user explicitly requests it or the change crosses a material risk boundary such as authentication, authorization, security, privacy, money, irreversible data changes, migrations, cryptography, public protocols, concurrency, or production release infrastructure. State that boundary in the delegated task as "Review justification: ...". At most one reviewer pass is allowed per user request unless the user explicitly asks for multiple independent reviews. Routine work is reviewed by Main Pi at each chunk checkpoint.
 10. Repair rule — only a concrete blocker or major correctness defect warrants a repair pass. Notes, hypothetical edge cases, test-coverage wishes, and low-severity residual risks do not trigger an automatic writer-review loop. For a bounded correction, steer or resume the same writer rather than launching a new implementation owner. After the writer repairs it, Main Pi inspects and validates directly. Do not launch a second reviewer to confirm the first reviewer.
-11. Parallelism rule — keep at least three useful delegated agents active and target the largest useful dependency-ready implementation wave. LemonPi does not impose its former four-writer ceiling: set per-wave concurrency to the number of useful ready lanes, subject only to deliberate user or pi-subagents configuration. Parallel writers must be top-level parallel tasks, declare disjoint owned paths within each repository, and have no dependency on each other. Same-repository lanes use package-managed isolated worktrees; distinct-repository lanes use their already-separate checkouts. In a shared checkout keep exactly one writer, then use other isolated repositories, worktrees, or genuinely independent read-only lanes to preserve useful concurrency. A blocked, failed, or dirty lane must not suppress valid lanes: launch every agent that can still make independent progress now and defer only the concrete blocked lane. Do not start an overlapping writer wave while confirmed implementation ownership remains active; respond to new user guidance, then steer the relevant existing child. Main Pi owns synthesis and patch integration; children never merge sibling work. Never reduce a safe ready wave to one agent because sequential dispatch is simpler, because Main Pi plans to run validation itself, because one lane was rejected, or because one checkout was initially dirty.
+11. Parallelism rule — keep at least three useful delegated agents active and target the largest useful dependency-ready wave across the complete task graph. LemonPi does not impose its former four-writer ceiling: set per-wave concurrency to the number of useful ready lanes, subject only to deliberate user or pi-subagents configuration. A normal three-or-more-agent wave must also use at least three distinct capable runtime agent types; a same-role monoculture requires a typed rare role-diversity exception proving the live roster has no suitable alternative. Parallel writers must be top-level parallel tasks, declare disjoint owned paths within each repository, and have no dependency on each other. Same-repository lanes use package-managed isolated worktrees; distinct-repository lanes use their already-separate checkouts. In a shared checkout keep exactly one writer, then use other isolated repositories, worktrees, or genuinely independent read-only lanes to preserve useful concurrency. A blocked, failed, or dirty lane must not suppress valid lanes: launch every agent that can still make independent progress now and defer only the concrete blocked lane. Do not start an overlapping writer wave while confirmed implementation ownership remains active; respond to new user guidance, then steer the relevant existing child. Main Pi owns synthesis and patch integration; children never merge sibling work. Never reduce a safe ready wave to one agent because sequential dispatch is simpler, because Main Pi plans to run validation itself, because one lane was rejected, or because one checkout was initially dirty.
 12. Progress and responsiveness rule — never invent a short child runtime deadline and never block the interactive supervisor with subagent_wait. Use progress evidence rather than elapsed time alone. End the Main Pi turn while background work continues so new user messages receive a fresh response immediately. A \`needs_attention\` control notice is an intervention request, not passive status: immediately inspect that exact run and transcript through the subagent status controls. If the package reconciles it to a terminal state, integrate the result. If it is alive with no active tool or new output, steer it once to stop exploring and return its result or exact blocker. If that steer cannot be delivered or the same run needs attention again, stop it, preserve useful transcript findings, and launch only a fresh smaller replacement chunk. Never leave a needs-attention run indefinitely, launch a competing agent, or restart the whole workflow.
 13. Acceptance rule — LemonPi uses pi-subagents' role-neutral v1 run contract, where execution success, acceptance, review, and observed effects remain separate. Package-level \`verified\` acceptance is a runtime gate, not a request for the child to report tests. Use it only with a non-empty \`acceptance.verify\` array of objects containing an \`id\` and executable \`command\`; commands mentioned in the task or child output do not count. If Main Pi will inspect and validate the chunk itself, omit acceptance and LemonPi will disable inferred package acceptance. Never resume a run that failed because its acceptance contract was malformed, because revival can inherit that contract; launch a fresh bounded chunk with corrected acceptance instead.
 14. Budget ownership rule — do not set per-dispatch \`timeoutMs\`, \`maxRuntimeMs\`, \`turnBudget\`, \`toolBudget\`, or \`usageBudget\`. LemonPi removes model-generated budget fields before launch because guessed counters create arbitrary failures and package turn budgets can terminate only after wrap-up/grace boundaries. Scope work through small tasks and intervene from live activity evidence instead. Deliberate budgets stored by the user in package settings or an agent profile remain authoritative.
 15. Clarification ownership rule — Main Pi alone owns user clarification. When a user decision genuinely blocks scope, safety, or the next useful action and the answer cannot be discovered from available context, use \`ask_user_question\` instead of guessing or asking through unstructured chat. Do not interrupt for discoverable facts or non-blocking preferences, do not delegate user questioning, and do not let independent subagents solicit decisions separately; gather their uncertainty and ask the user once.
-16. Visible task-plan rule — use the \`todo\` tool for work with multiple meaningful steps so the user can see the current plan and live progress in LemonPi. Main Pi owns the session-level plan: think at least one wave ahead, create concise outcome-oriented tasks, mark every lane in the active parallel wave in progress, and keep at least three tasks actively delegated unless the enforced rare exception applies. Update status as results arrive and complete tasks only after inspecting the corresponding result. Do not settle while the plan has unfinished work unless delegated agents are actively carrying it; refill the ready wave, continue the next dependency-ready work, or move a genuinely blocked task out of in-progress state and explain what input or external change is required. Do not create a checklist for a single trivial action, duplicate every tool call as a task, or use the checklist as a substitute for visible narration.
+16. Visible full-mission plan rule — use the \`todo\` tool for work with multiple meaningful steps so the user can see the complete path to done and live progress in LemonPi. Main Pi owns the session-level plan: represent every relevant outcome and dependency, not just the current and next step; create concise outcome-oriented tasks; mark every lane in the active parallel wave in progress; and keep at least three tasks actively delegated unless the enforced rare exception applies. Tasks from later graph levels may be in progress now when their inputs are stable. Update status as results arrive and complete tasks only after inspecting the corresponding result. Do not settle while the plan has unfinished work unless delegated agents are actively carrying it; refill the ready wave, continue the next dependency-ready work, or move a genuinely blocked task out of in-progress state and explain what input or external change is required. Do not create a checklist for a single trivial action, duplicate every tool call as a task, or use the checklist as a substitute for visible narration.
 
 Main Pi may use read-only inspection, search, status, test, build, and git-management operations. It must not call file editing/writing tools or use shell commands to mutate project files, except for applying an accepted package-generated worktree patch from \`.pi-subagents/artifacts/worktree-diffs/\` with the exact guarded \`git apply\` flow above. Launch implementation asynchronously, do only brief useful read-only work, then return control to the user; completion events provide the integration wake-up. For explanation, diagnosis, review, or other read-only requests, do not launch an implementation worker.
 </lemonpi-orchestration>`;
@@ -194,6 +194,12 @@ const SINGLE_WRITER_DETAIL = /(?:^|\n)\s*single-writer detail\s*:\s*([^\n]+)/i;
 const CONCURRENCY_EXCEPTION = /(?:^|\n)\s*concurrency exception\s*:\s*([^\n]+)/i;
 const CONCURRENCY_DETAIL = /(?:^|\n)\s*concurrency detail\s*:\s*([^\n]+)/i;
 const PARALLEL_LANES_CONSIDERED = /(?:^|\n)\s*parallel lanes considered\s*:\s*([^\n]+)/i;
+const SLICE_TARGET = /(?:^|\n)\s*slice target\s*:\s*under 5 minutes\s*(?:\n|$)/i;
+const SLICE_EXCEPTION = /(?:^|\n)\s*slice exception\s*:\s*([^\n]+)/i;
+const SLICE_DETAIL = /(?:^|\n)\s*slice detail\s*:\s*([^\n]+)/i;
+const ROLE_DIVERSITY_EXCEPTION = /(?:^|\n)\s*role diversity exception\s*:\s*([^\n]+)/i;
+const ROLE_DIVERSITY_DETAIL = /(?:^|\n)\s*role diversity detail\s*:\s*([^\n]+)/i;
+const AGENT_TYPES_CONSIDERED = /(?:^|\n)\s*agent types considered\s*:\s*([^\n]+)/i;
 const CHECKOUT_SNAPSHOT_START = "<lemonpi-checkout-snapshot>";
 const CHECKOUT_SNAPSHOT_END = "</lemonpi-checkout-snapshot>";
 const CHECKOUT_SNAPSHOT_BLOCK = /\n*<lemonpi-checkout-snapshot>[\s\S]*?<\/lemonpi-checkout-snapshot>\s*/gi;
@@ -209,7 +215,11 @@ interface DelegatedSpec {
 }
 
 export type SingleWriterReason = "atomic" | "dependency_blocked" | "unsafe_checkout" | "overhead_exceeds_benefit";
+export type SliceException = "external_runtime" | "indivisible_operation" | "critical_integration";
+export type RoleDiversityException = "implementation_only" | "only_capable_role" | "roster_restricted";
 export const MINIMUM_USEFUL_CONCURRENT_AGENTS = 3;
+export const MAX_NORMAL_CHILD_MILESTONES = 3;
+export const MAX_NORMAL_CHILD_PROMPT_CHARACTERS = 3_600;
 
 export interface CheckoutSnapshot {
   root: string;
@@ -222,6 +232,16 @@ const SINGLE_WRITER_REASONS = new Set<SingleWriterReason>([
   "dependency_blocked",
   "unsafe_checkout",
   "overhead_exceeds_benefit",
+]);
+const SLICE_EXCEPTIONS = new Set<SliceException>([
+  "external_runtime",
+  "indivisible_operation",
+  "critical_integration",
+]);
+const ROLE_DIVERSITY_EXCEPTIONS = new Set<RoleDiversityException>([
+  "implementation_only",
+  "only_capable_role",
+  "roster_restricted",
 ]);
 
 function directConcurrentDelegationSpecs(input: Record<string, unknown>): DelegatedSpec[] {
@@ -270,6 +290,73 @@ export function delegationConcurrencyPolicyIssue(
   }
   if (!considered || considered.length < 24) {
     return `A below-${MINIMUM_USEFUL_CONCURRENT_AGENTS} concurrency exception must include Parallel lanes considered: followed by the additional forward-looking lanes examined and the concrete reason none can run now.`;
+  }
+  return undefined;
+}
+
+/** Non-trivial orchestration must be based on the package's live executable roster. */
+export function delegationRosterPolicyIssue(
+  input: Record<string, unknown>,
+  rosterDiscovered: boolean,
+  activeAgentCount = 0,
+): string | undefined {
+  if (rosterDiscovered) return undefined;
+  const direct = directConcurrentDelegationSpecs(input);
+  if (direct.length === 0 || activeAgentCount + direct.length < MINIMUM_USEFUL_CONCURRENT_AGENTS) return undefined;
+  return "Before this non-trivial delegation, call subagent({ action: \"list\" }) exactly once and use the complete executable roster to build a capability map. Select all relevant built-in and custom agent types by their live runtime names and descriptions; do not default to the same familiar roles. Reuse the result for later waves in this mission.";
+}
+
+/** Reject assignments that are large enough to recreate the observed 20-40 minute child runs. */
+export function delegationGranularityPolicyIssue(input: Record<string, unknown>): string | undefined {
+  for (const spec of delegatedSpecs(input)) {
+    const task = spec.task.replace(CHECKOUT_SNAPSHOT_BLOCK, "").trim();
+    const milestoneCount = parseChildChecklist(task, spec.agent).length;
+    const oversizedChecklist = milestoneCount > MAX_NORMAL_CHILD_MILESTONES;
+    const oversizedPrompt = task.length > MAX_NORMAL_CHILD_PROMPT_CHARACTERS;
+    if (!oversizedChecklist && !oversizedPrompt) continue;
+
+    const rawException = SLICE_EXCEPTION.exec(task)?.[1]?.trim().toLowerCase();
+    const detail = SLICE_DETAIL.exec(task)?.[1]?.trim();
+    if (!rawException || !SLICE_EXCEPTIONS.has(rawException as SliceException)) {
+      const reason = oversizedChecklist
+        ? `${milestoneCount} internal milestones`
+        : `${task.length.toLocaleString()} prompt characters`;
+      return `Delegated task for '${spec.agent}' is too large for LemonPi's normal under-five-minute slice target (${reason}). Split it into smaller checkpoint outcomes and move independent preparation or validation into sibling agents. A genuinely indivisible exception must declare Slice exception: external_runtime, indivisible_operation, or critical_integration plus a concrete Slice detail.`;
+    }
+    if (!detail || detail.length < 48) {
+      return "A slice exception needs a concrete Slice detail of at least 48 characters explaining why this assignment cannot be divided without losing correctness or increasing wall-clock time.";
+    }
+  }
+  return undefined;
+}
+
+/** A useful parallel wave should exercise the capability roster, not clone one default role. */
+export function delegationRoleDiversityPolicyIssue(
+  input: Record<string, unknown>,
+  activeAgentNames: string[] = [],
+): string | undefined {
+  const direct = directConcurrentDelegationSpecs(input);
+  const participatingAgents = [...activeAgentNames, ...direct.map((spec) => spec.agent)]
+    .map((agent) => agent.trim().toLowerCase())
+    .filter(Boolean);
+  if (participatingAgents.length < MINIMUM_USEFUL_CONCURRENT_AGENTS) return undefined;
+
+  const requiredDistinct = Math.min(MINIMUM_USEFUL_CONCURRENT_AGENTS, participatingAgents.length);
+  const distinctCount = new Set(participatingAgents).size;
+  if (distinctCount >= requiredDistinct) return undefined;
+
+  const declaration = direct.map((spec) => spec.task).join("\n");
+  const rawException = ROLE_DIVERSITY_EXCEPTION.exec(declaration)?.[1]?.trim().toLowerCase();
+  const detail = ROLE_DIVERSITY_DETAIL.exec(declaration)?.[1]?.trim();
+  const considered = AGENT_TYPES_CONSIDERED.exec(declaration)?.[1]?.trim();
+  if (!rawException || !ROLE_DIVERSITY_EXCEPTIONS.has(rawException as RoleDiversityException)) {
+    return `This ${participatingAgents.length}-agent wave uses only ${distinctCount} distinct runtime agent type${distinctCount === 1 ? "" : "s"}; LemonPi requires ${requiredDistinct} distinct capable types in a normal parallel wave. Use the live roster to match different relevant agents to the full task graph. If the roster genuinely cannot support that, declare Role diversity exception: implementation_only, only_capable_role, or roster_restricted.`;
+  }
+  if (!detail || detail.length < 48) {
+    return "A role-diversity exception needs a concrete Role diversity detail of at least 48 characters explaining why distinct live roster capabilities cannot own these lanes.";
+  }
+  if (!considered || considered.length < 24) {
+    return "A role-diversity exception must include Agent types considered: followed by the actual alternative live roster types evaluated and why none can contribute usefully now.";
   }
   return undefined;
 }
@@ -492,6 +579,7 @@ export function compileDelegationContracts(input: Record<string, unknown>): void
       if (directWriterCount > 1 && mode === "implementation" && !NO_DEPENDENCIES.test(task)) {
         task = `${task.trimEnd()}\nDepends on: none`;
       }
+      if (!SLICE_TARGET.test(task)) task = `${task.trimEnd()}\nSlice target: under 5 minutes`;
       record.task = appendDefaultChecklist(task, summary);
     }
     for (const key of ["tasks", "chain", "parallel"] as const) {
@@ -1184,7 +1272,11 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   const activeDelegationRuns = new Set<string>();
   const delegationToolCalls = new Set<string>();
   const delegationLaunchWidths = new Map<string, number>();
+  const delegationLaunchAgents = new Map<string, string[]>();
   const activeDelegationWidths = new Map<string, number>();
+  const activeDelegationAgents = new Map<string, string[]>();
+  const rosterListToolCalls = new Set<string>();
+  let rosterDiscovered = false;
   const statusToolCalls = new Map<string, { key: string; target?: string }>();
   const activeStatusChecksThisTurn = new Set<string>();
   const resumeToolCalls = new Map<string, { implementation: boolean }>();
@@ -1243,6 +1335,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
 
   const activeDelegatedAgentCount = () => [...activeDelegationRuns]
     .reduce((total, runId) => total + (activeDelegationWidths.get(runId) ?? 1), 0);
+
+  const activeDelegatedAgentNames = () => [...activeDelegationRuns]
+    .flatMap((runId) => activeDelegationAgents.get(runId) ?? []);
 
   const requestMissionWake = (reason: "plan" | "integration"): Promise<boolean> => {
     if (missionWakeCheck) return Promise.resolve(false);
@@ -1376,9 +1471,11 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       if (runId) {
         activeDelegationRuns.delete(runId);
         activeDelegationWidths.delete(runId);
+        activeDelegationAgents.delete(runId);
       } else {
         activeDelegationRuns.clear();
         activeDelegationWidths.clear();
+        activeDelegationAgents.clear();
       }
       if (runId && (disposition === "completed" || disposition === "failed" || disposition === "stopped")) {
         terminal.push({ runId, status: disposition });
@@ -1422,6 +1519,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     mission = restored;
     activeDelegationRuns.clear();
     activeDelegationWidths.clear();
+    activeDelegationAgents.clear();
     remainingPlanTask = restored?.remainingTask ? { ...restored.remainingTask } : undefined;
     planContinuationAttempts = restored?.wakeAttempts ?? 0;
     writerOccupied = restored?.writerActive ?? false;
@@ -1527,6 +1625,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (runId) {
       activeDelegationRuns.delete(runId);
       activeDelegationWidths.delete(runId);
+      activeDelegationAgents.delete(runId);
     }
     activeStatusChecksThisTurn.clear();
     activeDelegationHandoffPending = false;
@@ -1641,6 +1740,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         if (!status) throw new Error("The subagent completion request was malformed.");
         activeDelegationRuns.delete(runId);
         activeDelegationWidths.delete(runId);
+        activeDelegationAgents.delete(runId);
         activeStatusChecksThisTurn.clear();
         activeDelegationHandoffPending = false;
         if (mission) {
@@ -1679,6 +1779,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (event.toolName !== "subagent") return;
 
     const isManagementAction = typeof input.action === "string" && input.action.trim().length > 0;
+    if (input.action === "list") rosterListToolCalls.add(event.toolCallId);
     if (input.action === "status") {
       const target = typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : undefined;
       const key = target ?? "__active_runs__";
@@ -1692,7 +1793,10 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     }
     if (input.action === "resume") {
       const message = typeof input.message === "string" ? input.message.trimEnd() : "";
-      const compiledMessage = appendDefaultChecklist(message, conciseTaskSummary(message));
+      const targetedMessage = SLICE_TARGET.test(message) ? message : `${message}\nSlice target: under 5 minutes`.trimStart();
+      const compiledMessage = appendDefaultChecklist(targetedMessage, conciseTaskSummary(targetedMessage));
+      const granularityIssue = delegationGranularityPolicyIssue({ agent: CURRENT_CHILD_OWNER, task: compiledMessage });
+      if (granularityIssue) return { block: true, reason: granularityIssue };
       const resumedTasks = parseChildChecklist(compiledMessage, CURRENT_CHILD_OWNER);
       if (!message.includes("<lemonpi-child-checklist>")) {
         input.message = `${compiledMessage}${childTodoGuidance(CURRENT_CHILD_OWNER, resumedTasks)}`;
@@ -1720,11 +1824,16 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       const writers = specs.filter(delegatesImplementation);
 
       if (input.clarify !== true) {
-        const concurrencyIssue = delegationConcurrencyPolicyIssue(input, activeDelegatedAgentCount());
-        if (concurrencyIssue) {
+        const dispatchPolicyIssues = [
+          delegationRosterPolicyIssue(input, rosterDiscovered, activeDelegatedAgentCount()),
+          delegationGranularityPolicyIssue(input),
+          delegationConcurrencyPolicyIssue(input, activeDelegatedAgentCount()),
+          delegationRoleDiversityPolicyIssue(input, activeDelegatedAgentNames()),
+        ].filter((issue): issue is string => Boolean(issue));
+        if (dispatchPolicyIssues.length > 0) {
           return {
             block: true,
-            reason: concurrencyIssue,
+            reason: dispatchPolicyIssues.join("\n\n"),
           };
         }
       }
@@ -1854,6 +1963,10 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         event.toolCallId,
         Math.max(1, directConcurrentDelegationSpecs(input).length),
       );
+      delegationLaunchAgents.set(
+        event.toolCallId,
+        directConcurrentDelegationSpecs(input).map((spec) => spec.agent),
+      );
       delegationFailurePending = false;
       lastDelegationFailure = undefined;
     }
@@ -1906,6 +2019,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       if (notifiedRunId) {
         activeDelegationRuns.delete(notifiedRunId);
         activeDelegationWidths.delete(notifiedRunId);
+        activeDelegationAgents.delete(notifiedRunId);
       }
       activeStatusChecksThisTurn.clear();
       activeDelegationHandoffPending = false;
@@ -1947,6 +2061,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
 
   pi.on("tool_execution_end", async (event) => {
     activeMainToolExecutions = Math.max(0, activeMainToolExecutions - 1);
+    if (rosterListToolCalls.delete(event.toolCallId) && !event.isError) rosterDiscovered = true;
     const resumedCall = resumeToolCalls.get(event.toolCallId);
     resumeToolCalls.delete(event.toolCallId);
     if (resumedCall && !event.isError) {
@@ -1981,6 +2096,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         if (runId) {
           activeDelegationRuns.delete(runId);
           activeDelegationWidths.delete(runId);
+          activeDelegationAgents.delete(runId);
         }
         activeStatusChecksThisTurn.clear();
         activeDelegationHandoffPending = false;
@@ -2019,6 +2135,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     deferredWriterLanesByToolCall.delete(event.toolCallId);
     const launchWidth = delegationLaunchWidths.get(event.toolCallId) ?? 1;
     delegationLaunchWidths.delete(event.toolCallId);
+    const launchAgents = delegationLaunchAgents.get(event.toolCallId) ?? [];
+    delegationLaunchAgents.delete(event.toolCallId);
     if (!delegationToolCalls.delete(event.toolCallId)) return;
     const failure = writerCall && writerCall.async !== false
       ? asyncWriterLaunchFailure(event.result, event.isError)
@@ -2028,6 +2146,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       if (runId) {
         activeDelegationRuns.add(runId);
         activeDelegationWidths.set(runId, launchWidth);
+        activeDelegationAgents.set(runId, launchAgents);
         if (deferredWriterLanes.length > 0) deferredWriterLanesByRun.set(runId, deferredWriterLanes);
         activeDelegationHandoffPending = true;
         const currentMission = ensureMission("delegated");

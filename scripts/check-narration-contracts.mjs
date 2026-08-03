@@ -7,11 +7,16 @@ import {
   checkoutSnapshotPolicyIssue,
   compileDelegationContracts,
   delegationConcurrencyPolicyIssue,
+  delegationGranularityPolicyIssue,
+  delegationRoleDiversityPolicyIssue,
+  delegationRosterPolicyIssue,
   declaredExecutionMode,
   delegatesImplementation,
   isManagedWorktreePatchCommand,
   missionHasActiveOwnership,
   missionWakeIsBlocked,
+  MAX_NORMAL_CHILD_MILESTONES,
+  MAX_NORMAL_CHILD_PROMPT_CHARACTERS,
   MINIMUM_USEFUL_CONCURRENT_AGENTS,
   parallelWriterPolicyIssue,
   remainingPlanFromTodoResult,
@@ -63,10 +68,14 @@ assert.match(fastWorkerLaunch.task, /^Chunk outcome:/m);
 assert.match(fastWorkerLaunch.task, /^In scope:/m);
 assert.match(fastWorkerLaunch.task, /^Done when:/m);
 assert.match(fastWorkerLaunch.task, /^Out of scope:/m);
+assert.match(fastWorkerLaunch.task, /^Slice target: under 5 minutes$/m);
 assert.match(fastWorkerLaunch.task, /^Child checklist:/m);
 assert.match(fastWorkerLaunch.task, /^- Add a startup splash screen and verify the loaded transition\./m);
 assert.doesNotMatch(fastWorkerLaunch.task, /Complete delegated outcome/);
 assert.equal(delegatesImplementation(fastWorkerLaunch), true);
+assert.equal(delegationGranularityPolicyIssue(fastWorkerLaunch), undefined);
+assert.equal(MAX_NORMAL_CHILD_MILESTONES, 3);
+assert.equal(MAX_NORMAL_CHILD_PROMPT_CHARACTERS, 3_600);
 
 const substantialWorkerLaunch = {
   agent: "worker",
@@ -95,6 +104,15 @@ assert.match(substantialWorkerLaunch.task, /^- Implement messages endpoint :: Pr
 assert.match(substantialWorkerLaunch.task, /^- Add focused tests :: Cover authentication, strict queries, and path leakage\./m);
 assert.match(substantialWorkerLaunch.task, /^- Run focused validation :: Run the focused server suite and diff checks\./m);
 assert.doesNotMatch(substantialWorkerLaunch.task, /Complete delegated outcome|Review justification: This work crosses.*\nChild checklist:\n- Review justification/s);
+assert.match(delegationGranularityPolicyIssue(substantialWorkerLaunch), /4 internal milestones/);
+assert.equal(delegationGranularityPolicyIssue({
+  ...substantialWorkerLaunch,
+  task: `${substantialWorkerLaunch.task}\nSlice exception: critical_integration\nSlice detail: These four checks are one security integration boundary whose evidence is invalid if split between independent snapshots.`,
+}), undefined);
+assert.match(delegationGranularityPolicyIssue({
+  agent: "worker",
+  task: `Execution mode: implementation\n${"x".repeat(3_700)}`,
+}), /prompt characters/);
 
 const customExecutorLaunch = { agent: "kimi-k3", task: "Build the bounded settings behavior described by Main Pi." };
 compileDelegationContracts(customExecutorLaunch);
@@ -179,6 +197,43 @@ const readOnlyWave = {
     readOnlyLane("planner", "Map the next independent repair lanes"),
   ],
 };
+assert.match(delegationRosterPolicyIssue(readOnlyWave, false, 0), /call subagent\(\{ action: "list" \}\)/);
+assert.equal(delegationRosterPolicyIssue(readOnlyWave, true, 0), undefined);
+assert.equal(delegationRosterPolicyIssue(readOnlyLane("reviewer", "Review the recovered patch"), false, 0), undefined);
+assert.match(delegationRoleDiversityPolicyIssue({
+  tasks: [
+    readOnlyLane("reviewer", "Review correctness"),
+    readOnlyLane("reviewer", "Review validation"),
+    readOnlyLane("reviewer", "Review maintainability"),
+  ],
+}), /only 1 distinct runtime agent type/);
+assert.match(delegationRoleDiversityPolicyIssue({
+  tasks: [
+    readOnlyLane("reviewer", "Review correctness"),
+    readOnlyLane("reviewer", "Review validation"),
+    readOnlyLane("scout", "Inspect local integration points"),
+  ],
+}), /requires 3 distinct capable types/);
+assert.equal(delegationRoleDiversityPolicyIssue({
+  tasks: [
+    readOnlyLane("reviewer", "Review correctness"),
+    readOnlyLane("scout", "Inspect local integration points"),
+    readOnlyLane("planner", "Map integration ordering"),
+  ],
+}), undefined);
+assert.equal(delegationRoleDiversityPolicyIssue({
+  tasks: [
+    {
+      ...readOnlyLane("reviewer", "Review correctness"),
+      task: `${readOnlyLane("reviewer", "Review correctness").task}
+Role diversity exception: roster_restricted
+Role diversity detail: The current capability ceiling exposes only this executable review role for all three independent evidence domains.
+Agent types considered: every executable type returned by the live roster is restricted except reviewer.`,
+    },
+    readOnlyLane("reviewer", "Review validation"),
+    readOnlyLane("reviewer", "Review maintainability"),
+  ],
+}), undefined);
 compileDelegationContracts(readOnlyWave);
 assert.equal(readOnlyWave.concurrency, 3);
 assert.equal(
