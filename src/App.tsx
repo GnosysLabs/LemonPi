@@ -112,6 +112,15 @@ function asRecord(value: unknown): UnknownRecord | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as UnknownRecord : undefined;
 }
 
+function lastAgentTurnWasInterrupted(messages: unknown[]): boolean {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = asRecord(messages[index]);
+    if (message?.role !== "assistant") continue;
+    return message.stopReason === "aborted" || message.stopReason === "error";
+  }
+  return false;
+}
+
 function isActiveSubagentRun(run: SubagentRunStatus): boolean {
   if (["running", "queued"].includes(run.state)) return true;
   return run.steps?.some((step) => ["running", "queued", "pending"].includes(step.status)) ?? false;
@@ -220,6 +229,7 @@ export default function App() {
   const [injectedComposerText, setInjectedComposerText] = useState<string>();
   const [extensionStatuses, setExtensionStatuses] = useState<Record<string, string>>({});
   const [todoSnapshot, setTodoSnapshot] = useState<TodoSnapshot>();
+  const [mainTodoInterrupted, setMainTodoInterrupted] = useState(false);
   const [hiddenCompletedTodoIds, setHiddenCompletedTodoIds] = useState<Set<number>>(() => new Set());
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [stderrTail, setStderrTail] = useState<string[]>([]);
@@ -233,6 +243,7 @@ export default function App() {
   const sessionRefreshRequestRef = useRef(0);
   const todoSnapshotRef = useRef<TodoSnapshot | undefined>(undefined);
   const checklistNudgesRef = useRef(new Set<string>());
+  const mainStreamingRef = useRef(false);
 
   const appUpdater = useAppUpdater();
   const finishStartup = useCallback(() => setStartupReady(true), []);
@@ -343,6 +354,13 @@ export default function App() {
     const nextTodos = todoSnapshotFromEvent(event);
     if (nextTodos) applyTodoSnapshot(nextTodos);
 
+    if (event.type === "message_end") {
+      const message = asRecord(event.message);
+      if (message?.role === "assistant" && (message.stopReason === "aborted" || message.stopReason === "error")) {
+        setMainTodoInterrupted(true);
+      }
+    }
+
     if ((event.type === "tool_execution_update" || event.type === "tool_execution_end") && event.toolName === "subagent") {
       const result = asRecord(event.type === "tool_execution_update" ? event.partialResult : event.result);
       const run = foregroundRunFromDetails(result?.details, event.type === "tool_execution_end");
@@ -401,6 +419,8 @@ export default function App() {
     }
 
     if (event.type === "agent_start") {
+      mainStreamingRef.current = true;
+      setMainTodoInterrupted(false);
       const currentTodos = todoSnapshotRef.current;
       if (currentTodos) {
         setHiddenCompletedTodoIds((current) => new Set([
@@ -414,6 +434,7 @@ export default function App() {
     }
 
     if (event.type === "agent_settled") {
+      mainStreamingRef.current = false;
       setSessionState((current) => current ? { ...current, isStreaming: false } : current);
       refreshState();
       void refreshSessions();
@@ -441,6 +462,7 @@ export default function App() {
         if (event.state === "exited" || event.state === "stopped") {
           if (event.pid && activePidRef.current && event.pid !== activePidRef.current) return;
           activePidRef.current = undefined;
+          mainStreamingRef.current = false;
           setConnection("offline");
           setSessionSwitching(false);
           setSessionState((current) => current ? { ...current, isStreaming: false } : current);
@@ -598,6 +620,10 @@ export default function App() {
   }, [project]);
 
   useEffect(() => {
+    mainStreamingRef.current = sessionState?.isStreaming ?? transcript.isStreaming;
+  }, [sessionState?.isStreaming, transcript.isStreaming]);
+
+  useEffect(() => {
     const sessionFile = sessionState?.sessionFile;
     if (!sessionFile || connection !== "online") {
       setSubagentRuns([]);
@@ -627,6 +653,7 @@ export default function App() {
           sessionId: sessionFile,
           status,
           agent: run.steps?.[0]?.agent,
+          force: !mainStreamingRef.current,
         })}`;
         void rpc(
           { type: "prompt", message: controlMessage, streamingBehavior: "followUp" },
@@ -700,6 +727,7 @@ export default function App() {
       if (pending.timeoutId) window.clearTimeout(pending.timeoutId);
     }
     pendingRef.current.clear();
+    setMainTodoInterrupted(false);
     setConnection("launching");
     setDetectionError(undefined);
     setSessions([]);
@@ -745,6 +773,7 @@ export default function App() {
             const messages = asRecord(data)?.messages;
             const sessionMessages = Array.isArray(messages) ? messages : [];
             dispatchTranscript({ type: "lemonpi_hydrate", messages: sessionMessages });
+            setMainTodoInterrupted(lastAgentTurnWasInterrupted(sessionMessages));
             applyTodoSnapshot(todoSnapshotFromMessages(sessionMessages), true);
             refreshState();
             if (initialRestore) finishStartup();
@@ -764,6 +793,7 @@ export default function App() {
   }
 
   function submitMessage(text: string, behavior: ComposerBehavior, attachments: ComposerAttachment[]) {
+    setMainTodoInterrupted(false);
     const images = promptImages(attachments);
     void rpc({
       type: behavior === "prompt" ? "prompt" : behavior === "steer" ? "steer" : "follow_up",
@@ -803,6 +833,14 @@ export default function App() {
     );
   }), [rpc, subagentSteerWhileStreaming]);
 
+  const stopMainAgent = useCallback(() => {
+    setMainTodoInterrupted(true);
+    void rpc(
+      { type: "abort" },
+      { onError: () => setMainTodoInterrupted(false) },
+    );
+  }, [rpc]);
+
   const respondToExtension = useCallback((response: ExtensionUiResponse) => {
     setDialogQueue((current) => current.slice(1));
     void sendPi(response);
@@ -821,6 +859,7 @@ export default function App() {
             setStats(undefined);
             setForegroundRuns([]);
             setSubagentRuns([]);
+            setMainTodoInterrupted(false);
             applyTodoSnapshot(undefined);
             refreshState();
             void refreshSessions();
@@ -846,6 +885,7 @@ export default function App() {
           setStats(undefined);
           setForegroundRuns([]);
           setSubagentRuns([]);
+          setMainTodoInterrupted(false);
           applyTodoSnapshot(undefined);
           refreshState();
           void rpc(
@@ -855,6 +895,7 @@ export default function App() {
                 const messages = asRecord(messagesData)?.messages;
                 const sessionMessages = Array.isArray(messages) ? messages : [];
                 dispatchTranscript({ type: "lemonpi_hydrate", messages: sessionMessages });
+                setMainTodoInterrupted(lastAgentTurnWasInterrupted(sessionMessages));
                 applyTodoSnapshot(todoSnapshotFromMessages(sessionMessages), true);
                 setSessionSwitching(false);
                 refreshState();
@@ -1030,7 +1071,7 @@ export default function App() {
             />
           </div>
           <div className="conversation-dock">
-            <TodoPanel snapshot={todoSnapshot} hiddenCompletedIds={hiddenCompletedTodoIds} />
+            <TodoPanel snapshot={todoSnapshot} hiddenCompletedIds={hiddenCompletedTodoIds} interrupted={mainTodoInterrupted} />
             {Object.entries(extensionStatuses).length > 0 && (
               <div className="extension-statuses">
                 {Object.entries(extensionStatuses).map(([key, value]) => <span key={key}><i />{value}</span>)}
@@ -1062,7 +1103,7 @@ export default function App() {
               injectedText={injectedComposerText}
               onInjectedTextConsumed={() => setInjectedComposerText(undefined)}
               onSubmit={submitMessage}
-              onAbort={() => void rpc({ type: "abort" })}
+              onAbort={stopMainAgent}
               onSelectModel={(model) => void rpc(
                 { type: "set_model", provider: model.provider, modelId: model.id },
                 { onSuccess: refreshState },

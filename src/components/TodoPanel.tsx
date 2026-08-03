@@ -1,4 +1,4 @@
-import { CaretDown, CaretUp, Check, Circle, CircleNotch, ListChecks, LockSimple } from "@phosphor-icons/react";
+import { CaretDown, CaretUp, Check, Circle, CircleNotch, ListChecks, LockSimple, Stop } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
 import type { TodoSnapshot, TodoTask } from "../lib/extension-todos";
 
@@ -9,14 +9,14 @@ const STATUS_ORDER: Record<TodoTask["status"], number> = {
   deleted: 3,
 };
 
-function TaskIcon({ task, blocked }: { task: TodoTask; blocked: boolean }) {
+function TaskIcon({ task, blocked, interrupted }: { task: TodoTask; blocked: boolean; interrupted: boolean }) {
   if (task.status === "completed") return <Check size={13} weight="bold" />;
-  if (task.status === "in_progress") return <CircleNotch className="spin" size={14} />;
+  if (task.status === "in_progress") return interrupted ? <Stop size={11} weight="fill" /> : <CircleNotch className="spin" size={14} />;
   if (blocked) return <LockSimple size={12} />;
   return <Circle size={12} />;
 }
 
-export function TodoPanel({ snapshot, hiddenCompletedIds }: { snapshot?: TodoSnapshot; hiddenCompletedIds: Set<number> }) {
+export function TodoPanel({ snapshot, hiddenCompletedIds, interrupted = false }: { snapshot?: TodoSnapshot; hiddenCompletedIds: Set<number>; interrupted?: boolean }) {
   const [collapsed, setCollapsed] = useState(false);
   const tasks = useMemo(() => {
     const completed = new Set(snapshot?.tasks.filter((task) => task.status === "completed").map((task) => task.id));
@@ -33,25 +33,26 @@ export function TodoPanel({ snapshot, hiddenCompletedIds }: { snapshot?: TodoSna
   const allVisibleTasks = snapshot.tasks.filter((task) => task.status !== "deleted");
   const completedCount = allVisibleTasks.filter((task) => task.status === "completed").length;
   const active = tasks.find(({ task }) => task.status === "in_progress")?.task;
+  const planInterrupted = interrupted && Boolean(active);
   const progress = allVisibleTasks.length > 0 ? (completedCount / allVisibleTasks.length) * 100 : 0;
 
   return (
-    <section className={`todo-panel${collapsed ? " todo-panel--collapsed" : ""}`} aria-label="Task plan">
+    <section className={`todo-panel${collapsed ? " todo-panel--collapsed" : ""}${planInterrupted ? " todo-panel--interrupted" : ""}`} aria-label="Task plan">
       <button className="todo-panel__header" type="button" onClick={() => setCollapsed((value) => !value)} aria-expanded={!collapsed}>
         <span className="todo-panel__title"><ListChecks size={16} /><strong>Task plan</strong></span>
-        <span className="todo-panel__summary">{completedCount} of {allVisibleTasks.length} complete</span>
+        <span className="todo-panel__summary">{planInterrupted ? "Stopped · " : ""}{completedCount} of {allVisibleTasks.length} complete</span>
         <span className="todo-panel__progress" aria-hidden="true"><i style={{ width: `${progress}%` }} /></span>
-        {collapsed && active && <span className="todo-panel__active">{active.activeForm ?? active.subject}</span>}
+        {collapsed && active && <span className="todo-panel__active">{planInterrupted ? "Stopped · " : ""}{active.activeForm ?? active.subject}</span>}
         <span className="todo-panel__toggle">{collapsed ? <CaretUp size={13} /> : <CaretDown size={13} />}</span>
       </button>
       {!collapsed && (
         <div className="todo-panel__tasks">
           {tasks.map(({ task, blocked }) => (
-            <div className={`todo-task todo-task--${task.status}${blocked ? " todo-task--blocked" : ""}`} key={task.id}>
-              <span className="todo-task__status"><TaskIcon task={task} blocked={blocked} /></span>
+            <div className={`todo-task todo-task--${task.status}${blocked ? " todo-task--blocked" : ""}${planInterrupted && task.status === "in_progress" ? " todo-task--interrupted" : ""}`} key={task.id}>
+              <span className="todo-task__status"><TaskIcon task={task} blocked={blocked} interrupted={planInterrupted} /></span>
               <span className="todo-task__copy">
                 <strong>{task.subject}</strong>
-                {(task.activeForm || task.description) && <small>{task.status === "in_progress" ? task.activeForm ?? task.description : task.description}</small>}
+                {(task.activeForm || task.description || (planInterrupted && task.status === "in_progress")) && <small>{planInterrupted && task.status === "in_progress" ? "Stopped before this step completed" : task.status === "in_progress" ? task.activeForm ?? task.description : task.description}</small>}
               </span>
               {task.owner && <span className="todo-task__owner">{task.owner}</span>}
               {blocked && <span className="todo-task__dependency">After {task.blockedBy!.map((id) => `#${id}`).join(", ")}</span>}

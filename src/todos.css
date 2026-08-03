@@ -131,6 +131,15 @@
   color: var(--rail-accent);
 }
 
+.todo-panel--interrupted .todo-panel__summary,
+.todo-task--interrupted .todo-task__status {
+  color: var(--danger);
+}
+
+.todo-task--interrupted .todo-task__copy small {
+  color: color-mix(in srgb, var(--danger) 72%, var(--muted));
+}
+
 .todo-task--completed .todo-task__status {
   color: var(--success);
 }

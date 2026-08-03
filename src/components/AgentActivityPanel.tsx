@@ -183,6 +183,7 @@ function AgentTaskPreview({
   anchor,
   blocked,
   blockers,
+  terminalLabel,
   onMouseEnter,
   onMouseLeave,
 }: {
@@ -191,6 +192,7 @@ function AgentTaskPreview({
   anchor: DOMRect;
   blocked: boolean;
   blockers: string[];
+  terminalLabel?: string;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
 }) {
@@ -202,7 +204,11 @@ function AgentTaskPreview({
     ? Math.max(12, anchor.left - width - 10)
     : Math.max(12, Math.min(anchor.left, viewportWidth - width - 12));
   const top = Math.max(12, Math.min(anchor.top, viewportHeight - Math.min(360, viewportHeight - 24) - 12));
-  const status = blocked ? "Blocked" : task.status.replace("_", " ");
+  const status = terminalLabel && task.status === "in_progress"
+    ? terminalLabel
+    : blocked
+      ? "Blocked"
+      : task.status.replace("_", " ");
   const activeForm = task.activeForm?.trim();
   const description = task.description?.trim();
 
@@ -241,10 +247,12 @@ function AgentTaskPreview({
 function AgentTodos({
   todos,
   active,
+  terminalStatus,
   emptyLabel = "Waiting for this agent to outline its work…",
 }: {
   todos: NonNullable<SubagentLiveActivity["todos"]>;
   active: boolean;
+  terminalStatus?: SubagentStepStatus["status"];
   emptyLabel?: string;
 }) {
   const tooltipPrefix = useId();
@@ -261,6 +269,14 @@ function AgentTodos({
     return rank[left.status] - rank[right.status] || left.id - right.id;
   });
   const completedCount = completed.size;
+  const interrupted = !active && visible.some((task) => task.status === "in_progress");
+  const terminalLabel = terminalStatus === "failed" || terminalStatus === "rejected"
+    ? "Failed"
+    : terminalStatus === "stopped"
+      ? "Stopped"
+      : interrupted
+        ? "Interrupted"
+        : undefined;
   const progress = visible.length > 0 ? Math.round((completedCount / visible.length) * 100) : 0;
   const cancelHide = () => {
     if (hideTimer.current !== undefined) window.clearTimeout(hideTimer.current);
@@ -275,10 +291,10 @@ function AgentTodos({
     setPreview({ task, anchor: target.getBoundingClientRect(), blocked, blockers });
   };
   return (
-    <section className={`agent-todos${visible.length === 0 ? " agent-todos--empty" : ""}`} aria-label="Agent tasks">
+    <section className={`agent-todos${visible.length === 0 ? " agent-todos--empty" : ""}${interrupted ? " agent-todos--interrupted" : ""}`} aria-label="Agent tasks">
       <header>
         <span><ListChecks size={15} />Tasks</span>
-        {visible.length > 0 && <small>{completedCount} of {visible.length}</small>}
+        {visible.length > 0 && <small>{terminalLabel ? `${terminalLabel} · ` : ""}{completedCount} of {visible.length}</small>}
       </header>
       {visible.length > 0 && <div className="agent-todos__progress" aria-hidden="true"><i style={{ width: `${progress}%` }} /></div>}
       {visible.length === 0 ? (
@@ -292,7 +308,7 @@ function AgentTodos({
           const detailId = `${tooltipPrefix}-task-${task.id}`;
           return (
             <div
-              className={`agent-todo agent-todo--${task.status}${blocked ? " agent-todo--blocked" : ""}`}
+              className={`agent-todo agent-todo--${task.status}${blocked ? " agent-todo--blocked" : ""}${interrupted && task.status === "in_progress" ? " agent-todo--interrupted" : ""}`}
               key={task.id}
               tabIndex={0}
               aria-describedby={preview?.task.id === task.id ? detailId : undefined}
@@ -302,9 +318,9 @@ function AgentTodos({
               onBlur={hidePreview}
             >
               <span className="agent-todo__status">
-                {task.status === "completed" ? <Check size={11} weight="bold" /> : task.status === "in_progress" ? <CircleNotch className="spin" size={12} /> : blocked ? <LockSimple size={10} /> : <Circle size={10} />}
+                {task.status === "completed" ? <Check size={11} weight="bold" /> : task.status === "in_progress" ? interrupted ? terminalStatus === "failed" || terminalStatus === "rejected" ? <Warning size={11} /> : <Stop size={10} weight="fill" /> : <CircleNotch className="spin" size={12} /> : blocked ? <LockSimple size={10} /> : <Circle size={10} />}
               </span>
-              <span><strong>{task.subject}</strong>{(task.activeForm || task.description) && <small>{task.status === "in_progress" ? task.activeForm ?? task.description : task.description}</small>}</span>
+              <span><strong>{task.subject}</strong>{(task.activeForm || task.description || (interrupted && task.status === "in_progress")) && <small>{interrupted && task.status === "in_progress" ? `${terminalLabel ?? "Interrupted"} before this task completed` : task.status === "in_progress" ? task.activeForm ?? task.description : task.description}</small>}</span>
             </div>
           );
         })}
@@ -316,6 +332,7 @@ function AgentTodos({
           anchor={preview.anchor}
           blocked={preview.blocked}
           blockers={preview.blockers}
+          terminalLabel={interrupted ? terminalLabel : undefined}
           onMouseEnter={cancelHide}
           onMouseLeave={hidePreview}
         />
@@ -495,6 +512,7 @@ function AgentCard({
             <AgentTodos
               todos={restoringTodos ? [] : activity?.todos ?? []}
               active={active}
+              terminalStatus={step.status}
               emptyLabel={restoringTodos ? "Restoring this agent’s task list…" : undefined}
             />
           )}

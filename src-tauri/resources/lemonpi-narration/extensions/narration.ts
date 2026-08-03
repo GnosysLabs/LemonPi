@@ -423,9 +423,10 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     sessionId: string | undefined,
     status: Exclude<WriterLifecycleStatus, "paused">,
     agent?: string,
+    force = false,
   ) => {
     const key = terminalRunKey(sessionId, runId);
-    if (integratedTerminalRuns.has(key)) return;
+    if (integratedTerminalRuns.has(key) && !force) return;
     rememberTerminalRun(key);
     pi.sendMessage(
       {
@@ -497,6 +498,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         sessionId?: unknown;
         status?: unknown;
         agent?: unknown;
+        force?: unknown;
       };
       const runId = typeof payload.runId === "string" ? payload.runId.trim() : "";
       if (!/^[A-Za-z0-9-]{4,128}$/.test(runId)) {
@@ -528,8 +530,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         const agent = typeof payload.agent === "string" && payload.agent.length <= 200
           ? payload.agent
           : undefined;
+        const force = payload.force === true;
         if (!status) throw new Error("The subagent completion request was malformed.");
-        wakeForTerminalRun(runId, sessionId, status, agent);
+        wakeForTerminalRun(runId, sessionId, status, agent, force);
       }
     } catch (error) {
       ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");

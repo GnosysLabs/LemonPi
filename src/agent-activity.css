@@ -588,6 +588,11 @@
   font-weight: 520;
 }
 
+.agent-todos--interrupted > header small,
+.agent-todo--interrupted .agent-todo__status {
+  color: var(--danger);
+}
+
 .agent-todos__progress {
   height: 2px;
   margin: 4px 0 6px;
@@ -668,6 +673,10 @@
 .agent-todo small {
   color: var(--faint);
   font-size: 12px;
+}
+
+.agent-todo--interrupted small {
+  color: color-mix(in srgb, var(--danger) 72%, var(--faint));
 }
 
 .agent-todo--completed strong {
