@@ -73,6 +73,8 @@ struct ProjectRecord {
     trusted: bool,
     last_opened: u64,
     pinned: bool,
+    #[serde(default)]
+    session_directory: Option<PathBuf>,
     sessions: Vec<SessionRecord>,
 }
 
@@ -153,6 +155,7 @@ impl ProjectCatalog {
                         trusted,
                         last_opened,
                         pinned,
+                        session_directory: None,
                         sessions: Vec::new(),
                     }
                 }
@@ -174,12 +177,16 @@ impl ProjectCatalog {
             .collect()
     }
 
+    /// Resolves a project only while its current filesystem location still canonicalizes to the
+    /// exact directory recorded at sync time. This prevents a later symlink or moved-target
+    /// replacement from turning an opaque project ID into access to a new location.
     pub(crate) fn resolve_project_path(&self, project_id: &str) -> Option<PathBuf> {
-        self.document
+        let project = self
+            .document
             .projects
             .iter()
-            .find(|project| project.id == project_id)
-            .map(|project| project.path.clone())
+            .find(|project| project.id == project_id)?;
+        revalidate_directory(&project.path)
     }
 
     pub(crate) fn sync_sessions(
@@ -201,6 +208,7 @@ impl ProjectCatalog {
         let canonical_directory = match session_directory.canonicalize() {
             Ok(directory) if directory.is_dir() => directory,
             _ => {
+                project.session_directory = None;
                 project.sessions.clear();
                 self.persist()?;
                 return Ok(());
@@ -223,6 +231,7 @@ impl ProjectCatalog {
             }
             accepted.push(path);
         }
+        project.session_directory = Some(canonical_directory);
         let existing = std::mem::take(&mut project.sessions)
             .into_iter()
             .map(|record| (record.path.clone(), record))
@@ -253,26 +262,45 @@ impl ProjectCatalog {
                 "unknown project ID".into(),
             ));
         };
-        if project.sessions.is_empty() {
+        if project.sessions.is_empty() && project.session_directory.is_none() {
             return Ok(());
         }
+        project.session_directory = None;
         project.sessions.clear();
         self.persist()
     }
 
+    /// Resolves a session only when both the current, caller-derived Pi session directory and the
+    /// session file still match their synchronized canonical locations. Callers must pass the
+    /// session directory freshly derived for this resolved project (for LemonPi, via
+    /// `session_directory(project_path)`) rather than an untrusted request value.
     pub(crate) fn resolve_session_path(
         &self,
         project_id: &str,
         session_id: &str,
+        current_session_directory: &Path,
     ) -> Option<PathBuf> {
-        self.document
+        let project = self
+            .document
             .projects
             .iter()
-            .find(|project| project.id == project_id)?
+            .find(|project| project.id == project_id)?;
+        revalidate_directory(&project.path)?;
+        let stored_directory = project.session_directory.as_deref()?;
+        let current_directory = canonical_directory(current_session_directory)?;
+        if current_directory != stored_directory {
+            return None;
+        }
+        let session = project
             .sessions
             .iter()
-            .find(|session| session.id == session_id)
-            .map(|session| session.path.clone())
+            .find(|session| session.id == session_id)?;
+        let current_session = session.path.canonicalize().ok()?;
+        let metadata = fs::metadata(&current_session).ok()?;
+        (metadata.is_file()
+            && current_session == session.path
+            && current_session.starts_with(&current_directory))
+        .then_some(current_session)
     }
 
     fn safe_projects(&self, active: Option<&Path>) -> Vec<RemoteProjectSummary> {
@@ -319,6 +347,17 @@ fn project_display_name(path: &Path) -> String {
         .filter(|name| !name.trim().is_empty())
         .unwrap_or("Project")
         .to_string()
+}
+
+fn canonical_directory(path: &Path) -> Option<PathBuf> {
+    let canonical_directory = path.canonicalize().ok()?;
+    canonical_directory.is_dir().then_some(canonical_directory)
+}
+
+/// Canonicalize at resolution time and require the same previously synchronized location.
+fn revalidate_directory(stored_directory: &Path) -> Option<PathBuf> {
+    let current_directory = canonical_directory(stored_directory)?;
+    (current_directory == stored_directory).then_some(current_directory)
 }
 
 fn validate_document(document: &ProjectStoreDocument) -> RemoteResult<()> {
@@ -477,13 +516,69 @@ mod tests {
             .unwrap();
         let session_id = catalog.document.projects[0].sessions[0].id.clone();
         assert_eq!(
-            catalog.resolve_session_path(&project_id, &session_id),
+            catalog.resolve_session_path(&project_id, &session_id, &sessions),
             Some(session.canonicalize().unwrap())
         );
         catalog.sync_sessions(&project_id, &sessions, &[]).unwrap();
         assert!(catalog
-            .resolve_session_path(&project_id, &session_id)
+            .resolve_session_path(&project_id, &session_id, &sessions)
             .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolution_revalidates_post_sync_project_and_session_replacements() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap();
+        let storage = tempdir().unwrap();
+        let project = root.path().join("project");
+        let sessions = root.path().join("sessions");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&sessions).unwrap();
+        let session = sessions.join("one.jsonl");
+        fs::write(&session, "{}\\n").unwrap();
+
+        let mut catalog = ProjectCatalog::load_or_create(storage.path()).unwrap();
+        let project_id = serde_json::to_value(
+            &catalog
+                .sync_projects(&[input(&project, true)], None)
+                .unwrap()[0],
+        )
+        .unwrap()["projectId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        catalog
+            .sync_sessions(
+                &project_id,
+                &sessions,
+                &[SessionSyncInput {
+                    path: session.clone(),
+                }],
+            )
+            .unwrap();
+        let session_id = catalog.document.projects[0].sessions[0].id.clone();
+        assert_eq!(
+            catalog.resolve_project_path(&project_id),
+            Some(project.canonicalize().unwrap())
+        );
+        assert_eq!(
+            catalog.resolve_session_path(&project_id, &session_id, &sessions),
+            Some(session.canonicalize().unwrap())
+        );
+
+        let moved_session = root.path().join("moved-session.jsonl");
+        fs::rename(&session, &moved_session).unwrap();
+        symlink(&moved_session, &session).unwrap();
+        assert!(catalog
+            .resolve_session_path(&project_id, &session_id, &sessions)
+            .is_none());
+
+        let moved_project = root.path().join("moved-project");
+        fs::rename(&project, &moved_project).unwrap();
+        symlink(&moved_project, &project).unwrap();
+        assert!(catalog.resolve_project_path(&project_id).is_none());
     }
 
     #[cfg(unix)]
