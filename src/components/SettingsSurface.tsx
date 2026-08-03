@@ -12,6 +12,7 @@ import {
   Sparkle,
   Trash,
   Warning,
+  WifiHigh,
   Wrench,
   X,
   type Icon,
@@ -27,6 +28,7 @@ import {
   setPiSetting,
   setSubagentOverride,
 } from "../lib/pi-client";
+import { RemoteAccessSettings } from "./remote/RemoteAccessSettings";
 import type {
   PiModel,
   PiPackagesSnapshot,
@@ -39,7 +41,7 @@ import type {
 } from "../lib/pi-types";
 
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-type Section = "general" | "behavior" | "resources" | "agents" | "packages" | "advanced";
+type Section = "general" | "behavior" | "resources" | "agents" | "packages" | "remote" | "advanced";
 type FieldKind = "boolean" | "number" | "text" | "select" | "list" | "json";
 
 interface ChoiceOption {
@@ -570,6 +572,12 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ key: Section; icon: Icon
       { key: "packages", icon: Package, label: "Packages" },
     ],
   },
+  {
+    label: "Desktop",
+    items: [
+      { key: "remote", icon: WifiHigh, label: "Remote Access" },
+    ],
+  },
 ];
 
 export function SettingsSurface({
@@ -754,6 +762,7 @@ export function SettingsSurface({
     resources: ["System", "Tools & resources", "Connect the shell and the local resources available to Pi."],
     agents: ["Delegation", "Agents", "Choose the model and reasoning depth for every delegated role."],
     packages: ["Extensions", "Packages", "Install, update, and remove packages through Pi's native package system."],
+    remote: ["Desktop", "Remote Access", "Manage this computer's paired remote devices and TLS listener."],
     advanced: ["Raw configuration", "Advanced JSON", "Edit every setting in the selected file, including extension-defined values."],
   };
   const [eyebrow, title, description] = sectionHeading[section];
@@ -808,10 +817,12 @@ export function SettingsSurface({
               <div><p className="eyebrow">{eyebrow}</p><h2>{title}</h2><p>{description}</p></div>
               {section === "agents" && <span className="settings-agent-count">{agentSnapshot?.agents.length ?? 0} agents</span>}
             </div>
-            <div className="settings-apply-note"><CheckCircle size={15} weight="fill" /><span>Changes save automatically and apply to new Pi sessions after reload. Running sessions are never changed.</span></div>
+            {section !== "remote" && <div className="settings-apply-note"><CheckCircle size={15} weight="fill" /><span>Changes save automatically and apply to new Pi sessions after reload. Running sessions are never changed.</span></div>}
 
-            {loading && <div className="settings-loading" aria-label="Loading settings"><i /><i /><i /></div>}
-            {error && <div className="settings-error" role="alert"><Warning size={19} /><strong>Couldn't load Pi settings</strong><span>{error}</span>{scope === "project" && <button type="button" onClick={() => setScope("user")}>Use all-project settings</button>}</div>}
+            {loading && section !== "remote" && <div className="settings-loading" aria-label="Loading settings"><i /><i /><i /></div>}
+            {error && section !== "remote" && <div className="settings-error" role="alert"><Warning size={19} /><strong>Couldn't load Pi settings</strong><span>{error}</span>{scope === "project" && <button type="button" onClick={() => setScope("user")}>Use all-project settings</button>}</div>}
+
+            {section === "remote" && <RemoteAccessSettings onNotice={onNotice} />}
 
             {!loading && !error && settings && section === "general" && (
               <>
