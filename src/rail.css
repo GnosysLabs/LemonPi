@@ -299,7 +299,6 @@
 .project-options section + section { margin-top: 5px; }
 
 .project-options__heading,
-.session-list__heading,
 .session-group__heading {
   display: flex;
   align-items: center;
@@ -318,7 +317,6 @@
 }
 
 .project-options__heading i,
-.session-list__heading i,
 .session-group__heading i {
   font-family: var(--mono);
   font-size: 9px;
@@ -511,22 +509,6 @@
   flex: 1;
   overflow: hidden;
   flex-direction: column;
-}
-
-.session-list__heading {
-  height: 23px;
-  padding: 0 8px;
-  flex: 0 0 auto;
-  font-size: 10.5px;
-  letter-spacing: 0.03em;
-}
-
-.session-list__heading i {
-  min-width: 21px;
-  padding: 2px 5px;
-  border-radius: 99px;
-  background: var(--rail-hover);
-  text-align: center;
 }
 
 .session-search {

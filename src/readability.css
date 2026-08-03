@@ -70,7 +70,6 @@ body {
 }
 
 .project-options__heading,
-.session-list__heading,
 .session-group__heading {
   font-size: 11px;
 }
@@ -78,11 +77,6 @@ body {
 .project-options__heading i,
 .session-group__heading i {
   font-size: 11px;
-}
-
-.session-list__heading i {
-  padding: 2px 6px;
-  font-size: 12px;
 }
 
 .project-switcher__busy {

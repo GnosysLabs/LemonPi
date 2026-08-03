@@ -361,10 +361,6 @@ export function WorkspaceRail({
 
           {project ? (
             <nav className="workspace-rail__sessions" aria-label="Sessions">
-              <div className="session-list__heading">
-                <span>History</span>
-                <i aria-label={unreadConversationLabel} title={unreadConversationLabel}>{unreadConversationCount}</i>
-              </div>
               {(sessions.length >= 5 || sessionQuery) && (
                 <label className="session-search">
                   <MagnifyingGlass size={13} aria-hidden="true" />
