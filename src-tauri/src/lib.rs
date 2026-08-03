@@ -143,6 +143,8 @@ struct PiSessionSummary {
     id: String,
     name: Option<String>,
     parent_session_path: Option<String>,
+    #[serde(skip_serializing)]
+    anonymous_subagent_bootstrap: bool,
     modified: u64,
     message_count: usize,
     first_message: String,
@@ -622,6 +624,38 @@ fn session_cwd_matches(value: &str, expected: &Path) -> bool {
         .unwrap_or_else(|_| Path::new(value) == expected)
 }
 
+fn is_subagent_delegation_message(value: &Value) -> bool {
+    if value.get("type").and_then(Value::as_str) != Some("message") {
+        return false;
+    }
+    let Some(message) = value.get("message") else {
+        return false;
+    };
+    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return false;
+    }
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .is_some_and(|parts| {
+            parts.iter().any(|part| {
+                if part.get("type").and_then(Value::as_str) != Some("toolCall")
+                    || part.get("name").and_then(Value::as_str) != Some("subagent")
+                {
+                    return false;
+                }
+                let Some(arguments) = part.get("arguments").and_then(Value::as_object) else {
+                    return false;
+                };
+                !arguments.contains_key("action")
+                    && (arguments.get("agent").and_then(Value::as_str).is_some()
+                        || arguments.get("tasks").and_then(Value::as_array).is_some()
+                        || arguments.get("chain").and_then(Value::as_array).is_some()
+                        || arguments.contains_key("parallel"))
+            })
+        })
+}
+
 fn read_session_summary(path: &Path, expected_cwd: &Path) -> Option<PiSessionSummary> {
     let metadata = fs::metadata(path).ok()?;
     let modified = metadata
@@ -641,6 +675,7 @@ fn read_session_summary(path: &Path, expected_cwd: &Path) -> Option<PiSessionSum
     let mut message_count = 0usize;
     let mut first_message = String::new();
     let mut last_final_reply = None;
+    let mut last_message_is_subagent_delegation = false;
 
     {
         let mut consume = |value: Value| {
@@ -667,6 +702,9 @@ fn read_session_summary(path: &Path, expected_cwd: &Path) -> Option<PiSessionSum
 
             if !valid {
                 return;
+            }
+            if value.get("type").and_then(Value::as_str) == Some("message") {
+                last_message_is_subagent_delegation = is_subagent_delegation_message(&value);
             }
             match value.get("type").and_then(Value::as_str) {
                 Some("session_info") => {
@@ -724,11 +762,14 @@ fn read_session_summary(path: &Path, expected_cwd: &Path) -> Option<PiSessionSum
     if !valid {
         return None;
     }
+    let anonymous_subagent_bootstrap =
+        parent_session_path.is_some() && name.is_none() && last_message_is_subagent_delegation;
     Some(PiSessionSummary {
         path: path.to_string_lossy().into_owned(),
         id: id?,
         name,
         parent_session_path,
+        anonymous_subagent_bootstrap,
         modified,
         message_count,
         first_message: if first_message.is_empty() {
@@ -766,10 +807,11 @@ fn list_pi_sessions_sync(cwd: &Path) -> Result<Vec<PiSessionSummary>, String> {
         .into_iter()
         .filter_map(|(path, _)| read_session_summary(&path, cwd))
         .filter(|session| {
-            !session
-                .name
-                .as_deref()
-                .is_some_and(|name| name.starts_with("subagent-"))
+            !session.anonymous_subagent_bootstrap
+                && !session
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name.starts_with("subagent-"))
         })
         .collect::<Vec<_>>();
     sessions.sort_by_key(|session| std::cmp::Reverse(session.modified));
@@ -3600,6 +3642,50 @@ mod tests {
         assert_eq!(summary.name.as_deref(), Some("Readable name"));
         assert_eq!(summary.first_message, "Fix the sidebar");
         assert_eq!(summary.message_count, 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn identifies_anonymous_subagent_bootstrap_forks_without_hiding_real_fork_activity() {
+        let root = env::temp_dir().join(format!(
+            "lemonpi-subagent-fork-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let project = project.canonicalize().unwrap();
+        let session = root.join("fork.jsonl");
+        let records = format!(
+            "{{\"type\":\"session\",\"id\":\"fork-1\",\"cwd\":{},\"parentSession\":\"/sessions/main.jsonl\"}}\n\
+             {{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"Build the feature\"}}}}\n\
+             {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"toolCall\",\"name\":\"subagent\",\"arguments\":{{\"tasks\":[{{\"agent\":\"worker\",\"task\":\"Implement it\"}}],\"context\":\"fork\",\"async\":true}}}}]}}}}\n\
+             {{\"type\":\"custom\",\"customType\":\"lemonpi-mission-state\",\"data\":{{\"phase\":\"delegated\"}}}}\n",
+            serde_json::to_string(&project.to_string_lossy()).unwrap()
+        );
+        fs::write(&session, &records).unwrap();
+
+        assert!(
+            read_session_summary(&session, &project)
+                .unwrap()
+                .anonymous_subagent_bootstrap
+        );
+
+        fs::write(
+            &session,
+            format!(
+                "{records}{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"Continue this real fork\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        assert!(
+            !read_session_summary(&session, &project)
+                .unwrap()
+                .anonymous_subagent_bootstrap
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
