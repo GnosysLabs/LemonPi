@@ -94,7 +94,7 @@ Routing policy:
 2. Parallel-first decomposition — for broader work, spend only a brief inspection identifying outcome-sized vertical lanes, their exact ownership, and real dependencies. Collect every lane that is ready now. When two to four ready lanes have disjoint write ownership, dispatch them together in one wave immediately. Do not launch the first obvious lane and postpone other independent lanes until it completes. Dependent or overlapping lanes move to a later wave. Do not split by file merely to create more agents.
 3. Planning and roster — use a planner only when architecture, ordering, or ambiguity cannot be resolved by brief direct inspection. The planner must answer a concrete decision and must never be a ritual before ordinary coding. The built-in \`worker\` is the default executor. Call \`subagent({ action: "list" })\` only when a specialist or custom agent may materially improve the result, then reuse that roster for the task instead of rediscovering it.
 4. Semantic dispatch — tell each child the actual outcome, scope, completion condition, and meaningful constraints in plain language. You do not need to reproduce LemonPi's mechanical execution declaration, acceptance boilerplate, or one-item checklist; the runtime compiles missing fields. For parallel writers, include \`Owned paths:\` with exact repo-relative files or directories. An \`unsafe_checkout\` singleton must also declare exact \`Owned paths:\`. If ownership cannot be assigned confidently, use \`overlapping_ownership\` only when the overlap is real and explain it specifically. Give each worker only focused validation for its lane; do not paste the repository's entire test matrix into every child.
-5. Child progress — LemonPi initializes a child checklist automatically. Supply a custom \`Child checklist:\` only when a delegated lane genuinely has two to five meaningful internal milestones. Do not create checklist items for tool calls or final-response delivery.
+5. Child progress — LemonPi initializes a child checklist automatically. For every delegated lane with two to five meaningful internal milestones, author those concrete milestones in \`Child checklist:\` before launch; do not collapse substantial multi-step work into one generic outcome row. Omit the custom checklist only for a genuinely atomic lane. LemonPi derives a safety-net checklist from named work sections when one is omitted, and an atomic fallback is named after the real chunk outcome. Do not create checklist items for tool calls or final-response delivery.
 6. Useful specialists — read-only planning, research, review, and analysis must answer a concrete question that changes the next decision. Run useful independent read-only work concurrently with writers when it shortens the critical path, such as preparing the next dependency-ready wave while implementation proceeds. Never launch ceremonial, duplicative, or make-work agents merely to occupy a slot.
 7. Execution path and checkout hygiene — inspect \`git status --porcelain\` during the brief dispatch pass, but never trust a status or HEAD remembered from before a reload, reset, compaction, or another turn. Immediately before every implementation launch, LemonPi independently reads the target repository's current HEAD and working tree and appends an authoritative checkout snapshot to each child task. If two to four disjoint implementation lanes are ready, make a clean worktree base and launch all of them as one top-level \`tasks\` call; LemonPi adds worktree isolation and caps concurrency automatically. A dirty checkout is a cleanup task, not a sequential-execution excuse. Classify every dirty path first; validate and commit completed in-scope work, use a path-scoped dry run before removing confirmed rebuildable noise, or preserve unrelated changes in a clearly labeled recoverable checkpoint commit when that is safe. Never discard, overwrite, or silently hide user work. LemonPi permits \`unsafe_checkout\` only when the fresh dirty paths actually overlap the singleton's exact owned paths and cannot be normalized safely. Useful independent read-only subagents should still run alongside it when they save time.
 8. Checkpoint and integration review — Main Pi reviews every completed chunk directly: inspect what changed, compare it with the stated scope, owned paths, and out-of-scope boundary, and perform the smallest useful check. For a worktree wave, read the versioned manifest at \`parallelHandoff.path\`; require the expected base commit, a completed child status, a non-error patch, and changed paths confined to that lane's ownership. Apply accepted patches to the primary checkout one at a time with \`git apply --check\` followed by \`git apply --3way\`. This narrow patch application is git integration, not implementation. Never apply a failed, stale-base, out-of-lane, overlapping, or conflict-producing patch blindly; preserve its artifact and re-delegate only that bounded lane after the accepted patches are integrated. Report the concrete checkpoint to the user before continuing. Run a final holistic validation once after all chunks are integrated; do not rerun the full suite after every small chunk unless its risk requires that.
@@ -291,11 +291,104 @@ function hasBoundedChunkContract(task: string): boolean {
 const READ_ONLY_ROLE_NAMES = new Set(["advisor", "context-builder", "oracle", "planner", "researcher", "reviewer", "scout"]);
 
 function conciseTaskSummary(task: string): string {
+  const chunkOutcome = sectionLead(task, "chunk outcome");
+  if (chunkOutcome) return chunkOutcome.slice(0, 180);
   const line = task
     .split("\n")
     .map((value) => value.trim())
-    .find((value) => value && !/^(?:execution mode|chunk outcome|in scope|done when|out of scope|owned paths|depends on|single-writer reason|single-writer detail|child checklist)\s*:/i.test(value));
+    .find((value) => value && !/^(?:execution mode|chunk outcome|in scope|done when|out of scope|owned paths|depends on|single-writer reason|single-writer detail|review justification|child checklist|normative contract|shared .+ rules|tests?|validation)\s*:/i.test(value));
   return (line ?? "Complete the delegated outcome").replace(/^[-*]\s+/, "").slice(0, 180);
+}
+
+function cleanChecklistText(value: string): string {
+  return value
+    .replace(/^\s*(?:#{1,6}\s*|[-*+]\s+)/, "")
+    .replace(/\*\*/g, "")
+    .replace(/`/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function sectionLead(task: string, wantedHeading: string): string | undefined {
+  const lines = task.replace(/\r\n/g, "\n").split("\n");
+  const heading = wantedHeading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const matcher = new RegExp(`^\\s*(?:#{1,6}\\s*)?${heading}\\s*:\\s*(.*)$`, "i");
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = matcher.exec(lines[index]);
+    if (!match) continue;
+    const inline = cleanChecklistText(match[1]);
+    if (inline) return inline;
+    for (let offset = index + 1; offset < lines.length; offset += 1) {
+      const raw = lines[offset];
+      if (/^\s*(?:#{1,6}\s*)?[^:\n]{2,80}:\s*$/.test(raw)) break;
+      const candidate = cleanChecklistText(raw);
+      if (candidate) return candidate;
+    }
+  }
+  return undefined;
+}
+
+interface ChecklistDraft {
+  subject: string;
+  description?: string;
+}
+
+const NON_WORK_SECTION = /^(?:execution mode|single-writer reason|single-writer detail|review justification|chunk outcome|owned paths|depends on|normative contract|shared .+ rules|in scope|done when|out of scope|acceptance contract|criteria|required evidence|output)$/i;
+const WORK_SECTION = /(?:endpoint|implementation|integration|migration|projection|catalog|tests?|validation|verification|frontend|backend|interface|security|storage|database|\bapi\b|\bui\b|\bstate\b|\bmessages?\b)/i;
+
+function checklistSubjectForSection(value: string): string {
+  const heading = cleanChecklistText(value).replace(/\s*\([^)]*\)\s*$/, "");
+  const lower = heading.charAt(0).toLowerCase() + heading.slice(1);
+  if (/^(?:implement|add|build|create|repair|update|migrate|integrate|validate|verify|test|harden|secure|wire|refine|remove)\b/i.test(heading)) {
+    return heading.slice(0, 180);
+  }
+  if (/\btests?\b/i.test(heading)) return "Add focused tests";
+  if (/\bvalidation\b|\bverification\b/i.test(heading)) return "Run focused validation";
+  if (/\bsecurity\b/i.test(heading)) return `Harden ${lower}`.slice(0, 180);
+  return `Implement ${lower}`.slice(0, 180);
+}
+
+function derivedChildChecklist(task: string, summary: string): ChecklistDraft[] {
+  const lines = task.replace(/\r\n/g, "\n").split("\n");
+  const sections: ChecklistDraft[] = [];
+  const headingPattern = /^\s*(?:#{1,6}\s*)?([^:\n]{2,80})\s*:\s*$/;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const headingMatch = headingPattern.exec(lines[index]);
+    if (!headingMatch) continue;
+    const heading = cleanChecklistText(headingMatch[1]);
+    if (!WORK_SECTION.test(heading) || NON_WORK_SECTION.test(heading)) continue;
+
+    let description: string | undefined;
+    for (let offset = index + 1; offset < lines.length; offset += 1) {
+      if (headingPattern.test(lines[offset])) break;
+      const candidate = cleanChecklistText(lines[offset]);
+      if (candidate) {
+        description = candidate.slice(0, 1_200);
+        break;
+      }
+    }
+    sections.push({
+      subject: checklistSubjectForSection(heading),
+      ...(description ? { description } : {}),
+    });
+  }
+
+  const unique = sections.filter((item, index, all) =>
+    all.findIndex((candidate) => candidate.subject.toLowerCase() === item.subject.toLowerCase()) === index
+  );
+  if (unique.length >= 2) {
+    if (unique.length <= 5) return unique;
+    const validation = unique.findLast((item) => /validation|tests?/i.test(item.subject));
+    const first = unique.filter((item) => item !== validation).slice(0, validation ? 4 : 5);
+    return validation ? [...first, validation] : first;
+  }
+
+  const doneWhen = sectionLead(task, "done when");
+  return [{
+    subject: summary,
+    ...(doneWhen && doneWhen !== summary ? { description: doneWhen.slice(0, 1_200) } : {}),
+  }];
 }
 
 function inferredExecutionMode(agent: string, task: string): "read-only" | "implementation" {
@@ -317,7 +410,10 @@ function appendMissingImplementationContract(task: string, summary: string): str
 
 function appendDefaultChecklist(task: string, summary: string): string {
   if (parseChildChecklist(task, "worker").length > 0) return task;
-  return `${task.trimEnd()}\nChild checklist:\n- Complete delegated outcome :: ${summary}`;
+  const checklist = derivedChildChecklist(task, summary)
+    .map((item) => `- ${item.subject}${item.description ? ` :: ${item.description}` : ""}`)
+    .join("\n");
+  return `${task.trimEnd()}\nChild checklist:\n${checklist}`;
 }
 
 export function compileDelegationContracts(input: Record<string, unknown>): void {

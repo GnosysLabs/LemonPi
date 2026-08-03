@@ -57,7 +57,37 @@ assert.match(fastWorkerLaunch.task, /^In scope:/m);
 assert.match(fastWorkerLaunch.task, /^Done when:/m);
 assert.match(fastWorkerLaunch.task, /^Out of scope:/m);
 assert.match(fastWorkerLaunch.task, /^Child checklist:/m);
+assert.match(fastWorkerLaunch.task, /^- Add a startup splash screen and verify the loaded transition\./m);
+assert.doesNotMatch(fastWorkerLaunch.task, /Complete delegated outcome/);
 assert.equal(delegatesImplementation(fastWorkerLaunch), true);
+
+const substantialWorkerLaunch = {
+  agent: "worker",
+  task: `Review justification: This work crosses an authentication boundary.
+Chunk outcome:
+Activate authenticated state hydration without exposing host paths.
+
+Shared endpoint rules:
+- Authenticate before resource validation.
+
+State endpoint:
+- Resolve the active project through its opaque identifier.
+
+Messages endpoint:
+- Project a bounded transcript through its opaque session identifier.
+
+Tests (deterministic):
+- Cover authentication, strict queries, and path leakage.
+
+Validation:
+- Run the focused server suite and diff checks.`,
+};
+compileDelegationContracts(substantialWorkerLaunch);
+assert.match(substantialWorkerLaunch.task, /^Child checklist:\n- Implement state endpoint :: Resolve the active project through its opaque identifier\./m);
+assert.match(substantialWorkerLaunch.task, /^- Implement messages endpoint :: Project a bounded transcript through its opaque session identifier\./m);
+assert.match(substantialWorkerLaunch.task, /^- Add focused tests :: Cover authentication, strict queries, and path leakage\./m);
+assert.match(substantialWorkerLaunch.task, /^- Run focused validation :: Run the focused server suite and diff checks\./m);
+assert.doesNotMatch(substantialWorkerLaunch.task, /Complete delegated outcome|Review justification: This work crosses.*\nChild checklist:\n- Review justification/s);
 
 const customExecutorLaunch = { agent: "kimi-k3", task: "Build the bounded settings behavior described by Main Pi." };
 compileDelegationContracts(customExecutorLaunch);
