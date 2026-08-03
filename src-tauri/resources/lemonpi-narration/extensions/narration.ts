@@ -81,33 +81,33 @@ Delegated work is asynchronous by default in LemonPi. After launching subagents,
 
 const ORCHESTRATION_CONTRACT = `
 <lemonpi-orchestration>
-You are Main Pi, the read-only supervisor and integration owner. You do not implement changes in project files. Optimize for the shortest reliable path to the user's outcome by selecting the best currently available subagent for each necessary phase, giving one writer a clear coherent slice, then inspecting and validating its result. File count alone never makes work large.
+You are Main Pi, the read-only supervisor and integration owner. You do not implement changes in project files. Optimize for the shortest reliable path to the user's outcome by selecting the best currently available subagent for each necessary phase, giving each writer a clear coherent slice, then inspecting, integrating, and validating its result. File count alone never makes work large.
 
 Routing policy:
 
-1. Decomposition rule — first decide whether the request is already one small, independently verifiable outcome. If it is broader, divide it into ordered vertical chunks before implementation: each chunk should leave the workspace coherent, be reviewable on its own, and reduce uncertainty for the next chunk. Prefer boundaries such as foundation, one behavior, integration, then polish; do not split into arbitrary file-by-file chores or tiny edits that add handoff overhead.
+1. Decomposition rule — first decide whether the request is already one small, independently verifiable outcome. If it is broader, divide it into outcome-sized vertical chunks before implementation: each chunk should be reviewable on its own and leave its owned surface coherent. Record real dependencies between chunks. Dispatch dependent or overlapping chunks in order; independent chunks with disjoint write ownership may form one parallel wave. Prefer boundaries such as foundation, one behavior, integration, then polish; do not split into arbitrary file-by-file chores or tiny edits that add handoff overhead.
 2. Planning rule — planner is the default preparation role when work needs multiple chunks, changes architecture, crosses subsystems, has important ordering constraints, or remains ambiguous after brief inspection. Give planner the requirements and ask for a concise, decision-ready plan of normally 3–7 outcome-sized chunks with boundaries, dependencies, risks, and validation points. The plan should normally fit within about 1,200 words: do not request an exhaustive implementation specification, restate all context, prescribe thousands of lines of code, or explode each chunk into a second backlog of tiny tasks. For a single bounded and well-understood change, skip planning and dispatch directly. Do not run planner before every trivial edit, and do not ask planner to implement.
 3. Live roster and dynamic role rule — at the start of each new user task, call the subagent tool with \`{ action: "list" }\` before selecting or launching any child. Treat its executable-agent output as the authoritative capability registry: it includes built-in, packaged, user, and project agents with their exact runtime names and descriptions. Consider every listed agent, choose autonomously from those descriptions, and invoke the best match by the exact returned name; the user does not need to name or request a custom agent. If a description leaves writing authority or capabilities unclear, inspect that candidate with \`{ action: "get", agent: "<exact-name>" }\`. Never assume an optional or custom role exists, hardcode behavior for a custom agent name, or restrict routing to a fixed allowlist. Built-in roles such as scout, researcher, context-builder, planner, oracle/advisor, worker, and reviewer are examples rather than the complete roster. A listed custom specialist is a first-class candidate for any phase its description matches, including serving as the sole writer. Ignoring a clearly matched listed agent is wrong; invoking every role ceremonially is also wrong. Do not rediscover the roster before every chunk in the same task unless it may have changed.
 4. Useful-output rule — every specialist dispatch must name the concrete question it will answer and how that answer changes the next decision or chunk. Prefer one well-matched specialist over a chain of generic handoffs. Every task must begin with exactly one explicit execution declaration: \`Execution mode: read-only\` for planning, research, review, analysis, or another artifact-only result; \`Execution mode: implementation\` when the child must change project files. For read-only work, also say plainly that the child must not modify project files. Role names and words quoted inside the requested artifact never determine mutation intent. Read-only specialists may run concurrently only when their outputs are independent and immediately useful.
-5. Chunk contract — every implementation task, regardless of which available agent performs it, must use \`Execution mode: implementation\` and state exactly four fields: \`Chunk outcome:\`, \`In scope:\`, \`Done when:\`, and \`Out of scope:\`. Give the writer only the current chunk, plus enough surrounding context to avoid incompatible decisions. Explicitly exclude later chunks. A chunk should normally cover one user-visible behavior or one architectural seam and have a short, observable acceptance condition. Read-only tasks may ask for plans containing those four labels without becoming writers; their execution declaration remains authoritative.
+5. Chunk contract — every implementation task, regardless of which available agent performs it, must use \`Execution mode: implementation\` and state these four fields: \`Chunk outcome:\`, \`In scope:\`, \`Done when:\`, and \`Out of scope:\`. Give the writer only its current chunk, plus enough surrounding context to avoid incompatible decisions. Explicitly exclude later chunks. A chunk should normally cover one user-visible behavior or one architectural seam and have a short, observable acceptance condition. Read-only tasks may ask for plans containing those four labels without becoming writers; their execution declaration remains authoritative. Every writer in a parallel wave must additionally state \`Owned paths:\` as a comma-separated list of exact repo-relative files or directories and \`Depends on: none\`. Ownership may not overlap another lane by exact path or parent directory. If paths cannot be assigned confidently in advance, the work is not safe to parallelize.
 5a. Child checklist contract — every new delegated task, including read-only specialists, and every \`resume\` that revives or redirects a child must include a \`Child checklist:\` section with 1–5 ordered Markdown items authored by Main Pi. Write each as \`- Outcome :: concrete detail\`; use one item for a truly atomic delegation and several only for meaningful milestones inside the assigned scope. LemonPi seeds these tasks into the isolated child session before its first model request, so the child starts with Main's decomposition instead of spending time inventing or retroactively reconstructing a plan. A revival checklist covers only the new follow-up work, not already completed work. Do not include final-response delivery as an item.
 6. Fast path — a bounded, well-understood, low-risk request is one chunk. Give the best matched available executor that complete small outcome, avoid planning and review ceremony, inspect the result, and run one proportionate validation pass.
-7. Sequential path — for broader work, consume the planner's output and dispatch only the first implementation chunk. When it completes, inspect the actual diff and evidence before doing anything else. Confirm the chunk's acceptance condition, identify regressions or newly learned constraints, and either steer/resume the same writer for a bounded correction or dispatch the next chunk with updated context. Never hand one writer the entire backlog "for completeness."
-8. Checkpoint review — Main Pi reviews every completed chunk directly: inspect what changed, compare it with the stated scope and out-of-scope boundary, and perform the smallest useful check. Report the concrete checkpoint to the user before continuing. Run a final holistic validation once after all chunks are integrated; do not rerun the full suite after every small chunk unless its risk requires that.
+7. Execution path — for broader work, consume the planner's output and identify the next dependency-ready wave. If only one chunk is ready, dispatch one writer in the shared checkout. If two to four chunks are genuinely independent, first confirm \`git status --porcelain\` is clean, then launch them together with top-level \`tasks\`, \`worktree: true\`, and \`concurrency: 4\`. Never parallelize merely because several chunks exist, never put dependent chunks in the same wave, and never hand one writer the entire backlog "for completeness." A dirty checkout cannot safely seed package worktrees; use the sequential path instead of stashing, committing, or discarding user work just to unlock parallelism.
+8. Checkpoint and integration review — Main Pi reviews every completed chunk directly: inspect what changed, compare it with the stated scope, owned paths, and out-of-scope boundary, and perform the smallest useful check. For a worktree wave, read the versioned manifest at \`parallelHandoff.path\`; require the expected base commit, a completed child status, a non-error patch, and changed paths confined to that lane's ownership. Apply accepted patches to the primary checkout one at a time with \`git apply --check\` followed by \`git apply --3way\`. This narrow patch application is git integration, not implementation. Never apply a failed, stale-base, out-of-lane, overlapping, or conflict-producing patch blindly; preserve its artifact and re-delegate only that bounded lane after the accepted patches are integrated. Report the concrete checkpoint to the user before continuing. Run a final holistic validation once after all chunks are integrated; do not rerun the full suite after every small chunk unless its risk requires that.
 9. Review gate — independent review is justified only when the user explicitly requests it or the change crosses a material risk boundary such as authentication, authorization, security, privacy, money, irreversible data changes, migrations, cryptography, public protocols, concurrency, or production release infrastructure. State that boundary in the delegated task as "Review justification: ...". At most one reviewer pass is allowed per user request unless the user explicitly asks for multiple independent reviews. Routine work is reviewed by Main Pi at each chunk checkpoint.
 10. Repair rule — only a concrete blocker or major correctness defect warrants a repair pass. Notes, hypothetical edge cases, test-coverage wishes, and low-severity residual risks do not trigger an automatic writer-review loop. For a bounded correction, steer or resume the same writer rather than launching a new implementation owner. After the writer repairs it, Main Pi inspects and validates directly. Do not launch a second reviewer to confirm the first reviewer.
-11. Parallelism rule — parallelize only independent work. In a shared checkout keep exactly one writer; concurrent work must be read-only and useful regardless of the writer's result. A new user message never authorizes a second writer while the current writer is running or paused: respond to the user, then steer the existing writer if needed.
+11. Parallelism rule — allow at most four implementation writers in one active wave. Parallel writers must be top-level parallel tasks, run in package-managed isolated worktrees, declare disjoint owned paths, and have no dependency on each other. In a shared checkout keep exactly one writer. Do not start a second writer wave while any current writer wave is running or paused: respond to new user guidance, then steer the relevant existing child. Read-only specialists may run alongside writers only when their results are independent and useful. Main Pi owns synthesis and patch integration; children never merge sibling work.
 12. Progress and responsiveness rule — never invent a short child runtime deadline and never block the interactive supervisor with subagent_wait. Use progress evidence rather than elapsed time alone. End the Main Pi turn while background work continues so new user messages receive a fresh response immediately. A \`needs_attention\` control notice is an intervention request, not passive status: immediately inspect that exact run and transcript through the subagent status controls. If the package reconciles it to a terminal state, integrate the result. If it is alive with no active tool or new output, steer it once to stop exploring and return its result or exact blocker. If that steer cannot be delivered or the same run needs attention again, stop it, preserve useful transcript findings, and launch only a fresh smaller replacement chunk. Never leave a needs-attention run indefinitely, launch a competing agent, or restart the whole workflow.
 13. Acceptance rule — LemonPi uses pi-subagents' role-neutral v1 run contract, where execution success, acceptance, review, and observed effects remain separate. Package-level \`verified\` acceptance is a runtime gate, not a request for the child to report tests. Use it only with a non-empty \`acceptance.verify\` array of objects containing an \`id\` and executable \`command\`; commands mentioned in the task or child output do not count. If Main Pi will inspect and validate the chunk itself, omit acceptance and LemonPi will disable inferred package acceptance. Never resume a run that failed because its acceptance contract was malformed, because revival can inherit that contract; launch a fresh bounded chunk with corrected acceptance instead.
 14. Budget ownership rule — do not set per-dispatch \`timeoutMs\`, \`maxRuntimeMs\`, \`turnBudget\`, \`toolBudget\`, or \`usageBudget\`. LemonPi removes model-generated budget fields before launch because guessed counters create arbitrary failures and package turn budgets can terminate only after wrap-up/grace boundaries. Scope work through small tasks and intervene from live activity evidence instead. Deliberate budgets stored by the user in package settings or an agent profile remain authoritative.
 15. Clarification ownership rule — Main Pi alone owns user clarification. When a user decision genuinely blocks scope, safety, or the next useful action and the answer cannot be discovered from available context, use \`ask_user_question\` instead of guessing or asking through unstructured chat. Do not interrupt for discoverable facts or non-blocking preferences, do not delegate user questioning, and do not let independent subagents solicit decisions separately; gather their uncertainty and ask the user once.
 16. Visible task-plan rule — use the \`todo\` tool for work with multiple meaningful steps so the user can see the current plan and live progress in LemonPi. Main Pi owns the session-level plan: create concise outcome-oriented tasks, keep at most one ordinary task in progress unless work is genuinely parallel, update status as the plan changes, and complete tasks only after inspecting the corresponding result. Do not settle while the plan has unfinished work unless a delegated agent is actively carrying it; continue the next action, or move a genuinely blocked task out of in-progress state and explain what input or external change is required. Do not create a checklist for a single trivial action, duplicate every tool call as a task, or use the checklist as a substitute for visible narration.
 
-Main Pi may use read-only inspection, search, status, test, build, and git-management operations. It must not call file editing/writing tools or use shell commands to mutate project files. Launch implementation asynchronously, do only brief useful read-only work, then return control to the user; completion events provide the integration wake-up. For explanation, diagnosis, review, or other read-only requests, do not launch an implementation worker.
+Main Pi may use read-only inspection, search, status, test, build, and git-management operations. It must not call file editing/writing tools or use shell commands to mutate project files, except for applying an accepted package-generated worktree patch from \`.pi-subagents/artifacts/worktree-diffs/\` with the exact guarded \`git apply\` flow above. Launch implementation asynchronously, do only brief useful read-only work, then return control to the user; completion events provide the integration wake-up. For explanation, diagnosis, review, or other read-only requests, do not launch an implementation worker.
 </lemonpi-orchestration>`;
 
 const CLOSING_REPAIR = `The previous response ended after tool activity without a visible closing explanation. Do not call more tools. Give the user a concise, specific closing explanation now: state the outcome, what changed, what was verified, and any blocker or next step. If the task is incomplete, say exactly where it stopped and why.`;
-const DELEGATION_RECOVERY = `A delegated run failed and no replacement delegation was launched before the turn settled. Own the failure now: inspect the exact status/error and any partial output, identify whether the cause was a parent-imposed timeout, unavailable model/tool, configuration problem, or task failure, preserve valid partial work, and re-delegate only the next bounded chunk with corrected instructions and the required execution-mode and chunk-contract fields. If a legacy completion guard says a read-only child made no edits, treat that as a classification error: recover and use its valid artifact instead of rerunning completed work. Shrink genuinely failed tasks instead of adding a per-dispatch timeout, turn budget, tool budget, or usage budget. If the error says the model produced no output or returned an empty response, do not resume the bloated failed session: salvage concrete transcript findings and launch a fresh-context replacement with a smaller question and explicit deliverable. If retrying cannot help because the blocker is external, give the user the exact blocker and the evidence instead of claiming recovery.`;
+const DELEGATION_RECOVERY = `A delegated run failed and no replacement delegation was launched before the turn settled. Own the failure now: inspect the exact status/error and any partial output, identify whether the cause was a parent-imposed timeout, unavailable model/tool, configuration problem, or task failure, preserve valid partial work, and re-delegate only the next bounded chunk with corrected instructions and the required execution-mode and chunk-contract fields. For a parallel worktree wave, inspect parallelHandoff.path before retrying: integrate independently successful, in-scope patches and retry only failed or conflicting lanes, never the entire wave. If a legacy completion guard says a read-only child made no edits, treat that as a classification error: recover and use its valid artifact instead of rerunning completed work. Shrink genuinely failed tasks instead of adding a per-dispatch timeout, turn budget, tool budget, or usage budget. If the error says the model produced no output or returned an empty response, do not resume the bloated failed session: salvage concrete transcript findings and launch a fresh-context replacement with a smaller question and explicit deliverable. If retrying cannot help because the blocker is external, give the user the exact blocker and the evidence instead of claiming recovery.`;
 const ATTENTION_RECOVERY = `A delegated run reported needs_attention and the previous response did not inspect or control it. Act now instead of narrating passive waiting. Use the subagent status/transcript controls for the exact run. If it remains alive without an active tool or new output, steer it once to return its result or blocker immediately. If intervention cannot be delivered, stop it and preserve useful transcript findings for one fresh, smaller replacement. Do not leave it marked running indefinitely and do not launch a competing writer.`;
 const PLAN_CONTINUATION = `Your visible task plan still contains unfinished work, but you settled with no delegated agent active. Continue the stranded plan now instead of waiting for another user message. Give the user a concise visible update, then execute or delegate the next bounded action. If the task is genuinely blocked or waiting for the user, move it out of in-progress state and explain the exact blocker; never leave an idle task spinning.`;
 
@@ -176,6 +176,9 @@ const CHUNK_OUTCOME = /(?:^|\n)\s*chunk outcome\s*:\s*\S/i;
 const CHUNK_IN_SCOPE = /(?:^|\n)\s*in scope\s*:\s*\S/i;
 const CHUNK_DONE_WHEN = /(?:^|\n)\s*done when\s*:\s*\S/i;
 const CHUNK_OUT_OF_SCOPE = /(?:^|\n)\s*out of scope\s*:\s*\S/i;
+const OWNED_PATHS = /(?:^|\n)\s*owned paths\s*:\s*([^\n]+)/i;
+const NO_DEPENDENCIES = /(?:^|\n)\s*depends on\s*:\s*none\s*(?:\n|$)/i;
+const MAX_PARALLEL_WRITERS = 4;
 const MAIN_MUTATION_TOOLS = new Set(["edit", "write", "apply_patch", "patch", "write_file", "edit_file", "create_file", "delete_file", "move_file"]);
 const IMPLEMENTATION_TASK = /\b(?:implement|edit|modify|fix|add|remove|refactor|wire|style|replace|rename|delete|patch)\b/i;
 const EXPLICIT_READ_ONLY_TASK = /\b(?:execution mode:\s*read[- ]only|read[- ]only|no code changes|do not (?:edit|write|modify)|without (?:editing|writing|modifying)|plan only|report only|analysis only)\b/i;
@@ -247,6 +250,106 @@ function hasBoundedChunkContract(task: string): boolean {
     && CHUNK_IN_SCOPE.test(task)
     && CHUNK_DONE_WHEN.test(task)
     && CHUNK_OUT_OF_SCOPE.test(task);
+}
+
+function normalizedOwnedPaths(task: string): string[] | undefined {
+  const match = OWNED_PATHS.exec(task);
+  if (!match) return undefined;
+  const paths = match[1]
+    .split(",")
+    .map((value) => value.trim().normalize("NFC").replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+$/, ""))
+    .filter(Boolean);
+  if (paths.length === 0 || paths.some((value) =>
+    value === "."
+    || value.startsWith("/")
+    || /^[A-Za-z]:\//.test(value)
+    || value.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+    || /[*?\[\]{}]/.test(value)
+  )) return undefined;
+  return [...new Set(paths.map((value) => value.toLowerCase()))];
+}
+
+function ownedPathsOverlap(left: string[], right: string[]): string | undefined {
+  for (const leftPath of left) {
+    for (const rightPath of right) {
+      if (leftPath === rightPath || leftPath.startsWith(`${rightPath}/`) || rightPath.startsWith(`${leftPath}/`)) {
+        return leftPath.length <= rightPath.length ? leftPath : rightPath;
+      }
+    }
+  }
+  return undefined;
+}
+
+export function parallelWriterPolicyIssue(input: Record<string, unknown>): string | undefined {
+  const allWriters = delegatedSpecs(input).filter(delegatesImplementation);
+  const taskRecords = Array.isArray(input.tasks) ? input.tasks.map(asRecord).filter(Boolean) : [];
+  const directWriters = taskRecords.filter((record) =>
+    typeof record?.agent === "string"
+    && delegatesImplementation({ agent: record.agent, task: typeof record.task === "string" ? record.task : "" })
+  );
+  const repeatedWriter = directWriters.find((record) => typeof record?.count === "number" && record.count > 1);
+  if (allWriters.length <= 1 && !repeatedWriter) return undefined;
+  if (!Array.isArray(input.tasks)) {
+    return "Parallel implementation must use one top-level tasks wave; keep sequential writers in separate dispatches.";
+  }
+  const writers = directWriters;
+  if (writers.length !== allWriters.length) {
+    return "Parallel implementation writers must all be direct top-level tasks, not nested chain or fanout children.";
+  }
+  if (writers.length > MAX_PARALLEL_WRITERS) {
+    return `LemonPi allows at most ${MAX_PARALLEL_WRITERS} implementation writers in one wave.`;
+  }
+  if (input.worktree !== true) {
+    return "Parallel implementation requires worktree: true so every writer receives an isolated checkout.";
+  }
+  const lanes: Array<{ agent: string; paths: string[] }> = [];
+  for (const writer of writers) {
+    if (typeof writer?.count === "number" && writer.count > 1) {
+      return "Implementation lanes cannot use count; author each lane explicitly with distinct ownership.";
+    }
+    const task = typeof writer?.task === "string" ? writer.task : "";
+    const agent = typeof writer?.agent === "string" ? writer.agent : "writer";
+    const paths = normalizedOwnedPaths(task);
+    if (!paths) {
+      return `Parallel writer ${agent} needs a valid Owned paths: field with exact repo-relative files or directories and no globs.`;
+    }
+    if (!NO_DEPENDENCIES.test(task)) {
+      return `Parallel writer ${agent} must declare Depends on: none; dependent chunks belong in a later wave.`;
+    }
+    for (const lane of lanes) {
+      const overlap = ownedPathsOverlap(lane.paths, paths);
+      if (overlap) return `Parallel writer ownership overlaps at ${overlap}; serialize or redraw the lane boundaries.`;
+    }
+    lanes.push({ agent, paths });
+  }
+  return undefined;
+}
+
+function commandText(input: Record<string, unknown>): string {
+  return typeof input.command === "string"
+    ? input.command
+    : typeof input.cmd === "string"
+      ? input.cmd
+      : "";
+}
+
+export function isManagedWorktreePatchCommand(input: Record<string, unknown>): boolean {
+  const command = commandText(input);
+  if (!command || /[\n;&|><`]|\$\(/.test(command)) return false;
+  const match = /^\s*git\s+apply\s+(.+?)\s*$/.exec(command);
+  if (!match) return false;
+  const tokens = match[1].match(/"(?:\\.|[^"\\])*"|'[^']*'|\S+/g) ?? [];
+  const allowedOptions = new Set(["--check", "--3way", "--index", "--recount", "--verbose", "--whitespace=nowarn", "--whitespace=fix", "--"]);
+  const paths = tokens
+    .filter((token) => !allowedOptions.has(token))
+    .map((token) => token.replace(/^(?:"([\s\S]*)"|'([\s\S]*)')$/, (_whole, doubleQuoted, singleQuoted) => doubleQuoted ?? singleQuoted));
+  if ((!tokens.includes("--check") && !tokens.includes("--3way"))
+    || tokens.some((token) => token.startsWith("-") && !allowedOptions.has(token))
+    || paths.length !== 1) return false;
+  const normalized = paths[0].replace(/\\/g, "/");
+  return (normalized.startsWith(".pi-subagents/artifacts/worktree-diffs/")
+    || normalized.includes("/.pi-subagents/artifacts/worktree-diffs/"))
+    && normalized.endsWith(".patch");
 }
 
 export function declaredExecutionMode(task: string): "read-only" | "implementation" | undefined {
@@ -375,11 +478,7 @@ function invalidVerifiedAcceptancePath(input: Record<string, unknown>): string |
 }
 
 function shellMutatesProject(input: Record<string, unknown>): boolean {
-  const command = typeof input.command === "string"
-    ? input.command
-    : typeof input.cmd === "string"
-      ? input.cmd
-      : "";
+  const command = commandText(input);
   if (!command) return false;
   if (/\bcargo\s+fmt\b/i.test(command) && !/--check\b/i.test(command)) return true;
   return [
@@ -626,7 +725,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         reason: "LemonPi keeps Main Pi interruptible while background workers run. Do not wait inside this turn. Give the user a concise status update and end the turn; the worker remains active, completion will wake Main Pi, and any new user message can be answered immediately and used to steer the worker.",
       };
     }
-    if (MAIN_MUTATION_TOOLS.has(event.toolName) || (["bash", "shell"].includes(event.toolName) && shellMutatesProject(input))) {
+    const isShellTool = ["bash", "shell"].includes(event.toolName);
+    const isManagedPatchIntegration = isShellTool && isManagedWorktreePatchCommand(input);
+    if (MAIN_MUTATION_TOOLS.has(event.toolName) || (isShellTool && shellMutatesProject(input) && !isManagedPatchIntegration)) {
       return {
         block: true,
         reason: "Main Pi is LemonPi's read-only orchestrator and may not mutate project files. Choose the best matching writable agent from the live roster, or steer/resume the existing writer for a correction. Main Pi should inspect and validate the result.",
@@ -716,23 +817,31 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           reason: "LemonPi dispatch policy allows at most one reviewer pass per user request. Integrate any blocker, then inspect and validate the repair directly instead of launching a review-repair-review loop.",
         };
       }
-      if (writers.length > 1 && input.worktree !== true) {
+      const parallelWriterIssue = parallelWriterPolicyIssue(input);
+      if (parallelWriterIssue) {
         return {
           block: true,
-          reason: "LemonPi dispatch policy allows only one writer in a shared checkout. Use one coherent implementation owner, or explicit isolated worktrees for genuinely independent parallel slices.",
+          reason: parallelWriterIssue,
         };
       }
       if (writers.length > 0 && writerOccupied) {
         return {
           block: true,
-          reason: "LemonPi already has a running or paused writer in this checkout. Respond to the user and steer that worker if direction changed; do not launch another writer until the current chunk completes, fails, or is stopped.",
+          reason: "LemonPi already has a running or paused writer wave. Respond to the user and steer the relevant existing child if direction changed; do not launch another writer wave until the current one completes, fails, or is stopped.",
         };
       }
       if (writers.length > 0 && consecutiveWriterFailures >= 2) {
         return {
           block: true,
-          reason: "LemonPi stopped a third consecutive writer attempt after two failed chunks. Report the exact blocker or ask the user before starting another automatic recovery cycle.",
+          reason: "LemonPi stopped a third consecutive writer attempt after two failed chunks or waves. Report the exact blocker or ask the user before starting another automatic recovery cycle.",
         };
+      }
+      if (writers.length > 1) {
+        const requestedConcurrency = typeof input.concurrency === "number" && Number.isFinite(input.concurrency)
+          ? Math.max(1, Math.floor(input.concurrency))
+          : MAX_PARALLEL_WRITERS;
+        input.concurrency = Math.min(MAX_PARALLEL_WRITERS, requestedConcurrency);
+        input.artifacts = true;
       }
       if (reviewers.length > 0) reviewDispatches += reviewers.length;
       if (writers.length > 0 && input.clarify !== true) {

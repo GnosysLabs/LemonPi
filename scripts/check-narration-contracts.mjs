@@ -3,6 +3,8 @@ import {
   applyDelegationSafetyContracts,
   declaredExecutionMode,
   delegatesImplementation,
+  isManagedWorktreePatchCommand,
+  parallelWriterPolicyIssue,
   remainingPlanFromTodoResult,
   shouldWakeForPlanContinuation,
 } from "../src-tauri/resources/lemonpi-narration/extensions/narration.ts";
@@ -54,5 +56,28 @@ assert.equal(shouldWakeForPlanContinuation({ hasRemainingTask: true, activeDeleg
 assert.equal(shouldWakeForPlanContinuation({ hasRemainingTask: true, activeDelegationCount: 1, writerOccupied: false, intentionallyStopped: false, attempts: 0 }), false);
 assert.equal(shouldWakeForPlanContinuation({ hasRemainingTask: true, activeDelegationCount: 0, writerOccupied: false, intentionallyStopped: false, attempts: 2 }), false);
 assert.equal(shouldWakeForPlanContinuation({ hasRemainingTask: true, activeDelegationCount: 0, writerOccupied: false, intentionallyStopped: true, attempts: 0 }), false);
+
+const lane = (outcome, paths) => ({
+  agent: "worker",
+  task: `Execution mode: implementation
+Chunk outcome: ${outcome}
+In scope: ${outcome}
+Done when: ${outcome} works
+Out of scope: Other lanes
+Owned paths: ${paths}
+Depends on: none
+Child checklist:
+- Implement ${outcome} :: Keep changes inside the owned paths`,
+});
+assert.equal(parallelWriterPolicyIssue({ tasks: [lane("API", "src/api/"), lane("UI", "src/ui/")], worktree: true }), undefined);
+assert.match(parallelWriterPolicyIssue({ tasks: [lane("API", "src/"), lane("UI", "src/ui/")], worktree: true }), /overlaps at src/);
+assert.match(parallelWriterPolicyIssue({ tasks: [lane("API", "src/api/"), lane("UI", "src/ui/")] }), /worktree: true/);
+assert.match(parallelWriterPolicyIssue({ tasks: [lane("1", "src/1"), lane("2", "src/2"), lane("3", "src/3"), lane("4", "src/4"), lane("5", "src/5")], worktree: true }), /at most 4/);
+assert.match(parallelWriterPolicyIssue({ tasks: [{ ...lane("Repeated", "src/repeated"), count: 2 }], worktree: true }), /cannot use count/);
+assert.equal(isManagedWorktreePatchCommand({ command: 'git apply --check -- ".pi-subagents/artifacts/worktree-diffs/run/task-0-worker.patch"' }), true);
+assert.equal(isManagedWorktreePatchCommand({ command: 'git apply --3way -- "/repo/.pi-subagents/artifacts/worktree-diffs/run/task-0-worker.patch"' }), true);
+assert.equal(isManagedWorktreePatchCommand({ command: "git apply .pi-subagents/artifacts/worktree-diffs/run/unchecked.patch" }), false);
+assert.equal(isManagedWorktreePatchCommand({ command: "git apply /tmp/arbitrary.patch" }), false);
+assert.equal(isManagedWorktreePatchCommand({ command: "git apply .pi-subagents/artifacts/worktree-diffs/run/good.patch && touch bad" }), false);
 
 console.log("Narration execution-mode contracts passed.");
