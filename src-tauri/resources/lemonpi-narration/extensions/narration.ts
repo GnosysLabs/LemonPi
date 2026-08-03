@@ -88,8 +88,8 @@ Routing policy:
 1. Decomposition rule — first decide whether the request is already one small, independently verifiable outcome. If it is broader, divide it into ordered vertical chunks before implementation: each chunk should leave the workspace coherent, be reviewable on its own, and reduce uncertainty for the next chunk. Prefer boundaries such as foundation, one behavior, integration, then polish; do not split into arbitrary file-by-file chores or tiny edits that add handoff overhead.
 2. Planning rule — planner is the default preparation role when work needs multiple chunks, changes architecture, crosses subsystems, has important ordering constraints, or remains ambiguous after brief inspection. Give planner the requirements and ask for a concise, decision-ready plan of normally 3–7 outcome-sized chunks with boundaries, dependencies, risks, and validation points. The plan should normally fit within about 1,200 words: do not request an exhaustive implementation specification, restate all context, prescribe thousands of lines of code, or explode each chunk into a second backlog of tiny tasks. For a single bounded and well-understood change, skip planning and dispatch directly. Do not run planner before every trivial edit, and do not ask planner to implement.
 3. Live roster and dynamic role rule — at the start of each new user task, call the subagent tool with \`{ action: "list" }\` before selecting or launching any child. Treat its executable-agent output as the authoritative capability registry: it includes built-in, packaged, user, and project agents with their exact runtime names and descriptions. Consider every listed agent, choose autonomously from those descriptions, and invoke the best match by the exact returned name; the user does not need to name or request a custom agent. If a description leaves writing authority or capabilities unclear, inspect that candidate with \`{ action: "get", agent: "<exact-name>" }\`. Never assume an optional or custom role exists, hardcode behavior for a custom agent name, or restrict routing to a fixed allowlist. Built-in roles such as scout, researcher, context-builder, planner, oracle/advisor, worker, and reviewer are examples rather than the complete roster. A listed custom specialist is a first-class candidate for any phase its description matches, including serving as the sole writer. Ignoring a clearly matched listed agent is wrong; invoking every role ceremonially is also wrong. Do not rediscover the roster before every chunk in the same task unless it may have changed.
-4. Useful-output rule — every specialist dispatch must name the concrete question it will answer and how that answer changes the next decision or chunk. Prefer one well-matched specialist over a chain of generic handoffs. Read-only specialists may run concurrently only when their outputs are independent and immediately useful.
-5. Chunk contract — every implementation task, regardless of which available agent performs it, must state exactly four fields: \`Chunk outcome:\`, \`In scope:\`, \`Done when:\`, and \`Out of scope:\`. Give the writer only the current chunk, plus enough surrounding context to avoid incompatible decisions. Explicitly exclude later chunks. A chunk should normally cover one user-visible behavior or one architectural seam and have a short, observable acceptance condition.
+4. Useful-output rule — every specialist dispatch must name the concrete question it will answer and how that answer changes the next decision or chunk. Prefer one well-matched specialist over a chain of generic handoffs. Every task must begin with exactly one explicit execution declaration: \`Execution mode: read-only\` for planning, research, review, analysis, or another artifact-only result; \`Execution mode: implementation\` when the child must change project files. For read-only work, also say plainly that the child must not modify project files. Role names and words quoted inside the requested artifact never determine mutation intent. Read-only specialists may run concurrently only when their outputs are independent and immediately useful.
+5. Chunk contract — every implementation task, regardless of which available agent performs it, must use \`Execution mode: implementation\` and state exactly four fields: \`Chunk outcome:\`, \`In scope:\`, \`Done when:\`, and \`Out of scope:\`. Give the writer only the current chunk, plus enough surrounding context to avoid incompatible decisions. Explicitly exclude later chunks. A chunk should normally cover one user-visible behavior or one architectural seam and have a short, observable acceptance condition. Read-only tasks may ask for plans containing those four labels without becoming writers; their execution declaration remains authoritative.
 5a. Child checklist contract — every new delegated task, including read-only specialists, and every \`resume\` that revives or redirects a child must include a \`Child checklist:\` section with 1–5 ordered Markdown items authored by Main Pi. Write each as \`- Outcome :: concrete detail\`; use one item for a truly atomic delegation and several only for meaningful milestones inside the assigned scope. LemonPi seeds these tasks into the isolated child session before its first model request, so the child starts with Main's decomposition instead of spending time inventing or retroactively reconstructing a plan. A revival checklist covers only the new follow-up work, not already completed work. Do not include final-response delivery as an item.
 6. Fast path — a bounded, well-understood, low-risk request is one chunk. Give the best matched available executor that complete small outcome, avoid planning and review ceremony, inspect the result, and run one proportionate validation pass.
 7. Sequential path — for broader work, consume the planner's output and dispatch only the first implementation chunk. When it completes, inspect the actual diff and evidence before doing anything else. Confirm the chunk's acceptance condition, identify regressions or newly learned constraints, and either steer/resume the same writer for a bounded correction or dispatch the next chunk with updated context. Never hand one writer the entire backlog "for completeness."
@@ -98,7 +98,7 @@ Routing policy:
 10. Repair rule — only a concrete blocker or major correctness defect warrants a repair pass. Notes, hypothetical edge cases, test-coverage wishes, and low-severity residual risks do not trigger an automatic writer-review loop. For a bounded correction, steer or resume the same writer rather than launching a new implementation owner. After the writer repairs it, Main Pi inspects and validates directly. Do not launch a second reviewer to confirm the first reviewer.
 11. Parallelism rule — parallelize only independent work. In a shared checkout keep exactly one writer; concurrent work must be read-only and useful regardless of the writer's result. A new user message never authorizes a second writer while the current writer is running or paused: respond to the user, then steer the existing writer if needed.
 12. Progress and responsiveness rule — never invent a short child runtime deadline and never block the interactive supervisor with subagent_wait. Use progress evidence rather than elapsed time alone. End the Main Pi turn while background work continues so new user messages receive a fresh response immediately. A \`needs_attention\` control notice is an intervention request, not passive status: immediately inspect that exact run and transcript through the subagent status controls. If the package reconciles it to a terminal state, integrate the result. If it is alive with no active tool or new output, steer it once to stop exploring and return its result or exact blocker. If that steer cannot be delivered or the same run needs attention again, stop it, preserve useful transcript findings, and launch only a fresh smaller replacement chunk. Never leave a needs-attention run indefinitely, launch a competing agent, or restart the whole workflow.
-13. Acceptance rule — package-level \`verified\` acceptance is a runtime gate, not a request for the child to report tests. Use it only with a non-empty \`acceptance.verify\` array of objects containing an \`id\` and executable \`command\`; commands mentioned in the task or child output do not count. If Main Pi will inspect and validate the chunk itself, omit acceptance and LemonPi will disable inferred package acceptance. Never resume a run that failed because its acceptance contract was malformed, because revival can inherit that contract; launch a fresh bounded chunk with corrected acceptance instead.
+13. Acceptance rule — LemonPi uses pi-subagents' role-neutral v1 run contract, where execution success, acceptance, review, and observed effects remain separate. Package-level \`verified\` acceptance is a runtime gate, not a request for the child to report tests. Use it only with a non-empty \`acceptance.verify\` array of objects containing an \`id\` and executable \`command\`; commands mentioned in the task or child output do not count. If Main Pi will inspect and validate the chunk itself, omit acceptance and LemonPi will disable inferred package acceptance. Never resume a run that failed because its acceptance contract was malformed, because revival can inherit that contract; launch a fresh bounded chunk with corrected acceptance instead.
 14. Budget ownership rule — do not set per-dispatch \`timeoutMs\`, \`maxRuntimeMs\`, \`turnBudget\`, \`toolBudget\`, or \`usageBudget\`. LemonPi removes model-generated budget fields before launch because guessed counters create arbitrary failures and package turn budgets can terminate only after wrap-up/grace boundaries. Scope work through small tasks and intervene from live activity evidence instead. Deliberate budgets stored by the user in package settings or an agent profile remain authoritative.
 15. Clarification ownership rule — Main Pi alone owns user clarification. When a user decision genuinely blocks scope, safety, or the next useful action and the answer cannot be discovered from available context, use \`ask_user_question\` instead of guessing or asking through unstructured chat. Do not interrupt for discoverable facts or non-blocking preferences, do not delegate user questioning, and do not let independent subagents solicit decisions separately; gather their uncertainty and ask the user once.
 16. Visible task-plan rule — use the \`todo\` tool for work with multiple meaningful steps so the user can see the current plan and live progress in LemonPi. Main Pi owns the session-level plan: create concise outcome-oriented tasks, keep at most one ordinary task in progress unless work is genuinely parallel, update status as the plan changes, and complete tasks only after inspecting the corresponding result. Do not create a checklist for a single trivial action, duplicate every tool call as a task, or use the checklist as a substitute for visible narration.
@@ -107,7 +107,7 @@ Main Pi may use read-only inspection, search, status, test, build, and git-manag
 </lemonpi-orchestration>`;
 
 const CLOSING_REPAIR = `The previous response ended after tool activity without a visible closing explanation. Do not call more tools. Give the user a concise, specific closing explanation now: state the outcome, what changed, what was verified, and any blocker or next step. If the task is incomplete, say exactly where it stopped and why.`;
-const DELEGATION_RECOVERY = `A delegated run failed and no replacement delegation was launched before the turn settled. Own the failure now: inspect the exact status/error and any partial output, identify whether the cause was a parent-imposed timeout, unavailable model/tool, configuration problem, or task failure, preserve valid partial work, and re-delegate only the next bounded chunk with corrected instructions and the required chunk-contract fields. Shrink the task instead of adding a per-dispatch timeout, turn budget, tool budget, or usage budget. If the error says the model produced no output or returned an empty response, do not resume the bloated failed session: salvage concrete transcript findings and launch a fresh-context replacement with a smaller question and explicit deliverable. If retrying cannot help because the blocker is external, give the user the exact blocker and the evidence instead of claiming recovery.`;
+const DELEGATION_RECOVERY = `A delegated run failed and no replacement delegation was launched before the turn settled. Own the failure now: inspect the exact status/error and any partial output, identify whether the cause was a parent-imposed timeout, unavailable model/tool, configuration problem, or task failure, preserve valid partial work, and re-delegate only the next bounded chunk with corrected instructions and the required execution-mode and chunk-contract fields. If a legacy completion guard says a read-only child made no edits, treat that as a classification error: recover and use its valid artifact instead of rerunning completed work. Shrink genuinely failed tasks instead of adding a per-dispatch timeout, turn budget, tool budget, or usage budget. If the error says the model produced no output or returned an empty response, do not resume the bloated failed session: salvage concrete transcript findings and launch a fresh-context replacement with a smaller question and explicit deliverable. If retrying cannot help because the blocker is external, give the user the exact blocker and the evidence instead of claiming recovery.`;
 const ATTENTION_RECOVERY = `A delegated run reported needs_attention and the previous response did not inspect or control it. Act now instead of narrating passive waiting. Use the subagent status/transcript controls for the exact run. If it remains alive without an active tool or new output, steer it once to return its result or blocker immediately. If intervention cannot be delivered, stop it and preserve useful transcript findings for one fresh, smaller replacement. Do not leave it marked running indefinitely and do not launch a competing writer.`;
 
 function visibleText(content: unknown): string {
@@ -171,13 +171,15 @@ const MATERIAL_RISK_REQUEST = /\b(?:security|authentication|authorization|permis
 const EXPLICIT_REVIEW_REQUEST = /\b(?:review|audit|second opinion|independent verification|threat model)\b/i;
 const EXPLICIT_MULTI_REVIEW_REQUEST = /\b(?:multiple|several|two|three|parallel|independent)\b.{0,32}\b(?:reviews?|reviewers?|audits?)\b|\b(?:reviews?|reviewers?|audits?)\b.{0,32}\b(?:multiple|several|two|three|parallel|independent)\b/i;
 const REVIEW_JUSTIFICATION = /\breview justification:\s*(?!none\b|n\/a\b)[^\n]{8,}/i;
-const CHUNK_OUTCOME = /\bchunk outcome\s*:/i;
-const CHUNK_IN_SCOPE = /\bin scope\s*:/i;
-const CHUNK_DONE_WHEN = /\bdone when\s*:/i;
-const CHUNK_OUT_OF_SCOPE = /\bout of scope\s*:/i;
+const CHUNK_OUTCOME = /(?:^|\n)\s*chunk outcome\s*:\s*\S/i;
+const CHUNK_IN_SCOPE = /(?:^|\n)\s*in scope\s*:\s*\S/i;
+const CHUNK_DONE_WHEN = /(?:^|\n)\s*done when\s*:\s*\S/i;
+const CHUNK_OUT_OF_SCOPE = /(?:^|\n)\s*out of scope\s*:\s*\S/i;
 const MAIN_MUTATION_TOOLS = new Set(["edit", "write", "apply_patch", "patch", "write_file", "edit_file", "create_file", "delete_file", "move_file"]);
 const IMPLEMENTATION_TASK = /\b(?:implement|edit|modify|fix|add|remove|refactor|wire|style|replace|rename|delete|patch)\b/i;
-const EXPLICIT_READ_ONLY_TASK = /\b(?:read[- ]only|no code changes|do not (?:edit|write|modify)|without (?:editing|writing|modifying)|plan only|report only|analysis only)\b/i;
+const EXPLICIT_READ_ONLY_TASK = /\b(?:execution mode:\s*read[- ]only|read[- ]only|no code changes|do not (?:edit|write|modify)|without (?:editing|writing|modifying)|plan only|report only|analysis only)\b/i;
+const EXECUTION_MODE = /^\s*execution mode\s*:\s*(read[- ]only|implementation)\s*(?:\n|$)/i;
+const PACKAGE_READ_ONLY_GUARD = "Do not modify any project files. Return only the requested read-only artifact.";
 
 interface DelegatedSpec {
   agent: string;
@@ -246,9 +248,38 @@ function hasBoundedChunkContract(task: string): boolean {
     && CHUNK_OUT_OF_SCOPE.test(task);
 }
 
-function delegatesImplementation(spec: DelegatedSpec): boolean {
-  return hasBoundedChunkContract(spec.task)
-    || (IMPLEMENTATION_TASK.test(spec.task) && !EXPLICIT_READ_ONLY_TASK.test(spec.task));
+export function declaredExecutionMode(task: string): "read-only" | "implementation" | undefined {
+  const match = EXECUTION_MODE.exec(task);
+  if (!match) return undefined;
+  return match[1].toLowerCase().replace(" ", "-") as "read-only" | "implementation";
+}
+
+export function delegatesImplementation(spec: DelegatedSpec): boolean {
+  const mode = declaredExecutionMode(spec.task);
+  if (mode === "read-only" || EXPLICIT_READ_ONLY_TASK.test(spec.task)) return false;
+  if (mode === "implementation") return true;
+  return hasBoundedChunkContract(spec.task) && IMPLEMENTATION_TASK.test(spec.task);
+}
+
+function reinforceReadOnlyContracts(value: unknown): void {
+  const visit = (candidate: unknown) => {
+    const record = asRecord(candidate);
+    if (!record) return;
+    if (typeof record.agent === "string" && typeof record.task === "string" && declaredExecutionMode(record.task) === "read-only") {
+      if (!record.task.includes(PACKAGE_READ_ONLY_GUARD)) record.task = `${record.task.trimEnd()}\n\n${PACKAGE_READ_ONLY_GUARD}`;
+    }
+    for (const key of ["tasks", "chain", "parallel"] as const) {
+      const nested = record[key];
+      if (Array.isArray(nested)) nested.forEach(visit);
+      else if (nested !== undefined) visit(nested);
+    }
+  };
+  visit(value);
+}
+
+export function applyDelegationSafetyContracts(input: Record<string, unknown>): void {
+  if (input.agentContract === undefined) input.agentContract = { version: 1 };
+  reinforceReadOnlyContracts(input);
 }
 
 function escapedRegExp(value: string): string {
@@ -592,6 +623,13 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       }
       const reviewers = specs.filter((spec) => spec.agent === "reviewer");
       const writers = specs.filter(delegatesImplementation);
+      const missingExecutionMode = specs.find((spec) => declaredExecutionMode(spec.task) === undefined);
+      if (missingExecutionMode) {
+        return {
+          block: true,
+          reason: `LemonPi requires explicit mutation intent for ${missingExecutionMode.agent}. Begin the task with exactly \`Execution mode: read-only\` for an artifact-only result or \`Execution mode: implementation\` when the child must change project files. A plan that describes implementation chunks is still read-only.`,
+        };
+      }
       const missingChildChecklist = specs.find((spec) => parseChildChecklist(spec.task, spec.agent).length === 0);
       if (missingChildChecklist) {
         return {
@@ -665,6 +703,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           reason: "LemonPi makes Main Pi the integration owner unless explicit runtime verify commands are supplied.",
         };
       }
+      applyDelegationSafetyContracts(input);
       addChildTodoGuidance(input);
     }
 

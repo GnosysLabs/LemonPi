@@ -2,6 +2,7 @@
   "name": "lemonpi-narration",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "Visible progress narration and closing-summary guard for LemonPi",
   "pi": {
     "extensions": [
