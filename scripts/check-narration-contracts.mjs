@@ -19,6 +19,7 @@ import {
   shouldSuppressStatusPoll,
   shouldWakeForPlanContinuation,
   subagentStatusDisposition,
+  workerSummaryFromTask,
 } from "../src-tauri/resources/lemonpi-narration/extensions/narration.ts";
 
 const planningTask = "Produce a concise architecture plan. Do not modify any project files.";
@@ -48,6 +49,11 @@ assert.match(authoredWorkerSummaryIssue(undefined), /required/);
 assert.match(authoredWorkerSummaryIssue("one two three four five six seven eight nine"), /eight words/);
 assert.match(authoredWorkerSummaryIssue("Complete delegated outcome"), /actual outcome/);
 assert.equal(authoredWorkerSummaryIssue("Implement compact status state"), undefined);
+assert.equal(
+  workerSummaryFromTask("Continue the correction.\nWorker summary: Repair session creation RPC"),
+  "Repair session creation RPC",
+);
+assert.equal(workerSummaryFromTask("Continue the correction."), undefined);
 
 const writerSpawn = independentSpawnParams(writerLaunch);
 assert.equal(writerSpawn.implementation, true);

@@ -148,7 +148,7 @@ You are Main Pi, the read-only supervisor and integration owner. You do not impl
 Independent dispatch is the default:
 
 1. Before meaningful execution, spend only a brief pass mapping the whole outcome graph: implementation, investigation, UX, platform, validation preparation, integration, and any material review boundary. Look several steps ahead. A later-step lane may start now whenever its inputs are already stable.
-2. Use \`lemonpi_dispatch\` for every implementation lane and whenever two or more read-only lanes are ready, with one lane per independent outcome. Every lane must include a concrete \`summary\` of eight words or fewer describing that worker's purpose for the user; never use runner boilerplate, role names, or generic phrases. LemonPi launches every lane as a separate async run, not as a grouped subagent job. Each child completion wakes Main Pi independently, so inspect and integrate that result immediately while siblings continue. Refill newly-ready work without waiting for the original set to finish.
+2. Use \`lemonpi_dispatch\` for every implementation lane and whenever two or more read-only lanes are ready, with one lane per independent outcome. Every lane must include a concrete \`summary\` of eight words or fewer describing that worker's purpose for the user; never use runner boilerplate, role names, or generic phrases. Every \`subagent resume\` message must likewise include a fresh \`Worker summary: ...\` line describing the revived worker's current purpose in eight words or fewer; update it even when continuing the same broad task. LemonPi launches every lane as a separate async run, not as a grouped subagent job. Each child completion wakes Main Pi independently, so inspect and integrate that result immediately while siblings continue. Refill newly-ready work without waiting for the original set to finish.
 3. A direct single read-only delegation is appropriate only when exactly one useful read-only lane is ready. There is no numerical quota: never manufacture agents, but never serialize independent work for convenience, superficial file overlap, a dirty checkout, or because the first lane is easiest to describe.
 4. Grouped \`subagent.tasks\` and chains are exceptional. Use them only when the user needs one atomic aggregate result whose partial child results are not independently actionable. Ordinary parallel research, implementation, review, and validation are independent lanes.
 5. Choose agents from the live roster by capability, including custom user agents. Call \`subagent({ action: "list" })\` once when the roster is not already known and role choice matters, then reuse it. Use planners, designers, scouts, context builders, reviewers, or other specialists when their output changes a real decision; do not create ceremonial diversity or default every task to worker/planner/reviewer.
@@ -375,6 +375,14 @@ export function normalizeWorkerSummary(value: unknown, task: string): string {
     || conciseTaskSummary(task);
   return candidate.split(/\s+/).filter(Boolean).slice(0, 8).join(" ").slice(0, 96)
     || "Complete delegated outcome";
+}
+
+export function workerSummaryFromTask(task: string): string | undefined {
+  const line = task.replace(/\r\n/g, "\n").split("\n")
+    .find((candidate) => /^\s*worker summary\s*:/i.test(candidate));
+  if (!line) return undefined;
+  const summary = cleanChecklistText(line.replace(/^\s*worker summary\s*:\s*/i, ""));
+  return summary || undefined;
 }
 
 export function authoredWorkerSummaryIssue(value: unknown): string | undefined {
@@ -1907,8 +1915,21 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     }
     if (input.action === "resume") {
       const message = typeof input.message === "string" ? input.message.trimEnd() : "";
-      const targetedMessage = SLICE_TARGET.test(message) ? message : `${message}\nSlice target: under 5 minutes`.trimStart();
-      const compiledMessage = appendDefaultChecklist(targetedMessage, conciseTaskSummary(targetedMessage));
+      const authoredSummary = workerSummaryFromTask(message);
+      const summaryIssue = authoredWorkerSummaryIssue(authoredSummary);
+      if (summaryIssue) {
+        return {
+          block: true,
+          reason: `Reviving a worker requires a fresh \"Worker summary: ...\" line that ${summaryIssue}. Retry the same resume with the current purpose in eight words or fewer so Command Center can update the worker card.`,
+        };
+      }
+      const summary = normalizeWorkerSummary(authoredSummary, message);
+      const canonicalMessage = message.replace(
+        /^\s*worker summary\s*:.*$/im,
+        `Worker summary: ${summary}`,
+      );
+      const targetedMessage = SLICE_TARGET.test(canonicalMessage) ? canonicalMessage : `${canonicalMessage}\nSlice target: under 5 minutes`.trimStart();
+      const compiledMessage = appendDefaultChecklist(targetedMessage, summary);
       const resumedTasks = parseChildChecklist(compiledMessage, CURRENT_CHILD_OWNER);
       if (!message.includes("<lemonpi-child-checklist>")) {
         input.message = `${compiledMessage}${childTodoGuidance(CURRENT_CHILD_OWNER, resumedTasks)}`;
