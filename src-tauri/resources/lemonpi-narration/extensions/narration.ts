@@ -101,7 +101,7 @@ Routing policy:
 13. Acceptance rule — LemonPi uses pi-subagents' role-neutral v1 run contract, where execution success, acceptance, review, and observed effects remain separate. Package-level \`verified\` acceptance is a runtime gate, not a request for the child to report tests. Use it only with a non-empty \`acceptance.verify\` array of objects containing an \`id\` and executable \`command\`; commands mentioned in the task or child output do not count. If Main Pi will inspect and validate the chunk itself, omit acceptance and LemonPi will disable inferred package acceptance. Never resume a run that failed because its acceptance contract was malformed, because revival can inherit that contract; launch a fresh bounded chunk with corrected acceptance instead.
 14. Budget ownership rule — do not set per-dispatch \`timeoutMs\`, \`maxRuntimeMs\`, \`turnBudget\`, \`toolBudget\`, or \`usageBudget\`. LemonPi removes model-generated budget fields before launch because guessed counters create arbitrary failures and package turn budgets can terminate only after wrap-up/grace boundaries. Scope work through small tasks and intervene from live activity evidence instead. Deliberate budgets stored by the user in package settings or an agent profile remain authoritative.
 15. Clarification ownership rule — Main Pi alone owns user clarification. When a user decision genuinely blocks scope, safety, or the next useful action and the answer cannot be discovered from available context, use \`ask_user_question\` instead of guessing or asking through unstructured chat. Do not interrupt for discoverable facts or non-blocking preferences, do not delegate user questioning, and do not let independent subagents solicit decisions separately; gather their uncertainty and ask the user once.
-16. Visible task-plan rule — use the \`todo\` tool for work with multiple meaningful steps so the user can see the current plan and live progress in LemonPi. Main Pi owns the session-level plan: create concise outcome-oriented tasks, keep at most one ordinary task in progress unless work is genuinely parallel, update status as the plan changes, and complete tasks only after inspecting the corresponding result. Do not create a checklist for a single trivial action, duplicate every tool call as a task, or use the checklist as a substitute for visible narration.
+16. Visible task-plan rule — use the \`todo\` tool for work with multiple meaningful steps so the user can see the current plan and live progress in LemonPi. Main Pi owns the session-level plan: create concise outcome-oriented tasks, keep at most one ordinary task in progress unless work is genuinely parallel, update status as the plan changes, and complete tasks only after inspecting the corresponding result. Do not settle while the plan has unfinished work unless a delegated agent is actively carrying it; continue the next action, or move a genuinely blocked task out of in-progress state and explain what input or external change is required. Do not create a checklist for a single trivial action, duplicate every tool call as a task, or use the checklist as a substitute for visible narration.
 
 Main Pi may use read-only inspection, search, status, test, build, and git-management operations. It must not call file editing/writing tools or use shell commands to mutate project files. Launch implementation asynchronously, do only brief useful read-only work, then return control to the user; completion events provide the integration wake-up. For explanation, diagnosis, review, or other read-only requests, do not launch an implementation worker.
 </lemonpi-orchestration>`;
@@ -109,6 +109,7 @@ Main Pi may use read-only inspection, search, status, test, build, and git-manag
 const CLOSING_REPAIR = `The previous response ended after tool activity without a visible closing explanation. Do not call more tools. Give the user a concise, specific closing explanation now: state the outcome, what changed, what was verified, and any blocker or next step. If the task is incomplete, say exactly where it stopped and why.`;
 const DELEGATION_RECOVERY = `A delegated run failed and no replacement delegation was launched before the turn settled. Own the failure now: inspect the exact status/error and any partial output, identify whether the cause was a parent-imposed timeout, unavailable model/tool, configuration problem, or task failure, preserve valid partial work, and re-delegate only the next bounded chunk with corrected instructions and the required execution-mode and chunk-contract fields. If a legacy completion guard says a read-only child made no edits, treat that as a classification error: recover and use its valid artifact instead of rerunning completed work. Shrink genuinely failed tasks instead of adding a per-dispatch timeout, turn budget, tool budget, or usage budget. If the error says the model produced no output or returned an empty response, do not resume the bloated failed session: salvage concrete transcript findings and launch a fresh-context replacement with a smaller question and explicit deliverable. If retrying cannot help because the blocker is external, give the user the exact blocker and the evidence instead of claiming recovery.`;
 const ATTENTION_RECOVERY = `A delegated run reported needs_attention and the previous response did not inspect or control it. Act now instead of narrating passive waiting. Use the subagent status/transcript controls for the exact run. If it remains alive without an active tool or new output, steer it once to return its result or blocker immediately. If intervention cannot be delivered, stop it and preserve useful transcript findings for one fresh, smaller replacement. Do not leave it marked running indefinitely and do not launch a competing writer.`;
+const PLAN_CONTINUATION = `Your visible task plan still contains unfinished work, but you settled with no delegated agent active. Continue the stranded plan now instead of waiting for another user message. Give the user a concise visible update, then execute or delegate the next bounded action. If the task is genuinely blocked or waiting for the user, move it out of in-progress state and explain the exact blocker; never leave an idle task spinning.`;
 
 function visibleText(content: unknown): string {
   if (typeof content === "string") return content.trim();
@@ -420,11 +421,50 @@ function delegationFailure(result: unknown, isError: boolean): string | undefine
   return String(failedResult?.error ?? details?.error ?? root?.error ?? (content || "Delegated run failed.")).slice(0, 800);
 }
 
+interface RemainingPlanTask {
+  id: number;
+  subject: string;
+  status: "in_progress" | "pending";
+}
+
+export function remainingPlanFromTodoResult(value: unknown): { task?: RemainingPlanTask } | undefined {
+  const root = asRecord(value);
+  const details = asRecord(root?.details) ?? root;
+  if (!details || !Array.isArray(details.tasks) || typeof details.nextId !== "number") return undefined;
+  const tasks = details.tasks.map(asRecord).filter(Boolean);
+  const candidate = tasks.find((task) => task?.status === "in_progress")
+    ?? tasks.find((task) => task?.status === "pending");
+  if (!candidate) return {};
+  if (typeof candidate.id !== "number" || typeof candidate.subject !== "string") return undefined;
+  return {
+    task: {
+      id: candidate.id,
+      subject: candidate.subject,
+      status: candidate.status as RemainingPlanTask["status"],
+    },
+  };
+}
+
+export function shouldWakeForPlanContinuation(input: {
+  hasRemainingTask: boolean;
+  activeDelegationCount: number;
+  writerOccupied: boolean;
+  intentionallyStopped: boolean;
+  attempts: number;
+}): boolean {
+  return input.hasRemainingTask
+    && input.activeDelegationCount === 0
+    && !input.writerOccupied
+    && !input.intentionallyStopped
+    && input.attempts < 2;
+}
+
 export default function lemonPiNarration(pi: ExtensionAPI) {
   let sawToolActivity = false;
   let visibleExplanationAfterLastTool = false;
   let lastAssistantStopReason: string | undefined;
-  let repairRequested = false;
+  let delegationRepairRequested = false;
+  let closingRepairAttempts = 0;
   let delegationFailurePending = false;
   let lastDelegationFailure: string | undefined;
   let latestUserRequest = "";
@@ -438,6 +478,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   let attentionRecovery: { runId: string; index?: number } | undefined;
   let attentionActionObserved = false;
   let attentionRepairRequested = false;
+  let remainingPlanTask: RemainingPlanTask | undefined;
+  let planContinuationAttempts = 0;
+  const activeDelegationRuns = new Set<string>();
   const delegationToolCalls = new Set<string>();
   const rosterListToolCalls = new Map<string, number>();
   const writerToolCalls = new Map<string, { agent: string; async: boolean }>();
@@ -483,11 +526,13 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   pi.events.on("subagent:async-started", (payload) => {
     const runId = delegationRunId(payload);
     if (!runId) return;
+    activeDelegationRuns.add(runId);
     integratedTerminalRuns.delete(terminalRunKey(delegationSessionId(payload), runId));
   });
 
   pi.events.on("subagent:async-complete", (payload) => {
     const runId = delegationRunId(payload);
+    if (runId) activeDelegationRuns.delete(runId);
     const status = writerLifecycleStatus(payload);
     if (runId && status) {
       terminalWriterRuns.set(runId, status);
@@ -729,7 +774,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       sawToolActivity = false;
       visibleExplanationAfterLastTool = false;
       lastAssistantStopReason = undefined;
-      repairRequested = false;
+      delegationRepairRequested = false;
+      closingRepairAttempts = 0;
+      planContinuationAttempts = 0;
       delegationFailurePending = false;
       lastDelegationFailure = undefined;
       latestUserRequest = notification;
@@ -756,7 +803,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       sawToolActivity = false;
       visibleExplanationAfterLastTool = false;
       lastAssistantStopReason = undefined;
-      repairRequested = false;
+      delegationRepairRequested = false;
+      closingRepairAttempts = 0;
       delegationFailurePending = /^(Background task|Detached foreground task) failed:/m.test(notification);
       lastDelegationFailure = delegationFailurePending ? notification.slice(0, 800) : undefined;
     }
@@ -774,6 +822,16 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_end", async (event) => {
+    if (event.toolName === "todo" && !event.isError) {
+      const plan = remainingPlanFromTodoResult(event.result);
+      if (plan) {
+        const nextTask = plan.task;
+        if (nextTask?.id !== remainingPlanTask?.id || nextTask?.status !== remainingPlanTask?.status) {
+          planContinuationAttempts = 0;
+        }
+        remainingPlanTask = nextTask;
+      }
+    }
     const listedRosterGeneration = rosterListToolCalls.get(event.toolCallId);
     rosterListToolCalls.delete(event.toolCallId);
     if (listedRosterGeneration === rosterGeneration) {
@@ -802,6 +860,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
 
   pi.on("agent_settled", async () => {
     const intentionallyStopped = lastAssistantStopReason === "aborted" || lastAssistantStopReason === "error";
+    const strandedPlanTask = remainingPlanTask;
     if (attentionRecovery && !attentionActionObserved && !attentionRepairRequested && !intentionallyStopped) {
       attentionRepairRequested = true;
       pi.sendMessage(
@@ -819,8 +878,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       attentionActionObserved = false;
       attentionRepairRequested = false;
     }
-    if (delegationFailurePending && !intentionallyStopped && !repairRequested) {
-      repairRequested = true;
+    if (delegationFailurePending && !intentionallyStopped && !delegationRepairRequested) {
+      delegationRepairRequested = true;
       delegationFailurePending = false;
       pi.sendMessage(
         {
@@ -832,9 +891,27 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       );
       return;
     }
-    if (!sawToolActivity || visibleExplanationAfterLastTool || intentionallyStopped || repairRequested) return;
+    if (shouldWakeForPlanContinuation({
+      hasRemainingTask: Boolean(strandedPlanTask),
+      activeDelegationCount: activeDelegationRuns.size,
+      writerOccupied,
+      intentionallyStopped,
+      attempts: planContinuationAttempts,
+    }) && strandedPlanTask) {
+      planContinuationAttempts += 1;
+      pi.sendMessage(
+        {
+          customType: "lemonpi-plan-continuation",
+          content: `${PLAN_CONTINUATION}\n\nStranded task #${strandedPlanTask.id}: ${strandedPlanTask.subject} (${strandedPlanTask.status})`,
+          display: false,
+        },
+        { deliverAs: "followUp", triggerTurn: true },
+      );
+      return;
+    }
+    if (!sawToolActivity || visibleExplanationAfterLastTool || intentionallyStopped || closingRepairAttempts >= 2) return;
 
-    repairRequested = true;
+    closingRepairAttempts += 1;
     pi.sendMessage(
       {
         customType: "lemonpi-narration-repair",

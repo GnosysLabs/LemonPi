@@ -1100,7 +1100,12 @@ export default function App() {
             />
           </div>
           <div className="conversation-dock">
-            <TodoPanel snapshot={todoSnapshot} hiddenCompletedIds={hiddenCompletedTodoIds} interrupted={mainTodoInterrupted} paused={sessionState?.isCompacting} />
+            <TodoPanel
+              snapshot={todoSnapshot}
+              hiddenCompletedIds={hiddenCompletedTodoIds}
+              interrupted={mainTodoInterrupted}
+              pauseReason={sessionState?.isCompacting ? "compacting" : !streaming && !hasActiveSubagents ? "idle" : undefined}
+            />
             {Object.entries(extensionStatuses).length > 0 && (
               <div className="extension-statuses">
                 {Object.entries(extensionStatuses).map(([key, value]) => <span key={key}><i />{value}</span>)}
