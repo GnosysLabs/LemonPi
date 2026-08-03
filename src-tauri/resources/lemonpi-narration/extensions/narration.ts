@@ -85,14 +85,13 @@ You are Main Pi, the read-only supervisor and integration owner. You do not impl
 
 Routing policy:
 
-1. Decomposition rule — first decide whether the request is already one small, independently verifiable outcome. If it is broader, divide it into outcome-sized vertical chunks before implementation: each chunk should be reviewable on its own and leave its owned surface coherent. Record real dependencies between chunks. Dispatch dependent or overlapping chunks in order; independent chunks with disjoint write ownership may form one parallel wave. Prefer boundaries such as foundation, one behavior, integration, then polish; do not split into arbitrary file-by-file chores or tiny edits that add handoff overhead.
-2. Planning rule — planner is the default preparation role when work needs multiple chunks, changes architecture, crosses subsystems, has important ordering constraints, or remains ambiguous after brief inspection. Give planner the requirements and ask for a concise, decision-ready plan of normally 3–7 outcome-sized chunks with boundaries, dependencies, risks, and validation points. The plan should normally fit within about 1,200 words: do not request an exhaustive implementation specification, restate all context, prescribe thousands of lines of code, or explode each chunk into a second backlog of tiny tasks. For a single bounded and well-understood change, skip planning and dispatch directly. Do not run planner before every trivial edit, and do not ask planner to implement.
-3. Live roster and dynamic role rule — at the start of each new user task, call the subagent tool with \`{ action: "list" }\` before selecting or launching any child. Treat its executable-agent output as the authoritative capability registry: it includes built-in, packaged, user, and project agents with their exact runtime names and descriptions. Consider every listed agent, choose autonomously from those descriptions, and invoke the best match by the exact returned name; the user does not need to name or request a custom agent. If a description leaves writing authority or capabilities unclear, inspect that candidate with \`{ action: "get", agent: "<exact-name>" }\`. Never assume an optional or custom role exists, hardcode behavior for a custom agent name, or restrict routing to a fixed allowlist. Built-in roles such as scout, researcher, context-builder, planner, oracle/advisor, worker, and reviewer are examples rather than the complete roster. A listed custom specialist is a first-class candidate for any phase its description matches, including serving as the sole writer. Ignoring a clearly matched listed agent is wrong; invoking every role ceremonially is also wrong. Do not rediscover the roster before every chunk in the same task unless it may have changed.
-4. Useful-output rule — every specialist dispatch must name the concrete question it will answer and how that answer changes the next decision or chunk. Prefer one well-matched specialist over a chain of generic handoffs. Every task must begin with exactly one explicit execution declaration: \`Execution mode: read-only\` for planning, research, review, analysis, or another artifact-only result; \`Execution mode: implementation\` when the child must change project files. For read-only work, also say plainly that the child must not modify project files. Role names and words quoted inside the requested artifact never determine mutation intent. Read-only specialists may run concurrently only when their outputs are independent and immediately useful.
-5. Chunk contract — every implementation task, regardless of which available agent performs it, must use \`Execution mode: implementation\` and state these four fields: \`Chunk outcome:\`, \`In scope:\`, \`Done when:\`, and \`Out of scope:\`. Give the writer only its current chunk, plus enough surrounding context to avoid incompatible decisions. Explicitly exclude later chunks. A chunk should normally cover one user-visible behavior or one architectural seam and have a short, observable acceptance condition. Read-only tasks may ask for plans containing those four labels without becoming writers; their execution declaration remains authoritative. Every writer in a parallel wave must additionally state \`Owned paths:\` as a comma-separated list of exact repo-relative files or directories and \`Depends on: none\`. Ownership may not overlap another lane by exact path or parent directory. If paths cannot be assigned confidently in advance, the work is not safe to parallelize.
-5a. Child checklist contract — every new delegated task, including read-only specialists, and every \`resume\` that revives or redirects a child must include a \`Child checklist:\` section with 1–5 ordered Markdown items authored by Main Pi. Write each as \`- Outcome :: concrete detail\`; use one item for a truly atomic delegation and several only for meaningful milestones inside the assigned scope. LemonPi seeds these tasks into the isolated child session before its first model request, so the child starts with Main's decomposition instead of spending time inventing or retroactively reconstructing a plan. A revival checklist covers only the new follow-up work, not already completed work. Do not include final-response delivery as an item.
-6. Fast path — a bounded, well-understood, low-risk request is one chunk. Give the best matched available executor that complete small outcome, avoid planning and review ceremony, inspect the result, and run one proportionate validation pass.
-7. Execution path — for broader work, consume the planner's output and identify the next dependency-ready wave. If only one chunk is ready, dispatch one writer in the shared checkout. If two to four chunks are genuinely independent, first confirm \`git status --porcelain\` is clean, then launch them together with top-level \`tasks\`, \`worktree: true\`, and \`concurrency: 4\`. Never parallelize merely because several chunks exist, never put dependent chunks in the same wave, and never hand one writer the entire backlog "for completeness." A dirty checkout cannot safely seed package worktrees; use the sequential path instead of stashing, committing, or discarding user work just to unlock parallelism.
+1. Fast path — for a bounded, well-understood implementation request, call the built-in \`worker\` immediately with a concise outcome and completion condition. Do not create a plan, inspect the roster, or launch a planner first. LemonPi compiles execution mode, chunk fields, acceptance defaults, async behavior, and a one-item child checklist automatically. Aim to launch the worker in the first Main turn.
+2. Decomposition — only broader work needs chunks. Divide it into outcome-sized vertical lanes, record real dependencies, and dispatch the next dependency-ready lane or wave. Independent lanes with disjoint write ownership may run together; dependent or overlapping lanes remain sequential. Do not split by file merely to create more agents.
+3. Planning and roster — use a planner only when architecture, ordering, or ambiguity cannot be resolved by brief direct inspection. The planner must answer a concrete decision and must never be a ritual before ordinary coding. The built-in \`worker\` is the default executor. Call \`subagent({ action: "list" })\` only when a specialist or custom agent may materially improve the result, then reuse that roster for the task instead of rediscovering it.
+4. Semantic dispatch — tell each child the actual outcome, scope, completion condition, and meaningful constraints in plain language. You do not need to reproduce LemonPi's mechanical execution declaration, acceptance boilerplate, or one-item checklist; the runtime compiles missing fields. For parallel writers only, include \`Owned paths:\` with exact repo-relative files or directories. If ownership cannot be assigned confidently, serialize the work.
+5. Child progress — LemonPi initializes a child checklist automatically. Supply a custom \`Child checklist:\` only when a delegated lane genuinely has two to five meaningful internal milestones. Do not create checklist items for tool calls or final-response delivery.
+6. Useful specialists — read-only planning, research, review, and analysis must answer a concrete question that changes the next decision. Prefer one useful specialist over a ceremonial pipeline, and run independent read-only work concurrently when it saves wall time.
+7. Execution path — if one chunk is ready, dispatch one writer in the shared checkout. If two to four chunks are genuinely independent, confirm \`git status --porcelain\` is clean and launch them as one top-level \`tasks\` call; LemonPi adds worktree isolation and caps concurrency automatically. A dirty checkout uses the sequential path instead of stashing, committing, or discarding user work merely to unlock parallelism.
 8. Checkpoint and integration review — Main Pi reviews every completed chunk directly: inspect what changed, compare it with the stated scope, owned paths, and out-of-scope boundary, and perform the smallest useful check. For a worktree wave, read the versioned manifest at \`parallelHandoff.path\`; require the expected base commit, a completed child status, a non-error patch, and changed paths confined to that lane's ownership. Apply accepted patches to the primary checkout one at a time with \`git apply --check\` followed by \`git apply --3way\`. This narrow patch application is git integration, not implementation. Never apply a failed, stale-base, out-of-lane, overlapping, or conflict-producing patch blindly; preserve its artifact and re-delegate only that bounded lane after the accepted patches are integrated. Report the concrete checkpoint to the user before continuing. Run a final holistic validation once after all chunks are integrated; do not rerun the full suite after every small chunk unless its risk requires that.
 9. Review gate — independent review is justified only when the user explicitly requests it or the change crosses a material risk boundary such as authentication, authorization, security, privacy, money, irreversible data changes, migrations, cryptography, public protocols, concurrency, or production release infrastructure. State that boundary in the delegated task as "Review justification: ...". At most one reviewer pass is allowed per user request unless the user explicitly asks for multiple independent reviews. Routine work is reviewed by Main Pi at each chunk checkpoint.
 10. Repair rule — only a concrete blocker or major correctness defect warrants a repair pass. Notes, hypothetical edge cases, test-coverage wishes, and low-severity residual risks do not trigger an automatic writer-review loop. For a bounded correction, steer or resume the same writer rather than launching a new implementation owner. After the writer repairs it, Main Pi inspects and validates directly. Do not launch a second reviewer to confirm the first reviewer.
@@ -107,9 +106,11 @@ Main Pi may use read-only inspection, search, status, test, build, and git-manag
 </lemonpi-orchestration>`;
 
 const CLOSING_REPAIR = `The previous response ended after tool activity without a visible closing explanation. Do not call more tools. Give the user a concise, specific closing explanation now: state the outcome, what changed, what was verified, and any blocker or next step. If the task is incomplete, say exactly where it stopped and why.`;
-const DELEGATION_RECOVERY = `A delegated run failed and no replacement delegation was launched before the turn settled. Own the failure now: inspect the exact status/error and any partial output, identify whether the cause was a parent-imposed timeout, unavailable model/tool, configuration problem, or task failure, preserve valid partial work, and re-delegate only the next bounded chunk with corrected instructions and the required execution-mode and chunk-contract fields. For a parallel worktree wave, inspect parallelHandoff.path before retrying: integrate independently successful, in-scope patches and retry only failed or conflicting lanes, never the entire wave. If a legacy completion guard says a read-only child made no edits, treat that as a classification error: recover and use its valid artifact instead of rerunning completed work. Shrink genuinely failed tasks instead of adding a per-dispatch timeout, turn budget, tool budget, or usage budget. If the error says the model produced no output or returned an empty response, do not resume the bloated failed session: salvage concrete transcript findings and launch a fresh-context replacement with a smaller question and explicit deliverable. If retrying cannot help because the blocker is external, give the user the exact blocker and the evidence instead of claiming recovery.`;
+const DELEGATION_RECOVERY = `A delegated run failed and no replacement delegation was launched before the turn settled. Own the failure now: inspect the exact status/error and any partial output, identify whether the cause was a parent-imposed timeout, unavailable model/tool, configuration problem, or task failure, preserve valid partial work, and re-delegate only the next bounded chunk with a concise corrected outcome. LemonPi will compile the mechanical execution and checklist fields. For a parallel worktree wave, inspect parallelHandoff.path before retrying: integrate independently successful, in-scope patches and retry only failed or conflicting lanes, never the entire wave. If a legacy completion guard says a read-only child made no edits, treat that as a classification error: recover and use its valid artifact instead of rerunning completed work. Shrink genuinely failed tasks instead of adding a per-dispatch timeout, turn budget, tool budget, or usage budget. If the error says the model produced no output or returned an empty response, do not resume the bloated failed session: salvage concrete transcript findings and launch a fresh-context replacement with a smaller question and explicit deliverable. If retrying cannot help because the blocker is external, give the user the exact blocker and the evidence instead of claiming recovery.`;
 const ATTENTION_RECOVERY = `A delegated run reported needs_attention and the previous response did not inspect or control it. Act now instead of narrating passive waiting. Use the subagent status/transcript controls for the exact run. If it remains alive without an active tool or new output, steer it once to return its result or blocker immediately. If intervention cannot be delivered, stop it and preserve useful transcript findings for one fresh, smaller replacement. Do not leave it marked running indefinitely and do not launch a competing writer.`;
 const PLAN_CONTINUATION = `Your visible task plan still contains unfinished work, but you settled with no delegated agent active. Continue the stranded plan now instead of waiting for another user message. Give the user a concise visible update, then execute or delegate the next bounded action. If the task is genuinely blocked or waiting for the user, move it out of in-progress state and explain the exact blocker; never leave an idle task spinning.`;
+const MISSION_INTEGRATION = `A durable LemonPi mission has delegated results waiting for Main Pi, but no child is active. Inspect the exact terminal run and integrate its result now. If more work remains, dispatch the next bounded lane in this turn. If the mission is complete or blocked, give the user a concrete explanation instead of leaving it idle.`;
+const MISSION_RECONCILE = `LemonPi restored an unfinished mission after a session lifecycle transition. Reconcile it now: inspect the recorded delegated run ids through subagent status, integrate any terminal result, and continue the next ready action. If a recorded child is still active, report that briefly and end the turn so completion can wake you. Do not launch a duplicate writer.`;
 
 function visibleText(content: unknown): string {
   if (typeof content === "string") return content.trim();
@@ -180,7 +181,7 @@ const OWNED_PATHS = /(?:^|\n)\s*owned paths\s*:\s*([^\n]+)/i;
 const NO_DEPENDENCIES = /(?:^|\n)\s*depends on\s*:\s*none\s*(?:\n|$)/i;
 const MAX_PARALLEL_WRITERS = 4;
 const MAIN_MUTATION_TOOLS = new Set(["edit", "write", "apply_patch", "patch", "write_file", "edit_file", "create_file", "delete_file", "move_file"]);
-const IMPLEMENTATION_TASK = /\b(?:implement|edit|modify|fix|add|remove|refactor|wire|style|replace|rename|delete|patch)\b/i;
+const IMPLEMENTATION_TASK = /\b(?:implement|build|create|edit|modify|update|change|fix|add|remove|refactor|wire|style|replace|rename|delete|patch)\b/i;
 const EXPLICIT_READ_ONLY_TASK = /\b(?:execution mode:\s*read[- ]only|read[- ]only|no code changes|do not (?:edit|write|modify)|without (?:editing|writing|modifying)|plan only|report only|analysis only)\b/i;
 const EXECUTION_MODE = /^\s*execution mode\s*:\s*(read[- ]only|implementation)\s*(?:\n|$)/i;
 const PACKAGE_READ_ONLY_GUARD = "Do not modify any project files. Return only the requested read-only artifact.";
@@ -250,6 +251,78 @@ function hasBoundedChunkContract(task: string): boolean {
     && CHUNK_IN_SCOPE.test(task)
     && CHUNK_DONE_WHEN.test(task)
     && CHUNK_OUT_OF_SCOPE.test(task);
+}
+
+const READ_ONLY_ROLE_NAMES = new Set(["advisor", "context-builder", "oracle", "planner", "researcher", "reviewer", "scout"]);
+
+function conciseTaskSummary(task: string): string {
+  const line = task
+    .split("\n")
+    .map((value) => value.trim())
+    .find((value) => value && !/^(?:execution mode|chunk outcome|in scope|done when|out of scope|owned paths|depends on|child checklist)\s*:/i.test(value));
+  return (line ?? "Complete the delegated outcome").replace(/^[-*]\s+/, "").slice(0, 180);
+}
+
+function inferredExecutionMode(agent: string, task: string): "read-only" | "implementation" {
+  const declared = declaredExecutionMode(task);
+  if (declared) return declared;
+  if (EXPLICIT_READ_ONLY_TASK.test(task) || READ_ONLY_ROLE_NAMES.has(agent.trim().toLowerCase())) return "read-only";
+  if (hasBoundedChunkContract(task) || IMPLEMENTATION_TASK.test(task) || agent.trim().toLowerCase() === "worker") return "implementation";
+  return "read-only";
+}
+
+function appendMissingImplementationContract(task: string, summary: string): string {
+  const fields: string[] = [];
+  if (!CHUNK_OUTCOME.test(task)) fields.push(`Chunk outcome: ${summary}`);
+  if (!CHUNK_IN_SCOPE.test(task)) fields.push("In scope: Only changes required to deliver the delegated outcome.");
+  if (!CHUNK_DONE_WHEN.test(task)) fields.push("Done when: The outcome works and focused validation evidence is reported.");
+  if (!CHUNK_OUT_OF_SCOPE.test(task)) fields.push("Out of scope: Unrelated cleanup, later backlog items, and unapproved product or architecture changes.");
+  return fields.length > 0 ? `${task.trimEnd()}\n${fields.join("\n")}` : task;
+}
+
+function appendDefaultChecklist(task: string, summary: string): string {
+  if (parseChildChecklist(task, "worker").length > 0) return task;
+  return `${task.trimEnd()}\nChild checklist:\n- Complete delegated outcome :: ${summary}`;
+}
+
+export function compileDelegationContracts(input: Record<string, unknown>): void {
+  const directTasks = Array.isArray(input.tasks) ? input.tasks.map(asRecord).filter(Boolean) : [];
+  const directWriterCount = directTasks.filter((record) =>
+    typeof record?.agent === "string"
+    && inferredExecutionMode(record.agent, typeof record.task === "string" ? record.task : "") === "implementation"
+  ).length;
+
+  const visit = (candidate: unknown) => {
+    const record = asRecord(candidate);
+    if (!record) return;
+    if (typeof record.agent === "string") {
+      const originalTask = typeof record.task === "string" ? record.task.trim() : "";
+      const summary = conciseTaskSummary(originalTask);
+      const mode = inferredExecutionMode(record.agent, originalTask);
+      let task = originalTask;
+      if (!declaredExecutionMode(task)) task = `Execution mode: ${mode}\n${task}`.trimEnd();
+      if (mode === "implementation") task = appendMissingImplementationContract(task, summary);
+      if (directWriterCount > 1 && mode === "implementation" && !NO_DEPENDENCIES.test(task)) {
+        task = `${task.trimEnd()}\nDepends on: none`;
+      }
+      record.task = appendDefaultChecklist(task, summary);
+    }
+    for (const key of ["tasks", "chain", "parallel"] as const) {
+      const nested = record[key];
+      if (Array.isArray(nested)) nested.forEach(visit);
+      else if (nested !== undefined) visit(nested);
+    }
+  };
+  visit(input);
+
+  if (directWriterCount > 1) {
+    input.worktree = true;
+    const requestedConcurrency = typeof input.concurrency === "number" && Number.isFinite(input.concurrency)
+      ? Math.max(1, Math.floor(input.concurrency))
+      : MAX_PARALLEL_WRITERS;
+    input.concurrency = Math.min(MAX_PARALLEL_WRITERS, requestedConcurrency);
+    input.artifacts = true;
+  }
 }
 
 function normalizedOwnedPaths(task: string): string[] | undefined {
@@ -526,6 +599,62 @@ interface RemainingPlanTask {
   status: "in_progress" | "pending";
 }
 
+const MISSION_ENTRY = "lemonpi-mission-state";
+type MissionPhase = "planning" | "delegated" | "integration" | "complete" | "paused";
+
+interface MissionState {
+  version: 1;
+  id: string;
+  phase: MissionPhase;
+  request: string;
+  activeRunIds: string[];
+  writerActive: boolean;
+  wakeAttempts: number;
+  updatedAt: number;
+  remainingTask?: RemainingPlanTask;
+}
+
+function parsedMissionState(value: unknown): MissionState | undefined {
+  const record = asRecord(value);
+  if (record?.version !== 1
+    || typeof record.id !== "string"
+    || !["planning", "delegated", "integration", "complete", "paused"].includes(String(record.phase))
+    || typeof record.request !== "string"
+    || !Array.isArray(record.activeRunIds)
+    || !record.activeRunIds.every((runId) => typeof runId === "string")
+    || typeof record.writerActive !== "boolean"
+    || !Number.isInteger(record.wakeAttempts)
+    || typeof record.updatedAt !== "number") return undefined;
+  const remaining = asRecord(record.remainingTask);
+  const remainingTask = remaining
+    && typeof remaining.id === "number"
+    && typeof remaining.subject === "string"
+    && (remaining.status === "in_progress" || remaining.status === "pending")
+    ? { id: remaining.id, subject: remaining.subject, status: remaining.status } as RemainingPlanTask
+    : undefined;
+  return {
+    version: 1,
+    id: record.id.slice(0, 128),
+    phase: record.phase as MissionPhase,
+    request: record.request.slice(0, 500),
+    activeRunIds: [...new Set(record.activeRunIds.map((runId) => runId.slice(0, 128)))],
+    writerActive: record.writerActive,
+    wakeAttempts: Math.max(0, Math.min(3, record.wakeAttempts as number)),
+    updatedAt: record.updatedAt,
+    ...(remainingTask ? { remainingTask } : {}),
+  };
+}
+
+export function replayMissionState(branch: Iterable<unknown>): MissionState | undefined {
+  let latest: MissionState | undefined;
+  for (const value of branch) {
+    const entry = asRecord(value);
+    if (entry?.type !== "custom" || entry.customType !== MISSION_ENTRY) continue;
+    latest = parsedMissionState(entry.data) ?? latest;
+  }
+  return latest;
+}
+
 export function remainingPlanFromTodoResult(value: unknown): { task?: RemainingPlanTask } | undefined {
   const root = asRecord(value);
   const details = asRecord(root?.details) ?? root;
@@ -555,7 +684,7 @@ export function shouldWakeForPlanContinuation(input: {
     && input.activeDelegationCount === 0
     && !input.writerOccupied
     && !input.intentionallyStopped
-    && input.attempts < 2;
+    && input.attempts < 3;
 }
 
 export default function lemonPiNarration(pi: ExtensionAPI) {
@@ -572,19 +701,117 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   let activeWriterAgent: string | undefined;
   let activeWriterRunId: string | undefined;
   let consecutiveWriterFailures = 0;
-  let rosterInspected = false;
-  let rosterGeneration = 0;
   let attentionRecovery: { runId: string; index?: number } | undefined;
   let attentionActionObserved = false;
   let attentionRepairRequested = false;
   let remainingPlanTask: RemainingPlanTask | undefined;
   let planContinuationAttempts = 0;
+  let mission: MissionState | undefined;
+  let mainAgentRunning = false;
+  let lastMissionWakeAt = 0;
+  let restoreWakeTimer: ReturnType<typeof setTimeout> | undefined;
   const activeDelegationRuns = new Set<string>();
   const delegationToolCalls = new Set<string>();
-  const rosterListToolCalls = new Map<string, number>();
+  const statusToolCalls = new Map<string, string | undefined>();
   const writerToolCalls = new Map<string, { agent: string; async: boolean }>();
   const terminalWriterRuns = new Map<string, WriterLifecycleStatus>();
   const integratedTerminalRuns = new Set<string>();
+
+  const persistMission = () => {
+    if (!mission) return;
+    mission.updatedAt = Date.now();
+    pi.appendEntry<MissionState>(MISSION_ENTRY, {
+      ...mission,
+      activeRunIds: [...mission.activeRunIds],
+      ...(mission.remainingTask ? { remainingTask: { ...mission.remainingTask } } : {}),
+    });
+  };
+
+  const ensureMission = (phase: MissionPhase): MissionState => {
+    if (!mission || mission.phase === "complete" || mission.phase === "paused") {
+      mission = {
+        version: 1,
+        id: globalThis.crypto.randomUUID(),
+        phase,
+        request: latestUserRequest.slice(0, 500),
+        activeRunIds: [],
+        writerActive: false,
+        wakeAttempts: 0,
+        updatedAt: Date.now(),
+        ...(remainingPlanTask ? { remainingTask: { ...remainingPlanTask } } : {}),
+      };
+    } else {
+      mission.phase = phase;
+      if (latestUserRequest) mission.request = latestUserRequest.slice(0, 500);
+    }
+    return mission;
+  };
+
+  const missionNeedsMain = () => Boolean(mission
+    && mission.phase !== "complete"
+    && mission.phase !== "paused"
+    && (mission.phase === "integration" || mission.remainingTask));
+
+  const requestMissionWake = (reason: "plan" | "integration" | "reconcile", forceReconcile = false): boolean => {
+    if (!mission || mainAgentRunning) return false;
+    if (!forceReconcile && (activeDelegationRuns.size > 0 || writerOccupied || !missionNeedsMain())) return false;
+    if (lastAssistantStopReason === "aborted" || lastAssistantStopReason === "error") return false;
+    if (mission.wakeAttempts >= 3) {
+      mission.phase = "paused";
+      persistMission();
+      return false;
+    }
+    const now = Date.now();
+    if (!forceReconcile && now - lastMissionWakeAt < 4_000) return false;
+    mission.wakeAttempts += 1;
+    persistMission();
+    lastMissionWakeAt = now;
+    const task = mission.remainingTask;
+    const content = reason === "reconcile"
+      ? `${MISSION_RECONCILE}\n\nRecorded runs: ${mission.activeRunIds.join(", ") || "none"}${task ? `\nRemaining task #${task.id}: ${task.subject}` : ""}`
+      : reason === "integration"
+        ? MISSION_INTEGRATION
+        : `${PLAN_CONTINUATION}${task ? `\n\nStranded task #${task.id}: ${task.subject} (${task.status})` : ""}`;
+    pi.sendMessage(
+      { customType: `lemonpi-mission-${reason}`, content, display: false },
+      { deliverAs: "followUp", triggerTurn: true },
+    );
+    return true;
+  };
+
+  const restoreMission = (ctx: { sessionManager: { getBranch(): Iterable<unknown> } }) => {
+    const restored = replayMissionState(ctx.sessionManager.getBranch());
+    mission = restored;
+    activeDelegationRuns.clear();
+    remainingPlanTask = restored?.remainingTask ? { ...restored.remainingTask } : undefined;
+    planContinuationAttempts = restored?.wakeAttempts ?? 0;
+    writerOccupied = restored?.writerActive ?? false;
+    if (restored) restored.activeRunIds.forEach((runId) => activeDelegationRuns.add(runId));
+    if (restoreWakeTimer) clearTimeout(restoreWakeTimer);
+    if (!restored
+      || restored.phase === "complete"
+      || restored.phase === "paused"
+      || Date.now() - restored.updatedAt > 7 * 24 * 60 * 60 * 1_000) return;
+    mission.wakeAttempts = 0;
+    restoreWakeTimer = setTimeout(() => {
+      restoreWakeTimer = undefined;
+      requestMissionWake("reconcile", true);
+    }, 750);
+  };
+
+  pi.on("session_start", async (_event, ctx) => restoreMission(ctx));
+  pi.on("session_compact", async (_event, ctx) => restoreMission(ctx));
+  pi.on("session_tree", async (_event, ctx) => restoreMission(ctx));
+
+  const missionScheduler = setInterval(() => {
+    if (!missionNeedsMain() || mainAgentRunning || activeDelegationRuns.size > 0 || writerOccupied) return;
+    requestMissionWake(mission?.phase === "integration" ? "integration" : "plan");
+  }, 5_000);
+
+  pi.on("session_shutdown", async () => {
+    if (restoreWakeTimer) clearTimeout(restoreWakeTimer);
+    clearInterval(missionScheduler);
+  });
 
   const rememberTerminalRun = (key: string) => {
     integratedTerminalRuns.add(key);
@@ -618,6 +845,11 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     writerOccupied = false;
     activeWriterAgent = undefined;
     activeWriterRunId = undefined;
+    if (mission) {
+      mission.writerActive = false;
+      if (status !== "paused" && mission.activeRunIds.length === 0) mission.phase = "integration";
+      persistMission();
+    }
     if (status === "completed") consecutiveWriterFailures = 0;
     if (status === "failed" && wasOccupied) consecutiveWriterFailures += 1;
   };
@@ -626,12 +858,22 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     const runId = delegationRunId(payload);
     if (!runId) return;
     activeDelegationRuns.add(runId);
+    const currentMission = ensureMission("delegated");
+    if (!currentMission.activeRunIds.includes(runId)) currentMission.activeRunIds.push(runId);
+    currentMission.wakeAttempts = 0;
+    persistMission();
     integratedTerminalRuns.delete(terminalRunKey(delegationSessionId(payload), runId));
   });
 
   pi.events.on("subagent:async-complete", (payload) => {
     const runId = delegationRunId(payload);
     if (runId) activeDelegationRuns.delete(runId);
+    if (mission && runId) {
+      mission.activeRunIds = mission.activeRunIds.filter((candidate) => candidate !== runId);
+      mission.phase = "integration";
+      mission.wakeAttempts = 0;
+      persistMission();
+    }
     const status = writerLifecycleStatus(payload);
     if (runId && status) {
       terminalWriterRuns.set(runId, status);
@@ -652,9 +894,12 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     }
   });
 
-  pi.on("before_agent_start", async (event) => ({
-    systemPrompt: `${event.systemPrompt}\n\n${NARRATION_CONTRACT}\n\n${ORCHESTRATION_CONTRACT}${attentionRecovery ? `\n\n<lemonpi-attention-recovery>\nRun ${attentionRecovery.runId}${attentionRecovery.index !== undefined ? ` child ${attentionRecovery.index}` : ""} needs intervention now. Inspect and control that exact run before ending this turn.\n</lemonpi-attention-recovery>` : ""}`,
-  }));
+  pi.on("before_agent_start", async (event) => {
+    mainAgentRunning = true;
+    return {
+      systemPrompt: `${event.systemPrompt}\n\n${NARRATION_CONTRACT}\n\n${ORCHESTRATION_CONTRACT}${attentionRecovery ? `\n\n<lemonpi-attention-recovery>\nRun ${attentionRecovery.runId}${attentionRecovery.index !== undefined ? ` child ${attentionRecovery.index}` : ""} needs intervention now. Inspect and control that exact run before ending this turn.\n</lemonpi-attention-recovery>` : ""}`,
+    };
+  });
 
   pi.on("input", async (event, ctx) => {
     if (event.source !== "rpc") return { action: "continue" };
@@ -707,6 +952,14 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           : undefined;
         const force = payload.force === true;
         if (!status) throw new Error("The subagent completion request was malformed.");
+        activeDelegationRuns.delete(runId);
+        if (mission) {
+          mission.activeRunIds = mission.activeRunIds.filter((candidate) => candidate !== runId);
+          mission.writerActive = false;
+          mission.phase = "integration";
+          mission.wakeAttempts = 0;
+          persistMission();
+        }
         wakeForTerminalRun(runId, sessionId, status, agent, force);
       }
     } catch (error) {
@@ -736,66 +989,41 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (event.toolName !== "subagent") return;
 
     const isManagementAction = typeof input.action === "string" && input.action.trim().length > 0;
+    if (input.action === "status") {
+      const target = typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : undefined;
+      statusToolCalls.set(event.toolCallId, target);
+    }
     if (input.action === "resume") {
       const message = typeof input.message === "string" ? input.message.trimEnd() : "";
-      const resumedTasks = parseChildChecklist(message, CURRENT_CHILD_OWNER);
-      if (resumedTasks.length === 0) {
-        return {
-          block: true,
-          reason: "LemonPi requires Main Pi to initialize the revived attempt instead of replaying its completed checklist. Add a `Child checklist:` section to the resume message with 1–5 items written as `- Outcome :: concrete detail`, covering only the new follow-up work.",
-        };
-      }
+      const compiledMessage = appendDefaultChecklist(message, conciseTaskSummary(message));
+      const resumedTasks = parseChildChecklist(compiledMessage, CURRENT_CHILD_OWNER);
       if (!message.includes("<lemonpi-child-checklist>")) {
-        input.message = `${message}${childTodoGuidance(CURRENT_CHILD_OWNER, resumedTasks)}`;
+        input.message = `${compiledMessage}${childTodoGuidance(CURRENT_CHILD_OWNER, resumedTasks)}`;
       }
+      const currentMission = ensureMission("delegated");
+      currentMission.wakeAttempts = 0;
+      persistMission();
     }
-    if (input.action === "list") rosterListToolCalls.set(event.toolCallId, rosterGeneration);
     if (attentionRecovery && ["status", "steer", "stop"].includes(String(input.action ?? ""))) {
       const target = typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : "";
       if (!target || attentionRecovery.runId.startsWith(target) || target.startsWith(attentionRecovery.runId)) {
         attentionActionObserved = true;
       }
     }
-    const specs = delegatedSpecs(input);
+    let specs = delegatedSpecs(input);
     const isDelegation = specs.length > 0;
 
     if (isDelegation && !isManagementAction) {
       stripPerDispatchBudgets(input);
-      if (!rosterInspected) {
-        return {
-          block: true,
-          reason: "LemonPi requires live agent discovery before delegation. Call the subagent tool with { action: \"list\" }, read every executable agent's exact name and description, then autonomously choose the best match. Custom user and project agents are first-class candidates; do not wait for the user to name one.",
-        };
-      }
+      compileDelegationContracts(input);
+      specs = delegatedSpecs(input);
       const reviewers = specs.filter((spec) => spec.agent === "reviewer");
       const writers = specs.filter(delegatesImplementation);
-      const missingExecutionMode = specs.find((spec) => declaredExecutionMode(spec.task) === undefined);
-      if (missingExecutionMode) {
-        return {
-          block: true,
-          reason: `LemonPi requires explicit mutation intent for ${missingExecutionMode.agent}. Begin the task with exactly \`Execution mode: read-only\` for an artifact-only result or \`Execution mode: implementation\` when the child must change project files. A plan that describes implementation chunks is still read-only.`,
-        };
-      }
-      const missingChildChecklist = specs.find((spec) => parseChildChecklist(spec.task, spec.agent).length === 0);
-      if (missingChildChecklist) {
-        return {
-          block: true,
-          reason: `LemonPi requires Main Pi to initialize ${missingChildChecklist.agent}'s work before launch. Add a \`Child checklist:\` section with 1–5 Markdown items written as \`- Outcome :: concrete detail\`. Use meaningful milestones inside this delegation's scope and do not include final-response delivery. LemonPi will seed those tasks directly into the child session.`,
-        };
-      }
       const taskJustifiesReview = reviewers.some((spec) => REVIEW_JUSTIFICATION.test(spec.task));
       const requestExplicitlyRequestsReview = EXPLICIT_REVIEW_REQUEST.test(latestUserRequest);
       const requestHasMaterialRisk = MATERIAL_RISK_REQUEST.test(latestUserRequest);
       const requestExplicitlyRequestsMultipleReviews = EXPLICIT_MULTI_REVIEW_REQUEST.test(latestUserRequest);
       const hadPriorReview = reviewDispatches > 0;
-
-      const unboundedImplementationTask = writers.find((spec) => !hasBoundedChunkContract(spec.task));
-      if (unboundedImplementationTask) {
-        return {
-          block: true,
-          reason: `LemonPi requires a bounded implementation chunk for ${unboundedImplementationTask.agent}. Rewrite the task with \`Chunk outcome:\`, \`In scope:\`, \`Done when:\`, and \`Out of scope:\`. Delegate only the current independently reviewable chunk, not the remaining backlog.`,
-        };
-      }
 
       const invalidAcceptancePath = invalidVerifiedAcceptancePath(input);
       if (invalidAcceptancePath) {
@@ -836,13 +1064,10 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           reason: "LemonPi stopped a third consecutive writer attempt after two failed chunks or waves. Report the exact blocker or ask the user before starting another automatic recovery cycle.",
         };
       }
-      if (writers.length > 1) {
-        const requestedConcurrency = typeof input.concurrency === "number" && Number.isFinite(input.concurrency)
-          ? Math.max(1, Math.floor(input.concurrency))
-          : MAX_PARALLEL_WRITERS;
-        input.concurrency = Math.min(MAX_PARALLEL_WRITERS, requestedConcurrency);
-        input.artifacts = true;
-      }
+      const currentMission = ensureMission("delegated");
+      currentMission.writerActive = writers.length > 0;
+      currentMission.wakeAttempts = 0;
+      persistMission();
       if (reviewers.length > 0) reviewDispatches += reviewers.length;
       if (writers.length > 0 && input.clarify !== true) {
         writerOccupied = true;
@@ -891,9 +1116,14 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       latestUserRequest = notification;
       reviewDispatches = 0;
       consecutiveWriterFailures = 0;
-      rosterInspected = false;
-      rosterGeneration += 1;
       if (attentionRecovery) attentionRepairRequested = false;
+    }
+    if (typeof message.customType === "string" && message.customType.startsWith("lemonpi-mission-")) {
+      sawToolActivity = false;
+      visibleExplanationAfterLastTool = false;
+      lastAssistantStopReason = undefined;
+      delegationRepairRequested = false;
+      closingRepairAttempts = 0;
     }
     if (message.customType === "subagent_control_notice" && message.details?.event?.to === "needs_attention") {
       const runId = typeof message.details.event.runId === "string" ? message.details.event.runId.trim() : "";
@@ -907,6 +1137,14 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       }
     }
     if (message.customType === "subagent-notify") {
+      const notifiedRunId = delegationRunId(message);
+      if (notifiedRunId) activeDelegationRuns.delete(notifiedRunId);
+      if (mission) {
+        if (notifiedRunId) mission.activeRunIds = mission.activeRunIds.filter((candidate) => candidate !== notifiedRunId);
+        mission.phase = "integration";
+        mission.wakeAttempts = 0;
+        persistMission();
+      }
       const workerStatus = writerNotificationStatus(notification, activeWriterAgent);
       if (workerStatus) settleWriter(workerStatus);
       sawToolActivity = false;
@@ -931,6 +1169,23 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_end", async (event) => {
+    const statusTarget = statusToolCalls.get(event.toolCallId);
+    const wasStatusCall = statusToolCalls.delete(event.toolCallId);
+    if (wasStatusCall) {
+      const status = writerLifecycleStatus(event.result) ?? (event.isError ? "failed" : undefined);
+      const runId = delegationRunId(event.result) ?? statusTarget;
+      if (status && status !== "paused") {
+        if (runId) activeDelegationRuns.delete(runId);
+        if (mission) {
+          if (runId) mission.activeRunIds = mission.activeRunIds.filter((candidate) => candidate !== runId && !candidate.startsWith(runId) && !runId.startsWith(candidate));
+          mission.phase = "integration";
+          mission.writerActive = false;
+          mission.wakeAttempts = 0;
+          persistMission();
+        }
+        if (writerOccupied) settleWriter(status);
+      }
+    }
     if (event.toolName === "todo" && !event.isError) {
       const plan = remainingPlanFromTodoResult(event.result);
       if (plan) {
@@ -939,18 +1194,34 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           planContinuationAttempts = 0;
         }
         remainingPlanTask = nextTask;
+        if (nextTask) {
+          const currentMission = ensureMission(activeDelegationRuns.size > 0 || writerOccupied ? "delegated" : "planning");
+          currentMission.remainingTask = { ...nextTask };
+          currentMission.wakeAttempts = 0;
+        } else if (mission) {
+          delete mission.remainingTask;
+          if (mission.activeRunIds.length === 0 && mission.phase === "planning") mission.phase = "complete";
+        }
+        persistMission();
       }
-    }
-    const listedRosterGeneration = rosterListToolCalls.get(event.toolCallId);
-    rosterListToolCalls.delete(event.toolCallId);
-    if (listedRosterGeneration === rosterGeneration) {
-      rosterInspected = !event.isError;
     }
     const writerCall = writerToolCalls.get(event.toolCallId);
     writerToolCalls.delete(event.toolCallId);
     if (!delegationToolCalls.delete(event.toolCallId)) return;
     const failure = delegationFailure(event.result, event.isError);
     if (!failure) {
+      const runId = delegationRunId(event.result);
+      if (runId) {
+        activeDelegationRuns.add(runId);
+        const currentMission = ensureMission("delegated");
+        if (!currentMission.activeRunIds.includes(runId)) currentMission.activeRunIds.push(runId);
+        currentMission.wakeAttempts = 0;
+        persistMission();
+      } else if (mission) {
+        mission.phase = "integration";
+        mission.wakeAttempts = 0;
+        persistMission();
+      }
       if (writerCall?.async === false) {
         settleWriter("completed");
       } else if (writerCall && writerOccupied) {
@@ -963,13 +1234,23 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (writerCall) {
       settleWriter("failed");
     }
+    if (mission) {
+      mission.phase = "integration";
+      mission.wakeAttempts = 0;
+      persistMission();
+    }
     delegationFailurePending = true;
     lastDelegationFailure = failure;
   });
 
   pi.on("agent_settled", async () => {
+    mainAgentRunning = false;
     const intentionallyStopped = lastAssistantStopReason === "aborted" || lastAssistantStopReason === "error";
     const strandedPlanTask = remainingPlanTask;
+    if (intentionallyStopped && mission) {
+      mission.phase = "paused";
+      persistMission();
+    }
     if (attentionRecovery && !attentionActionObserved && !attentionRepairRequested && !intentionallyStopped) {
       attentionRepairRequested = true;
       pi.sendMessage(
@@ -1007,16 +1288,21 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       intentionallyStopped,
       attempts: planContinuationAttempts,
     }) && strandedPlanTask) {
-      planContinuationAttempts += 1;
-      pi.sendMessage(
-        {
-          customType: "lemonpi-plan-continuation",
-          content: `${PLAN_CONTINUATION}\n\nStranded task #${strandedPlanTask.id}: ${strandedPlanTask.subject} (${strandedPlanTask.status})`,
-          display: false,
-        },
-        { deliverAs: "followUp", triggerTurn: true },
-      );
-      return;
+      const currentMission = ensureMission("planning");
+      currentMission.remainingTask = { ...strandedPlanTask };
+      if (requestMissionWake("plan")) {
+        planContinuationAttempts += 1;
+        return;
+      }
+    }
+    if (mission?.phase === "integration" && activeDelegationRuns.size === 0 && !writerOccupied && !intentionallyStopped) {
+      if (visibleExplanationAfterLastTool && !delegationFailurePending && !attentionRecovery && !remainingPlanTask) {
+        mission.phase = "complete";
+        mission.wakeAttempts = 0;
+        persistMission();
+      } else if (requestMissionWake("integration")) {
+        return;
+      }
     }
     if (!sawToolActivity || visibleExplanationAfterLastTool || intentionallyStopped || closingRepairAttempts >= 2) return;
 
