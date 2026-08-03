@@ -113,6 +113,9 @@ const ATTENTION_RECOVERY = `A delegated run reported needs_attention and the pre
 const PLAN_CONTINUATION = `Your visible task plan still contains unfinished work, but you settled with no delegated agent active. Continue the stranded plan now instead of waiting for another user message. Give the user a concise visible update, then execute or delegate the next bounded action. If the task is genuinely blocked or waiting for the user, move it out of in-progress state and explain the exact blocker; never leave an idle task spinning.`;
 const MISSION_INTEGRATION = `A durable LemonPi mission has delegated results waiting for Main Pi, but no child is active. Inspect the exact terminal run and integrate its result now. If more work remains, dispatch the next bounded lane in this turn. If the mission is complete or blocked, give the user a concrete explanation instead of leaving it idle.`;
 const MISSION_RECONCILE_ATTENTION = `LemonPi could not automatically reconcile a recorded delegated run after a session lifecycle transition. Inspect the exact recorded run once and take the appropriate action. Do not poll it repeatedly: if it is active, end the turn; if it is terminal, integrate it; if it needs attention, intervene.`;
+const ACTIVE_DELEGATION_HANDOFF = `<lemonpi-active-delegation-handoff>
+The immediately preceding launch, resume, or status result is authoritative: delegated work is active. Do not call status again, do not wait or sleep, and do not run another tool merely to monitor it. Give the user one concise, specific progress update and end the turn now. LemonPi will wake Main Pi when the run completes or needs attention; a real new user message may still be answered and used to steer the worker.
+</lemonpi-active-delegation-handoff>`;
 
 function visibleText(content: unknown): string {
   if (typeof content === "string") return content.trim();
@@ -539,6 +542,10 @@ export function restoredStatusAction(disposition: SubagentStatusDisposition): "s
   return "wake_intervention";
 }
 
+export function shouldSuppressStatusPoll(activeHandoffPending: boolean, action: unknown): boolean {
+  return activeHandoffPending && action === "status";
+}
+
 function delegationRunId(value: unknown): string | undefined {
   const result = asRecord(value);
   const details = asRecord(result?.details);
@@ -760,6 +767,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   const delegationToolCalls = new Set<string>();
   const statusToolCalls = new Map<string, { key: string; target?: string }>();
   const activeStatusChecksThisTurn = new Set<string>();
+  const resumeToolCalls = new Map<string, { implementation: boolean }>();
+  let activeDelegationHandoffPending = false;
   const writerToolCalls = new Map<string, { agent: string; async: boolean }>();
   const terminalWriterRuns = new Map<string, WriterLifecycleStatus>();
   const integratedTerminalRuns = new Set<string>();
@@ -951,6 +960,16 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   pi.on("session_compact", async (_event, ctx) => restoreMission(ctx));
   pi.on("session_tree", async (_event, ctx) => restoreMission(ctx));
 
+  pi.on("context", async (event) => {
+    if (!activeDelegationHandoffPending) return;
+    return {
+      messages: [
+        ...event.messages,
+        { role: "user", content: ACTIVE_DELEGATION_HANDOFF, timestamp: Date.now() },
+      ],
+    };
+  });
+
   const missionScheduler = setInterval(() => {
     if (!missionNeedsMain() || mainAgentRunning || activeDelegationRuns.size > 0 || writerOccupied) return;
     requestMissionWake(mission?.phase === "integration" ? "integration" : "plan");
@@ -1006,6 +1025,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     const runId = delegationRunId(payload);
     if (!runId) return;
     activeDelegationRuns.add(runId);
+    activeDelegationHandoffPending = true;
     const currentMission = ensureMission("delegated");
     if (!currentMission.activeRunIds.includes(runId)) currentMission.activeRunIds.push(runId);
     currentMission.wakeAttempts = 0;
@@ -1016,6 +1036,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   pi.events.on("subagent:async-complete", (payload) => {
     const runId = delegationRunId(payload);
     if (runId) activeDelegationRuns.delete(runId);
+    activeStatusChecksThisTurn.clear();
+    activeDelegationHandoffPending = false;
     if (mission && runId) {
       mission.activeRunIds = mission.activeRunIds.filter((candidate) => candidate !== runId);
       mission.phase = "integration";
@@ -1101,6 +1123,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         const force = payload.force === true;
         if (!status) throw new Error("The subagent completion request was malformed.");
         activeDelegationRuns.delete(runId);
+        activeStatusChecksThisTurn.clear();
+        activeDelegationHandoffPending = false;
         if (mission) {
           mission.activeRunIds = mission.activeRunIds.filter((candidate) => candidate !== runId);
           mission.writerActive = false;
@@ -1140,10 +1164,10 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (input.action === "status") {
       const target = typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : undefined;
       const key = target ?? "__active_runs__";
-      if (activeStatusChecksThisTurn.has(key)) {
+      if (shouldSuppressStatusPoll(activeDelegationHandoffPending, input.action) || activeStatusChecksThisTurn.has(key)) {
         return {
           block: true,
-          reason: "This run was already confirmed active during the current turn. Do not poll it again. End the turn so its completion or needs-attention event can wake Main Pi.",
+          reason: "Delegated work is already confirmed active. Do not poll any run again in this user turn. Give one concise progress update and end the turn so the completion or needs-attention event can wake Main Pi.",
         };
       }
       statusToolCalls.set(event.toolCallId, { key, ...(target ? { target } : {}) });
@@ -1155,6 +1179,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       if (!message.includes("<lemonpi-child-checklist>")) {
         input.message = `${compiledMessage}${childTodoGuidance(CURRENT_CHILD_OWNER, resumedTasks)}`;
       }
+      resumeToolCalls.set(event.toolCallId, {
+        implementation: declaredExecutionMode(compiledMessage) === "implementation",
+      });
       const currentMission = ensureMission("delegated");
       currentMission.wakeAttempts = 0;
       persistMission();
@@ -1259,8 +1286,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       details?: { event?: { runId?: unknown; index?: unknown; to?: unknown } };
     };
     const notification = visibleText(message.content);
-    if (event.message.role === "user") activeStatusChecksThisTurn.clear();
     if (event.message.role === "user" && message.customType == null) {
+      activeStatusChecksThisTurn.clear();
+      activeDelegationHandoffPending = false;
       sawToolActivity = false;
       visibleExplanationAfterLastTool = false;
       lastAssistantStopReason = undefined;
@@ -1287,6 +1315,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         ? message.details.event.index
         : undefined;
       if (runId) {
+        activeStatusChecksThisTurn.clear();
+        activeDelegationHandoffPending = false;
         attentionRecovery = { runId, ...(index !== undefined ? { index } : {}) };
         attentionActionObserved = false;
         attentionRepairRequested = false;
@@ -1295,6 +1325,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (message.customType === "subagent-notify") {
       const notifiedRunId = delegationRunId(message);
       if (notifiedRunId) activeDelegationRuns.delete(notifiedRunId);
+      activeStatusChecksThisTurn.clear();
+      activeDelegationHandoffPending = false;
       if (mission) {
         if (notifiedRunId) mission.activeRunIds = mission.activeRunIds.filter((candidate) => candidate !== notifiedRunId);
         mission.phase = "integration";
@@ -1325,17 +1357,39 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_end", async (event) => {
+    const resumedCall = resumeToolCalls.get(event.toolCallId);
+    resumeToolCalls.delete(event.toolCallId);
+    if (resumedCall && !event.isError) {
+      const runId = delegationRunId(event.result);
+      if (runId) {
+        activeDelegationRuns.add(runId);
+        const currentMission = ensureMission("delegated");
+        if (!currentMission.activeRunIds.includes(runId)) currentMission.activeRunIds.push(runId);
+        if (resumedCall.implementation) {
+          writerOccupied = true;
+          activeWriterRunId = runId;
+          currentMission.writerActive = true;
+        }
+        currentMission.wakeAttempts = 0;
+        persistMission();
+      }
+      activeDelegationHandoffPending = true;
+    }
     const statusCall = statusToolCalls.get(event.toolCallId);
     const wasStatusCall = statusToolCalls.delete(event.toolCallId);
     if (wasStatusCall) {
       const disposition = event.isError ? "unknown" : subagentStatusDisposition(event.result);
       if (disposition === "active" || disposition === "needs_attention") activeStatusChecksThisTurn.add(statusCall!.key);
+      if (disposition === "active") activeDelegationHandoffPending = true;
+      if (disposition === "needs_attention") activeDelegationHandoffPending = false;
       const status = disposition === "completed" || disposition === "failed" || disposition === "paused" || disposition === "stopped"
         ? disposition
         : writerLifecycleStatus(event.result) ?? (event.isError ? "failed" : undefined);
       const runId = delegationRunId(event.result) ?? statusCall?.target;
       if (status && status !== "paused") {
         if (runId) activeDelegationRuns.delete(runId);
+        activeStatusChecksThisTurn.clear();
+        activeDelegationHandoffPending = false;
         if (mission) {
           if (runId) mission.activeRunIds = mission.activeRunIds.filter((candidate) => candidate !== runId && !candidate.startsWith(runId) && !runId.startsWith(candidate));
           mission.phase = "integration";
@@ -1373,6 +1427,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       const runId = delegationRunId(event.result);
       if (runId) {
         activeDelegationRuns.add(runId);
+        activeDelegationHandoffPending = true;
         const currentMission = ensureMission("delegated");
         if (!currentMission.activeRunIds.includes(runId)) currentMission.activeRunIds.push(runId);
         currentMission.wakeAttempts = 0;

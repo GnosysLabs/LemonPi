@@ -9,6 +9,7 @@ import {
   remainingPlanFromTodoResult,
   replayMissionState,
   restoredStatusAction,
+  shouldSuppressStatusPoll,
   shouldWakeForPlanContinuation,
   subagentStatusDisposition,
 } from "../src-tauri/resources/lemonpi-narration/extensions/narration.ts";
@@ -87,6 +88,9 @@ assert.equal(subagentStatusDisposition({ text: "No active async runs.", fleet: {
 assert.equal(restoredStatusAction("active"), "stay_silent");
 assert.equal(restoredStatusAction("completed"), "wake_integration");
 assert.equal(restoredStatusAction("needs_attention"), "wake_intervention");
+assert.equal(shouldSuppressStatusPoll(true, "status"), true);
+assert.equal(shouldSuppressStatusPoll(true, "steer"), false);
+assert.equal(shouldSuppressStatusPoll(false, "status"), false);
 
 const lane = (outcome, paths) => ({
   agent: "worker",
