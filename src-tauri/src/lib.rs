@@ -20,6 +20,7 @@ const MAX_RPC_RECORD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SESSION_FILES: usize = 250;
 const STDERR_CHUNK_BYTES: usize = 8 * 1024;
 const SUBAGENT_TRANSCRIPT_TAIL_BYTES: u64 = 384 * 1024;
+const SUBAGENT_TODO_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 const SUBAGENT_PROMPT_SCAN_BYTES: u64 = 4 * 1024 * 1024;
 const SUBAGENT_PROMPT_MAX_CHARS: usize = 256 * 1024;
 const SUBAGENT_ACTIVITY_EVENTS: usize = 12;
@@ -146,6 +147,7 @@ struct SubagentActivityTarget {
     agent: String,
     index: usize,
     transcript_path: Option<String>,
+    session_file: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -177,6 +179,12 @@ struct SubagentLiveActivity {
     last_activity_at: Option<u64>,
     events: Vec<SubagentActivityEvent>,
     todos: Option<Vec<SubagentTodoTask>>,
+    todos_updated_at: Option<u64>,
+}
+
+struct SubagentTodoSnapshot {
+    tasks: Vec<SubagentTodoTask>,
+    updated_at: Option<u64>,
 }
 
 fn pi_candidates() -> Vec<PathBuf> {
@@ -899,9 +907,10 @@ async fn start_pi(
 
     let executable = find_pi()?;
     let version = pi_version(&executable).await?;
-    ensure_required_pi_packages(&executable).await?;
-    ensure_builtin_subagent_todo_access(&pi_agent_dir()?)?;
     let narration_extension = narration_extension_path(&app)?;
+    let child_todo_bridge = narration_extension.with_file_name("child-todo-bridge.ts");
+    ensure_required_pi_packages(&executable).await?;
+    ensure_subagent_todo_access(&pi_agent_dir()?, &cwd_path, trusted, &child_todo_bridge)?;
     let mut command = pi_command(&executable)?;
     command
         .args(["--mode", "rpc", project_trust_arg(trusted)])
@@ -1117,6 +1126,16 @@ fn resolve_subagent_transcript(project: &Path, target: &SubagentActivityTarget) 
     is_allowed_subagent_transcript(&path, project).then_some(path)
 }
 
+fn resolve_subagent_session(target: &SubagentActivityTarget) -> Option<PathBuf> {
+    let path = PathBuf::from(target.session_file.as_deref()?);
+    if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+        return None;
+    }
+    let path = path.canonicalize().ok()?;
+    let sessions_root = pi_agent_dir().ok()?.join("sessions").canonicalize().ok()?;
+    path.starts_with(sessions_root).then_some(path)
+}
+
 fn compact_activity_text(value: &str) -> Option<String> {
     let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
     if compact.is_empty() {
@@ -1150,6 +1169,8 @@ fn push_subagent_activity(
 }
 
 fn subagent_todos_from_record(record: &Value) -> Option<Vec<SubagentTodoTask>> {
+    let seeded = record.get("type").and_then(Value::as_str) == Some("custom")
+        && record.get("customType").and_then(Value::as_str) == Some("lemonpi-child-todos");
     let message = record.get("message");
     let role = record
         .get("role")
@@ -1159,11 +1180,18 @@ fn subagent_todos_from_record(record: &Value) -> Option<Vec<SubagentTodoTask>> {
         .get("toolName")
         .and_then(Value::as_str)
         .or_else(|| message?.get("toolName").and_then(Value::as_str));
-    let details = message
-        .and_then(|value| value.get("details"))
-        .or_else(|| record.get("details"))
-        .or_else(|| record.get("result").and_then(|value| value.get("details")));
-    if tool_name != Some("todo") || (role != Some("toolResult") && details.is_none()) {
+    let details = if seeded {
+        record.get("data")
+    } else {
+        message
+            .and_then(|value| value.get("details"))
+            .or_else(|| record.get("details"))
+            .or_else(|| record.get("result").and_then(|value| value.get("details")))
+    };
+    if !seeded
+        && (!matches!(tool_name, Some("child_todo" | "todo"))
+            || (role != Some("toolResult") && details.is_none()))
+    {
         return None;
     }
     let tasks = details?.get("tasks")?.as_array()?;
@@ -1200,9 +1228,52 @@ fn subagent_todos_from_record(record: &Value) -> Option<Vec<SubagentTodoTask>> {
         .collect()
 }
 
+fn subagent_todo_updated_at(record: &Value) -> Option<u64> {
+    record
+        .get("ts")
+        .and_then(Value::as_u64)
+        .or_else(|| record.get("timestamp").and_then(Value::as_u64))
+        .or_else(|| record.pointer("/message/timestamp").and_then(Value::as_u64))
+        .or_else(|| record.pointer("/data/seededAt").and_then(Value::as_u64))
+}
+
+fn read_subagent_todos(path: &Path, agent: &str) -> Option<SubagentTodoSnapshot> {
+    let mut file = fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    let offset = length.saturating_sub(SUBAGENT_TODO_TAIL_BYTES);
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).ok()?;
+    let contents = if offset > 0 {
+        contents
+            .split_once('\n')
+            .map(|(_, rest)| rest)
+            .unwrap_or("")
+    } else {
+        contents.as_str()
+    };
+    let mut latest = None;
+    for line in contents.lines() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(tasks) = subagent_todos_from_record(&record) {
+            latest = Some(SubagentTodoSnapshot {
+                tasks: tasks
+                    .into_iter()
+                    .filter(|task| task.owner.as_deref() == Some(agent))
+                    .collect(),
+                updated_at: subagent_todo_updated_at(&record),
+            });
+        }
+    }
+    latest
+}
+
 fn read_subagent_activity(path: &Path, key: String) -> SubagentLiveActivity {
     let mut events = Vec::new();
     let mut todos = None;
+    let mut todos_updated_at = None;
     let read_result = (|| -> Result<(), String> {
         let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
         let length = file.metadata().map_err(|error| error.to_string())?.len();
@@ -1227,6 +1298,7 @@ fn read_subagent_activity(path: &Path, key: String) -> SubagentLiveActivity {
             };
             if let Some(snapshot) = subagent_todos_from_record(&record) {
                 todos = Some(snapshot);
+                todos_updated_at = subagent_todo_updated_at(&record);
             }
             let at = record.get("ts").and_then(Value::as_u64).unwrap_or_default();
             match record.get("recordType").and_then(Value::as_str) {
@@ -1235,6 +1307,7 @@ fn read_subagent_activity(path: &Path, key: String) -> SubagentLiveActivity {
                         .get("toolName")
                         .and_then(Value::as_str)
                         .unwrap_or("tool");
+                    let tool = if tool == "child_todo" { "todo" } else { tool };
                     let args = record
                         .get("argsPreview")
                         .and_then(Value::as_str)
@@ -1251,6 +1324,7 @@ fn read_subagent_activity(path: &Path, key: String) -> SubagentLiveActivity {
                         .get("toolName")
                         .and_then(Value::as_str)
                         .unwrap_or("tool");
+                    let tool = if tool == "child_todo" { "todo" } else { tool };
                     let failed = record.get("isError").and_then(Value::as_bool) == Some(true);
                     push_subagent_activity(
                         &mut events,
@@ -1330,6 +1404,7 @@ fn read_subagent_activity(path: &Path, key: String) -> SubagentLiveActivity {
         last_activity_at,
         events,
         todos,
+        todos_updated_at,
     }
 }
 
@@ -1346,7 +1421,7 @@ async fn get_subagent_activity(
             .into_iter()
             .map(|target| {
                 let key = target.key.clone();
-                resolve_subagent_transcript(&project, &target)
+                let mut activity = resolve_subagent_transcript(&project, &target)
                     .map(|path| read_subagent_activity(&path, key.clone()))
                     .unwrap_or(SubagentLiveActivity {
                         key,
@@ -1355,7 +1430,15 @@ async fn get_subagent_activity(
                         last_activity_at: None,
                         events: Vec::new(),
                         todos: None,
-                    })
+                        todos_updated_at: None,
+                    });
+                if let Some(snapshot) = resolve_subagent_session(&target)
+                    .and_then(|path| read_subagent_todos(&path, &target.agent))
+                {
+                    activity.todos = Some(snapshot.tasks);
+                    activity.todos_updated_at = snapshot.updated_at;
+                }
+                activity
             })
             .collect()
     })
@@ -1573,23 +1656,16 @@ fn setting_string_list(value: Option<&Value>) -> Vec<String> {
     }
 }
 
-fn ensure_builtin_subagent_todo_access(agent_dir: &Path) -> Result<(), String> {
-    let todo_extension = agent_dir.join("npm/node_modules/@juicesharp/rpiv-todo/index.ts");
-    if !todo_extension.is_file() {
-        return Err(
-            "LemonPi installed rpiv-todo, but its child extension entry point is unavailable."
-                .to_string(),
-        );
+fn ensure_agent_todo_overrides(
+    settings_path: &Path,
+    agents: &HashMap<String, DiscoveredAgent>,
+    todo_extension_path: &str,
+    child_todo_bridge_path: &str,
+) -> Result<(), String> {
+    if agents.is_empty() {
+        return Ok(());
     }
-
-    let mut builtins = HashMap::new();
-    collect_agent_definitions(
-        &agent_dir.join("npm/node_modules/pi-subagents/agents"),
-        "builtin",
-        &mut builtins,
-    );
-    let settings_path = agent_dir.join("settings.json");
-    let mut settings = read_settings_object(&settings_path)?;
+    let mut settings = read_settings_object(settings_path)?;
     let subagents = settings
         .entry("subagents".to_string())
         .or_insert_with(|| json!({}))
@@ -1602,39 +1678,44 @@ fn ensure_builtin_subagent_todo_access(agent_dir: &Path) -> Result<(), String> {
         .ok_or_else(|| {
             "Settings field 'subagents.agentOverrides' must be an object.".to_string()
         })?;
-    let extension_path = path_for_frontend(&todo_extension);
     let mut changed = false;
 
-    for agent in builtins.values() {
-        let Some(base_tools) = agent.base_tools.as_ref() else {
-            continue;
-        };
+    for agent in agents.values() {
         let entry = overrides
             .entry(agent.name.clone())
             .or_insert_with(|| json!({}))
             .as_object_mut()
             .ok_or_else(|| format!("Override for '{}' must be an object.", agent.name))?;
 
-        let mut tools = if entry.contains_key("tools") {
-            setting_string_list(entry.get("tools"))
-        } else {
-            base_tools.clone()
-        };
-        if !tools.iter().any(|tool| tool == "todo") {
-            tools.push("todo".to_string());
-        }
-        let next_tools = Value::Array(tools.into_iter().map(Value::String).collect());
-        if entry.get("tools") != Some(&next_tools) {
-            entry.insert("tools".to_string(), next_tools);
-            changed = true;
+        if entry.contains_key("tools") || agent.base_tools.is_some() {
+            let mut tools = if entry.contains_key("tools") {
+                setting_string_list(entry.get("tools"))
+            } else {
+                agent.base_tools.clone().unwrap_or_default()
+            };
+            // Delegated sessions use the owner-scoped bridge. Leaving the
+            // ambient Main Pi tool active would expose a second empty store.
+            tools.retain(|tool| tool != "todo");
+            if !tools.iter().any(|tool| tool == "child_todo") {
+                tools.push("child_todo".to_string());
+            }
+            let next_tools = Value::Array(tools.into_iter().map(Value::String).collect());
+            if entry.get("tools") != Some(&next_tools) {
+                entry.insert("tools".to_string(), next_tools);
+                changed = true;
+            }
         }
 
         let mut extensions = setting_string_list(entry.get("subagentOnlyExtensions"));
+        // Older LemonPi builds loaded rpiv-todo and the bridge as independent
+        // extensions. Pi isolates those module graphs, so the bridge could not
+        // seed the provider's Map. The bridge now owns provider registration.
+        extensions.retain(|extension| extension != todo_extension_path);
         if !extensions
             .iter()
-            .any(|extension| extension == &extension_path)
+            .any(|extension| extension == child_todo_bridge_path)
         {
-            extensions.push(extension_path.clone());
+            extensions.push(child_todo_bridge_path.to_string());
         }
         let next_extensions = Value::Array(extensions.into_iter().map(Value::String).collect());
         if entry.get("subagentOnlyExtensions") != Some(&next_extensions) {
@@ -1644,7 +1725,56 @@ fn ensure_builtin_subagent_todo_access(agent_dir: &Path) -> Result<(), String> {
     }
 
     if changed {
-        write_settings_object(&settings_path, &settings)?;
+        write_settings_object(settings_path, &settings)?;
+    }
+    Ok(())
+}
+
+fn ensure_subagent_todo_access(
+    agent_dir: &Path,
+    project: &Path,
+    trusted: bool,
+    child_todo_bridge: &Path,
+) -> Result<(), String> {
+    let todo_extension = agent_dir.join("npm/node_modules/@juicesharp/rpiv-todo/index.ts");
+    if !todo_extension.is_file() {
+        return Err(
+            "LemonPi installed rpiv-todo, but its child extension entry point is unavailable."
+                .to_string(),
+        );
+    }
+    if !child_todo_bridge.is_file() {
+        return Err("LemonPi's child todo bridge is unavailable.".to_string());
+    }
+
+    let user_settings_path = agent_dir.join("settings.json");
+    let mut user_agents = HashMap::new();
+    collect_agent_definitions(
+        &agent_dir.join("npm/node_modules/pi-subagents/agents"),
+        "builtin",
+        &mut user_agents,
+    );
+    collect_agent_definitions(&agent_dir.join("agents"), "user", &mut user_agents);
+    let todo_extension_path = path_for_frontend(&todo_extension);
+    let child_todo_bridge_path = path_for_frontend(child_todo_bridge);
+    ensure_agent_todo_overrides(
+        &user_settings_path,
+        &user_agents,
+        &todo_extension_path,
+        &child_todo_bridge_path,
+    )?;
+
+    if trusted {
+        let project_settings = project_settings_path(project);
+        let mut project_agents = HashMap::new();
+        collect_agent_definitions(&project.join(".agents"), "project", &mut project_agents);
+        collect_agent_definitions(&project.join(".pi/agents"), "project", &mut project_agents);
+        ensure_agent_todo_overrides(
+            &project_settings,
+            &project_agents,
+            &todo_extension_path,
+            &child_todo_bridge_path,
+        )?;
     }
     Ok(())
 }
@@ -2437,6 +2567,26 @@ fn message_text(value: &Value) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+fn strip_internal_child_prompt_blocks(value: &str) -> String {
+    ["lemonpi-child-checklist", "lemonpi-child-todo-seed"]
+        .into_iter()
+        .fold(value.to_string(), |mut text, tag| {
+            let opening = format!("<{tag}>");
+            let closing = format!("</{tag}>");
+            while let Some(start) = text.find(&opening) {
+                let Some(relative_end) = text[start + opening.len()..].find(&closing) else {
+                    text.truncate(start);
+                    break;
+                };
+                let end = start + opening.len() + relative_end + closing.len();
+                text.replace_range(start..end, "");
+            }
+            text
+        })
+        .trim_end()
+        .to_string()
+}
+
 fn read_subagent_prompts(async_dir: &Path) -> HashMap<usize, String> {
     let Ok(file) = fs::File::open(async_dir.join("events.jsonl")) else {
         return HashMap::new();
@@ -2470,6 +2620,7 @@ fn read_subagent_prompts(async_dir: &Path) -> HashMap<usize, String> {
         let Some(prompt) = event.pointer("/message/content").and_then(message_text) else {
             continue;
         };
+        let prompt = strip_internal_child_prompt_blocks(&prompt);
         let prompt = prompt.chars().take(SUBAGENT_PROMPT_MAX_CHARS).collect();
         prompts.insert(index, prompt);
     }
@@ -2659,41 +2810,114 @@ mod tests {
     }
 
     #[test]
-    fn builtin_subagents_receive_todo_without_losing_existing_overrides() {
+    fn builtin_and_custom_subagents_receive_todo_without_losing_existing_overrides() {
         let root = env::temp_dir().join(format!(
             "lemonpi-subagent-todo-access-{}",
             std::process::id()
         ));
         let agents = root.join("npm/node_modules/pi-subagents/agents");
+        let user_agents = root.join("agents");
+        let project = root.join("project");
         let todo = root.join("npm/node_modules/@juicesharp/rpiv-todo");
+        let bridge = root.join("child-todo-bridge.ts");
         fs::create_dir_all(&agents).expect("create builtin fixture directory");
+        fs::create_dir_all(&user_agents).expect("create user agent fixture directory");
+        fs::create_dir_all(&project).expect("create project fixture directory");
         fs::create_dir_all(&todo).expect("create todo fixture directory");
         fs::write(
             agents.join("worker.md"),
             "---\nname: worker\ndescription: Test worker\ntools: read, grep, write\n---\nWorker\n",
         )
         .expect("write builtin agent fixture");
+        fs::write(
+            user_agents.join("designer.md"),
+            "---\nname: designer\ndescription: Test designer\ntools: read, write\n---\nDesigner\n",
+        )
+        .expect("write custom agent fixture");
         fs::write(todo.join("index.ts"), "export default () => {};\n")
             .expect("write todo extension fixture");
+        fs::write(&bridge, "export default () => {};\n").expect("write child todo bridge fixture");
+        let legacy_todo_path = path_for_frontend(&todo.join("index.ts"));
         write_settings_object(
             &root.join("settings.json"),
-            &serde_json::Map::from_iter([(
-                "subagents".to_string(),
-                json!({ "agentOverrides": { "worker": { "model": "example/model", "tools": ["read", "bash"] } } }),
-            )]),
+            &serde_json::Map::from_iter([
+                (
+                    "packages".to_string(),
+                    json!(["npm:@juicesharp/rpiv-todo", "npm:keep-this-package"]),
+                ),
+                (
+                    "subagents".to_string(),
+                    json!({ "agentOverrides": { "worker": {
+                        "model": "example/model",
+                        "tools": ["read", "bash"],
+                        "subagentOnlyExtensions": ["/keep-this-extension.ts", legacy_todo_path]
+                    } } }),
+                ),
+            ]),
         )
         .expect("write settings fixture");
 
-        ensure_builtin_subagent_todo_access(&root).expect("grant builtin todo access");
+        ensure_subagent_todo_access(&root, &project, true, &bridge)
+            .expect("grant subagent todo access");
         let settings = read_settings_object(&root.join("settings.json")).expect("read settings");
+        assert_eq!(
+            settings["packages"],
+            json!(["npm:@juicesharp/rpiv-todo", "npm:keep-this-package"])
+        );
         let worker = &settings["subagents"]["agentOverrides"]["worker"];
         assert_eq!(worker["model"], json!("example/model"));
-        assert_eq!(worker["tools"], json!(["read", "bash", "todo"]));
+        assert_eq!(worker["tools"], json!(["read", "bash", "child_todo"]));
         assert_eq!(
             worker["subagentOnlyExtensions"],
-            json!([path_for_frontend(&todo.join("index.ts"))])
+            json!(["/keep-this-extension.ts", path_for_frontend(&bridge)])
+        );
+        let designer = &settings["subagents"]["agentOverrides"]["designer"];
+        assert_eq!(designer["tools"], json!(["read", "write", "child_todo"]));
+        assert_eq!(
+            designer["subagentOnlyExtensions"],
+            json!([path_for_frontend(&bridge)])
         );
         fs::remove_dir_all(root).expect("remove todo access fixture");
+    }
+
+    #[test]
+    fn subagent_todo_snapshots_are_scoped_to_the_child_owner() {
+        let path =
+            env::temp_dir().join(format!("lemonpi-child-todos-{}.jsonl", std::process::id()));
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"custom\",\"customType\":\"lemonpi-child-todos\",\"data\":{\"version\":1,\"owner\":\"planner\",\"nextId\":3,\"tasks\":[{\"id\":1,\"subject\":\"Inspect scope\",\"status\":\"in_progress\",\"blockedBy\":[],\"owner\":\"planner\"},{\"id\":2,\"subject\":\"Return plan\",\"status\":\"pending\",\"blockedBy\":[1],\"owner\":\"planner\"}]}}\n",
+                "{\"type\":\"message\",\"message\":{\"role\":\"toolResult\",\"toolName\":\"child_todo\",\"timestamp\":2000,\"details\":{\"tasks\":[{\"id\":1,\"subject\":\"Main task\",\"status\":\"in_progress\"},{\"id\":1,\"subject\":\"Inspect scope\",\"status\":\"completed\",\"owner\":\"planner\"},{\"id\":2,\"subject\":\"Return plan\",\"status\":\"in_progress\",\"owner\":\"planner\"}]}}}\n",
+            ),
+        )
+        .expect("write child todo fixture");
+
+        let snapshot = read_subagent_todos(&path, "planner").expect("read child todos");
+        assert_eq!(snapshot.updated_at, Some(2000));
+        let tasks = snapshot.tasks;
+        fs::remove_file(&path).expect("remove child todo fixture");
+
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].subject, "Inspect scope");
+        assert_eq!(tasks[0].status, "completed");
+        assert_eq!(tasks[1].subject, "Return plan");
+        assert_eq!(tasks[1].status, "in_progress");
+        assert_eq!(tasks[0].owner.as_deref(), Some("planner"));
+    }
+
+    #[test]
+    fn delegated_prompt_hides_internal_child_initialization_blocks() {
+        let prompt = concat!(
+            "Chunk outcome: inspect the parser.\n",
+            "Child checklist:\n- Inspect parser :: Find the seam\n",
+            "<lemonpi-child-checklist>internal guidance</lemonpi-child-checklist>\n",
+            "<lemonpi-child-todo-seed>{\"version\":1}</lemonpi-child-todo-seed>",
+        );
+        assert_eq!(
+            strip_internal_child_prompt_blocks(prompt),
+            "Chunk outcome: inspect the parser.\nChild checklist:\n- Inspect parser :: Find the seam"
+        );
     }
 
     #[test]

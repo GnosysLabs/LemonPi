@@ -21,7 +21,7 @@ A native desktop workspace for the [Pi coding agent](https://pi.dev), built with
 - Treats `npm:pi-subagents`, `npm:pi-web-access`, `npm:@juicesharp/rpiv-ask-user-question`, and `npm:@juicesharp/rpiv-todo` as required core packages and installs them automatically through Pi before the first LemonPi session when needed.
 - Renders structured agent questions as native choice cards, multi-select controls, custom-answer fields, and rich option previews instead of exposing Pi's flattened RPC fallback strings.
 - Renders `rpiv-todo`'s structured, session-persistent task snapshots as a native progress panel above the composer.
-- Gives built-in delegated agents their own `rpiv-todo` capability and renders each child checklist as a dedicated Tasks section above that agent's live activity.
+- Has Main Pi author a bounded checklist for every delegation and revival, seeds it into the child agent's isolated `rpiv-todo` state before that attempt starts, and renders each owner-scoped checklist as a dedicated Tasks section above live activity. Revival seeds replace stale completed work immediately; `finalizing` is shown only for a checklist updated during the current attempt.
 
 The app intentionally uses Pi's subprocess RPC boundary instead of reimplementing Pi. This preserves the user's existing authentication, models, settings, skills, extensions, and session files.
 
@@ -127,7 +127,7 @@ pi --mode rpc
 
 LemonPi verifies the required `npm:pi-subagents`, `npm:pi-web-access`, `npm:@juicesharp/rpiv-ask-user-question`, and `npm:@juicesharp/rpiv-todo` packages before launching Pi and asks Pi's native package manager to install any missing member. Subagents supply orchestration and machine-readable lifecycle artifacts; web access registers research tools; ask-user-question gives the model a structured clarification tool; and rpiv-todo supplies persistent task snapshots. LemonPi turns the question package's RPC fallback into a native questionnaire and the todo package's public tool-result envelope into a native progress panel. Terminal rendering is never scraped.
 
-Before Pi starts, LemonPi adds `todo` to every installed built-in subagent's effective tool allowlist and loads the todo provider explicitly in child sessions. Delegated tasks receive a child-checklist contract, and snapshots from each child's own transcript remain isolated from Main Pi and sibling agents. Custom agents without a strict tool allowlist inherit the installed todo provider normally; custom agents with an explicit `tools` list must include `todo` themselves.
+Before Pi starts, LemonPi adds its `rpiv-todo`-backed `child_todo` bridge to every discovered built-in, user, and trusted-project subagent while leaving Main Pi's normal `todo` provider and all unrelated ambient extensions untouched. The distinct child tool avoids Pi's duplicate-extension boundary while sharing one module graph and one session store with the bridge. It seeds Main Pi's bounded `Child checklist:` before the first model request, persists the seed for lifecycle replay, and lets later child updates become authoritative. Command Center presents those structured snapshots as the agent's Tasks list and filters by owner, keeping Main Pi and sibling checklists isolated.
 
 ## Project trust
 

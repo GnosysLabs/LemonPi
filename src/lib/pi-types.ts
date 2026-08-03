@@ -188,6 +188,7 @@ export interface SubagentLiveActivity {
   headlineKind?: SubagentActivityKind;
   lastActivityAt?: number;
   events: SubagentActivityEvent[];
+  todosUpdatedAt?: number;
   todos?: Array<{
     id: number;
     subject: string;
@@ -205,6 +206,7 @@ export interface SubagentActivityTarget {
   agent: string;
   index: number;
   transcriptPath?: string;
+  sessionFile?: string;
 }
 
 export type SubagentSettingsScope = "user" | "project";

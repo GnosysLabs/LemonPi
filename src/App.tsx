@@ -914,6 +914,7 @@ export default function App() {
       agent: step.agent,
       index: step.index ?? index,
       transcriptPath: step.transcriptPath,
+      sessionFile: step.sessionFile,
     })) ?? []
   )), [visibleSubagentRuns]);
   const activityTargetSignature = JSON.stringify(activityTargets);
@@ -958,19 +959,21 @@ export default function App() {
         const index = step.index ?? position;
         const key = `${sessionState?.sessionFile ?? "session"}:${run.runId}:${index}`;
         const snapshot = subagentActivity[`${run.runId}:${index}`];
-        const hasChecklist = snapshot?.todos?.some((task) => task.status !== "deleted") === true;
+        const startedAt = step.startedAt ?? run.startedAt;
+        const hasChecklist = snapshot?.todosUpdatedAt != null
+          && snapshot.todosUpdatedAt >= startedAt
+          && snapshot.todos?.some((task) => task.status !== "deleted") === true;
         if (hasChecklist) {
           checklistNudgesRef.current.add(key);
           continue;
         }
-        const startedAt = step.startedAt ?? run.startedAt;
         const hasMeaningfulActivity = (snapshot?.events.length ?? 0) > 0 || (step.turnCount ?? 0) > 0;
         if (!hasMeaningfulActivity || now - startedAt < 30_000 || checklistNudgesRef.current.has(key)) continue;
         checklistNudgesRef.current.add(key);
         void steerSubagent(
           run.runId,
           index,
-          "Before continuing, initialize or refresh your visible work checklist with the todo tool now. Reuse an existing checklist if present; otherwise create a short outcome-oriented plan, keep one item in progress, and update it as work completes. If the todo tool is unavailable in this revived session, report that exact blocker immediately.",
+          "Before continuing, initialize or refresh your visible work checklist with child_todo now. Reuse a current-attempt checklist if present; otherwise create a short outcome-oriented plan for the remaining work. Keep one item in progress, complete it immediately when its concrete result is verified, and advance the next item then—not several items together near the end. Do not use your future final response as a checklist item. If child_todo is unavailable in this session, report that exact blocker immediately.",
         ).catch((error) => console.warn("Could not remind subagent to initialize its checklist", error));
       }
     }

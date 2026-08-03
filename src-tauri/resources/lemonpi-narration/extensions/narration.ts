@@ -6,11 +6,65 @@ const SUBAGENT_TERMINAL_PREFIX = "__lemonpi_subagent_terminal_v1__:";
 const SUBAGENT_RPC_REQUEST_EVENT = "subagents:rpc:v1:request";
 const SUBAGENT_RPC_REPLY_PREFIX = "subagents:rpc:v1:reply:";
 const SUBAGENT_RPC_TIMEOUT_MS = 6_000;
-const CHILD_TODO_GUIDANCE = `
+const CHILD_TODO_SEED_TAG = "lemonpi-child-todo-seed";
+const CURRENT_CHILD_OWNER = "__lemonpi_current_child__";
+
+interface InitialChildTodo {
+  id: number;
+  subject: string;
+  description?: string;
+  activeForm: string;
+  status: "in_progress" | "pending";
+  blockedBy: number[];
+  owner: string;
+}
+
+function parseChildChecklist(task: string, agent: string): InitialChildTodo[] {
+  const heading = /(?:^|\n)\s*Child checklist:\s*\n/i.exec(task);
+  if (!heading) return [];
+  const lines = task.slice((heading.index ?? 0) + heading[0].length).split("\n");
+  const parsed: Array<{ subject: string; description?: string }> = [];
+  for (const line of lines) {
+    const item = /^\s*(?:[-*]|\d+[.)])\s+(?:\[[ xX]\]\s*)?(.+?)\s*$/.exec(line);
+    if (!item) {
+      if (parsed.length > 0 && line.trim()) break;
+      continue;
+    }
+    const [subjectPart, ...descriptionParts] = item[1].split(/\s+::\s+/);
+    const subject = subjectPart.trim().slice(0, 180);
+    const description = descriptionParts.join(" :: ").trim().slice(0, 1_200);
+    if (!subject) continue;
+    parsed.push({ subject, ...(description ? { description } : {}) });
+    if (parsed.length === 5) break;
+  }
+  return parsed.map((item, index) => ({
+    id: index + 1,
+    subject: item.subject,
+    ...(item.description ? { description: item.description } : {}),
+    activeForm: item.description ?? item.subject,
+    status: index === 0 ? "in_progress" : "pending",
+    blockedBy: index === 0 ? [] : [index],
+    owner: agent,
+  }));
+}
+
+function childTodoGuidance(agent: string, tasks: InitialChildTodo[]): string {
+  const owner = agent === CURRENT_CHILD_OWNER ? "your current agent identity" : JSON.stringify(agent);
+  const seed = JSON.stringify({
+    version: 1,
+    seedId: globalThis.crypto.randomUUID(),
+    seededAt: Date.now(),
+    owner: agent,
+    tasks,
+    nextId: tasks.length + 1,
+  });
+  return `
 
 <lemonpi-child-checklist>
-Use the \`todo\` tool at the start of this delegated task to create a short checklist of the meaningful steps you will perform. When reviving a previous session, inspect and reuse any existing checklist; if none exists, create it before continuing the resumed work. Keep exactly one ordinary task in progress, update the checklist as your approach changes, and mark each item complete immediately after its outcome is actually verified. The checklist is visible to the user in LemonPi, so use specific outcome-oriented labels rather than duplicating individual tool calls. Do not skip the checklist merely because the parent supplied a chunk contract.
-</lemonpi-child-checklist>`;
+Main Pi authored your checklist and LemonPi initialized it in this child session before your first model request. The seeded tasks are owned by ${owner}; do not clear or recreate them. Begin with the existing in-progress item. Complete each item immediately when its concrete outcome is actually verified, then move the next item into progress; never save several status changes to submit together near the end. Do not mark an item complete because you intend to produce its result later. The closing response itself is not a checklist item. Use \`child_todo({ action: "list" })\` only if you need to inspect the initialized details, then update the existing task ids through \`child_todo\` as work progresses. You may add or revise a task only when execution reveals genuinely new work within the delegated scope.
+</lemonpi-child-checklist>
+<${CHILD_TODO_SEED_TAG}>${seed}</${CHILD_TODO_SEED_TAG}>`;
+}
 
 const NARRATION_CONTRACT = `
 <lemonpi-visible-narration>
@@ -32,10 +86,11 @@ You are Main Pi, the read-only supervisor and integration owner. You do not impl
 Routing policy:
 
 1. Decomposition rule — first decide whether the request is already one small, independently verifiable outcome. If it is broader, divide it into ordered vertical chunks before implementation: each chunk should leave the workspace coherent, be reviewable on its own, and reduce uncertainty for the next chunk. Prefer boundaries such as foundation, one behavior, integration, then polish; do not split into arbitrary file-by-file chores or tiny edits that add handoff overhead.
-2. Planning rule — planner is the default preparation role when work needs multiple chunks, changes architecture, crosses subsystems, has important ordering constraints, or remains ambiguous after brief inspection. Give planner the requirements and ask for an ordered implementation plan with boundaries, dependencies, risks, and validation points. For a single bounded and well-understood change, skip planning and dispatch directly. Do not run planner before every trivial edit, and do not ask planner to implement.
+2. Planning rule — planner is the default preparation role when work needs multiple chunks, changes architecture, crosses subsystems, has important ordering constraints, or remains ambiguous after brief inspection. Give planner the requirements and ask for a concise, decision-ready plan of normally 3–7 outcome-sized chunks with boundaries, dependencies, risks, and validation points. The plan should normally fit within about 1,200 words: do not request an exhaustive implementation specification, restate all context, prescribe thousands of lines of code, or explode each chunk into a second backlog of tiny tasks. For a single bounded and well-understood change, skip planning and dispatch directly. Do not run planner before every trivial edit, and do not ask planner to implement.
 3. Live roster and dynamic role rule — at the start of each new user task, call the subagent tool with \`{ action: "list" }\` before selecting or launching any child. Treat its executable-agent output as the authoritative capability registry: it includes built-in, packaged, user, and project agents with their exact runtime names and descriptions. Consider every listed agent, choose autonomously from those descriptions, and invoke the best match by the exact returned name; the user does not need to name or request a custom agent. If a description leaves writing authority or capabilities unclear, inspect that candidate with \`{ action: "get", agent: "<exact-name>" }\`. Never assume an optional or custom role exists, hardcode behavior for a custom agent name, or restrict routing to a fixed allowlist. Built-in roles such as scout, researcher, context-builder, planner, oracle/advisor, worker, and reviewer are examples rather than the complete roster. A listed custom specialist is a first-class candidate for any phase its description matches, including serving as the sole writer. Ignoring a clearly matched listed agent is wrong; invoking every role ceremonially is also wrong. Do not rediscover the roster before every chunk in the same task unless it may have changed.
 4. Useful-output rule — every specialist dispatch must name the concrete question it will answer and how that answer changes the next decision or chunk. Prefer one well-matched specialist over a chain of generic handoffs. Read-only specialists may run concurrently only when their outputs are independent and immediately useful.
 5. Chunk contract — every implementation task, regardless of which available agent performs it, must state exactly four fields: \`Chunk outcome:\`, \`In scope:\`, \`Done when:\`, and \`Out of scope:\`. Give the writer only the current chunk, plus enough surrounding context to avoid incompatible decisions. Explicitly exclude later chunks. A chunk should normally cover one user-visible behavior or one architectural seam and have a short, observable acceptance condition.
+5a. Child checklist contract — every new delegated task, including read-only specialists, and every \`resume\` that revives or redirects a child must include a \`Child checklist:\` section with 1–5 ordered Markdown items authored by Main Pi. Write each as \`- Outcome :: concrete detail\`; use one item for a truly atomic delegation and several only for meaningful milestones inside the assigned scope. LemonPi seeds these tasks into the isolated child session before its first model request, so the child starts with Main's decomposition instead of spending time inventing or retroactively reconstructing a plan. A revival checklist covers only the new follow-up work, not already completed work. Do not include final-response delivery as an item.
 6. Fast path — a bounded, well-understood, low-risk request is one chunk. Give the best matched available executor that complete small outcome, avoid planning and review ceremony, inspect the result, and run one proportionate validation pass.
 7. Sequential path — for broader work, consume the planner's output and dispatch only the first implementation chunk. When it completes, inspect the actual diff and evidence before doing anything else. Confirm the chunk's acceptance condition, identify regressions or newly learned constraints, and either steer/resume the same writer for a bounded correction or dispatch the next chunk with updated context. Never hand one writer the entire backlog "for completeness."
 8. Checkpoint review — Main Pi reviews every completed chunk directly: inspect what changed, compare it with the stated scope and out-of-scope boundary, and perform the smallest useful check. Report the concrete checkpoint to the user before continuing. Run a final holistic validation once after all chunks are integrated; do not rerun the full suite after every small chunk unless its risk requires that.
@@ -172,7 +227,7 @@ function addChildTodoGuidance(value: unknown): void {
     if (typeof record.agent === "string") {
       const task = typeof record.task === "string" ? record.task.trimEnd() : "";
       if (!task.includes("<lemonpi-child-checklist>")) {
-        record.task = `${task}${CHILD_TODO_GUIDANCE}`.trimStart();
+        record.task = `${task}${childTodoGuidance(record.agent, parseChildChecklist(task, record.agent))}`.trimStart();
       }
     }
     for (const key of ["tasks", "chain", "parallel"] as const) {
@@ -501,8 +556,18 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (event.toolName !== "subagent") return;
 
     const isManagementAction = typeof input.action === "string" && input.action.trim().length > 0;
-    if (input.action === "resume" && typeof input.message === "string" && !input.message.includes("<lemonpi-child-checklist>")) {
-      input.message = `${input.message.trimEnd()}${CHILD_TODO_GUIDANCE}`;
+    if (input.action === "resume") {
+      const message = typeof input.message === "string" ? input.message.trimEnd() : "";
+      const resumedTasks = parseChildChecklist(message, CURRENT_CHILD_OWNER);
+      if (resumedTasks.length === 0) {
+        return {
+          block: true,
+          reason: "LemonPi requires Main Pi to initialize the revived attempt instead of replaying its completed checklist. Add a `Child checklist:` section to the resume message with 1–5 items written as `- Outcome :: concrete detail`, covering only the new follow-up work.",
+        };
+      }
+      if (!message.includes("<lemonpi-child-checklist>")) {
+        input.message = `${message}${childTodoGuidance(CURRENT_CHILD_OWNER, resumedTasks)}`;
+      }
     }
     if (input.action === "list") rosterListToolCalls.set(event.toolCallId, rosterGeneration);
     if (attentionRecovery && ["status", "steer", "stop"].includes(String(input.action ?? ""))) {
@@ -524,6 +589,13 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       }
       const reviewers = specs.filter((spec) => spec.agent === "reviewer");
       const writers = specs.filter(delegatesImplementation);
+      const missingChildChecklist = specs.find((spec) => parseChildChecklist(spec.task, spec.agent).length === 0);
+      if (missingChildChecklist) {
+        return {
+          block: true,
+          reason: `LemonPi requires Main Pi to initialize ${missingChildChecklist.agent}'s work before launch. Add a \`Child checklist:\` section with 1–5 Markdown items written as \`- Outcome :: concrete detail\`. Use meaningful milestones inside this delegation's scope and do not include final-response delivery. LemonPi will seed those tasks directly into the child session.`,
+        };
+      }
       const taskJustifiesReview = reviewers.some((spec) => REVIEW_JUSTIFICATION.test(spec.task));
       const requestExplicitlyRequestsReview = EXPLICIT_REVIEW_REQUEST.test(latestUserRequest);
       const requestHasMaterialRisk = MATERIAL_RISK_REQUEST.test(latestUserRequest);
