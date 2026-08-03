@@ -855,6 +855,12 @@
   font-size: 12px;
 }
 
+.agent-steer input:focus-visible {
+  outline: none;
+  border-color: color-mix(in srgb, var(--lemon) 62%, var(--matte-line-strong));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--lemon) 22%, transparent);
+}
+
 .agent-steer button {
   display: inline-flex;
   height: 34px;
