@@ -1,0 +1,6 @@
+# Keep text files byte-for-byte consistent across macOS, Linux, and Windows.
+* text=auto eol=lf
+
+# Native Windows command scripts require CRLF when launched by cmd.exe.
+*.bat text eol=crlf
+*.cmd text eol=crlf

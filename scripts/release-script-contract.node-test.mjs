@@ -96,7 +96,7 @@ describe("release script contracts", () => {
     assert.match(windowsWorkflow, /uses: pnpm\/action-setup@v4\n        with:\n          version: 10\.30\.3/);
     assert.match(windowsWorkflow, /uses: actions\/setup-node@v4\n        with:\n          node-version: 22/);
     assert.match(windowsWorkflow, /pnpm install --frozen-lockfile/);
-    assert.match(windowsWorkflow, /uses: dtolnay\/rust-toolchain@stable\n        with:\n          targets: x86_64-pc-windows-msvc/);
+    assert.match(windowsWorkflow, /uses: dtolnay\/rust-toolchain@1\.96\.1\n        with:\n          targets: x86_64-pc-windows-msvc/);
     assert.doesNotMatch(windowsWorkflow, /toolchain: stable-x86_64-pc-windows-msvc/);
     assert.match(windowsWorkflow, /\$rustcVersion = @\(rustc -vV\)/);
     assert.match(windowsWorkflow, /\$hostLines = @\(\$rustcVersion \| Where-Object \{ \$_ -match "\^host:\\s\*\\S\+\\s\*\$" \}\)/);
