@@ -318,6 +318,12 @@ export function RemoteAccessSettings({ onNotice }: RemoteAccessSettingsProps) {
 
   const visiblePairing = useMemo(() => redactExpiredPairing(pairing, now), [now, pairing]);
   const statusPresentation = status ? describeRemoteStatus(status) : undefined;
+  const portError = draft ? remotePortError(draft.port) : undefined;
+  const configChanged = Boolean(config && draft && (
+    draft.enabled !== config.enabled
+    || draft.accessMode !== config.accessMode
+    || String(draft.port).trim() !== String(config.port)
+  ));
 
   if (initialLoading) {
     return <div className="remote-access remote-access--loading" aria-label="Loading remote access settings"><i /><i /><i /></div>;
@@ -358,38 +364,48 @@ export function RemoteAccessSettings({ onNotice }: RemoteAccessSettingsProps) {
           <span><strong>Allow remote access</strong><small id="remote-listener-description">Enabling opens a TLS listener on the selected networks.</small></span>
         </label>
 
-        <div className="remote-access__fields">
-          <label>
-            <span>Networks</span>
-            <select
-              value={draft.accessMode}
-              disabled={configBusy || pairingBusy}
-              onChange={(event) => setDraft({ ...draft, accessMode: event.target.value as RemoteConfigDraft["accessMode"] })}
+        <div className="remote-access__connection-editor">
+          <div className="remote-access__fields">
+            <label>
+              <span>Networks</span>
+              <select
+                value={draft.accessMode}
+                disabled={configBusy || pairingBusy}
+                onChange={(event) => setDraft({ ...draft, accessMode: event.target.value as RemoteConfigDraft["accessMode"] })}
+              >
+                {accessModes.map((mode) => <option value={mode.value} key={mode.value}>{mode.label}</option>)}
+              </select>
+            </label>
+            <label>
+              <span className="remote-access__field-label">
+                Port
+                <small id="remote-port-hint" data-invalid={portError ? "true" : undefined}>{portError ? "Check range" : "1–65535"}</small>
+              </span>
+              <input
+                type="number"
+                inputMode="numeric"
+                min="1"
+                max="65535"
+                step="1"
+                value={draft.port}
+                disabled={configBusy || pairingBusy}
+                onChange={(event) => setDraft({ ...draft, port: event.target.value })}
+                aria-invalid={Boolean(portError)}
+                aria-describedby="remote-port-hint"
+              />
+            </label>
+          </div>
+          <div className="remote-access__actions remote-access__actions--config">
+            <button
+              ref={applyButtonRef}
+              type="button"
+              className="remote-access__primary remote-access__save"
+              disabled={configBusy || pairingBusy || Boolean(portError) || !configChanged}
+              onClick={() => void persistConfig(draft)}
             >
-              {accessModes.map((mode) => <option value={mode.value} key={mode.value}>{mode.label}</option>)}
-            </select>
-          </label>
-          <label>
-            <span>Port</span>
-            <input
-              type="number"
-              inputMode="numeric"
-              min="1"
-              max="65535"
-              step="1"
-              value={draft.port}
-              disabled={configBusy || pairingBusy}
-              onChange={(event) => setDraft({ ...draft, port: event.target.value })}
-              aria-invalid={Boolean(remotePortError(draft.port))}
-              aria-describedby="remote-port-hint"
-            />
-            <small id="remote-port-hint">Choose a port from 1 to 65535.</small>
-          </label>
-        </div>
-        <div className="remote-access__actions">
-          <button ref={applyButtonRef} type="button" className="remote-access__primary" disabled={configBusy || pairingBusy} onClick={() => void persistConfig(draft)}>
-            {configBusy ? "Applying…" : "Apply remote access settings"}
-          </button>
+              {configBusy ? "Saving…" : "Save changes"}
+            </button>
+          </div>
         </div>
 
         <dl className="remote-access__metadata">

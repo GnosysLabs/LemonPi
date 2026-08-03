@@ -154,11 +154,22 @@
 .remote-access__switch input:focus-visible + span { outline: 2px solid var(--settings-focus, var(--lemon)); outline-offset: 3px; }
 .remote-access__switch strong { display: block; font-size: 12.5px; }
 
+.remote-access__connection-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  margin-top: 14px;
+  padding: 12px;
+  align-items: end;
+  gap: 12px;
+  border: 1px solid var(--remote-line);
+  border-radius: 11px;
+  background: var(--bg-subtle);
+}
+
 .remote-access__fields {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(130px, 0.4fr);
-  gap: 14px;
-  margin-top: 16px;
+  grid-template-columns: minmax(180px, 1fr) 124px;
+  gap: 10px;
 }
 
 .remote-access__fields label,
@@ -168,6 +179,26 @@
   color: var(--remote-muted);
   font-size: 11px;
   font-weight: 660;
+}
+
+.remote-access__field-label {
+  display: flex;
+  padding: 0 2px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.remote-access__fields .remote-access__field-label small {
+  display: inline;
+  margin: 0;
+  font-size: 10px;
+  font-weight: 560;
+  line-height: 1;
+}
+
+.remote-access__fields .remote-access__field-label small[data-invalid="true"] {
+  color: #9a3c34;
 }
 
 .remote-access input,
@@ -184,6 +215,7 @@
 }
 
 .remote-access input::placeholder { color: color-mix(in srgb, var(--ink) 42%, transparent); }
+.remote-access input[aria-invalid="true"] { border-color: color-mix(in srgb, #b34c43 56%, var(--remote-line)); }
 .remote-access input:disabled,
 .remote-access select:disabled { opacity: 0.62; }
 
@@ -194,10 +226,21 @@
   margin-top: 16px;
 }
 
+.remote-access__actions--config {
+  margin-top: 0;
+  flex-wrap: nowrap;
+}
+
 .remote-access__primary {
   border-color: color-mix(in srgb, var(--lemon) 80%, var(--ink)) !important;
   color: var(--lemon-ink) !important;
   background: var(--lemon) !important;
+}
+
+.remote-access__save {
+  min-height: 38px !important;
+  padding: 0 15px !important;
+  white-space: nowrap;
 }
 
 .remote-access__metadata {
@@ -361,13 +404,17 @@
   .remote-access__device-error,
   .remote-access__field-error { color: #ffaaa2; background: color-mix(in srgb, #d86155 18%, var(--bg-raised)); }
   .remote-access__danger { color: #ffaaa2 !important; }
+  .remote-access__fields .remote-access__field-label small[data-invalid="true"] { color: #ffaaa2; }
 }
 
 @media (max-width: 720px) {
   .remote-access__panel { padding: 16px; }
+  .remote-access__connection-editor,
   .remote-access__fields,
   .remote-access__metadata,
   .remote-access__pairing-material dl { grid-template-columns: 1fr; }
+  .remote-access__actions--config,
+  .remote-access__save { width: 100%; }
   .remote-access__panel-heading,
   .remote-access__device { align-items: flex-start; flex-direction: column; }
   .remote-access__confirm { justify-content: flex-start; }
