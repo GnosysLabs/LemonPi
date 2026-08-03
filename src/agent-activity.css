@@ -457,7 +457,7 @@
 }
 
 .agent-card__detail {
-  padding: 0 9px 9px 34px;
+  padding: 0 9px 9px;
   border-top: 1px solid var(--matte-line);
 }
 

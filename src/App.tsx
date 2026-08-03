@@ -156,6 +156,7 @@ function foregroundRunFromDetails(value: unknown, final: boolean): SubagentRunSt
       description: typeof step.task === "string" ? step.task : undefined,
       prompt: typeof step.task === "string" ? step.task : undefined,
       status,
+      sessionFile: typeof step.sessionFile === "string" ? step.sessionFile : undefined,
       transcriptPath: typeof step.transcriptPath === "string" ? step.transcriptPath : undefined,
       lastActivityAt: typeof step.lastActivityAt === "number" ? step.lastActivityAt : undefined,
       currentTool: typeof step.currentTool === "string" ? step.currentTool : undefined,
@@ -167,6 +168,7 @@ function foregroundRunFromDetails(value: unknown, final: boolean): SubagentRunSt
       turnCount: typeof step.turnCount === "number" ? step.turnCount : undefined,
       toolCount: typeof step.toolCount === "number" ? step.toolCount : undefined,
       startedAt: typeof step.durationMs === "number" ? Date.now() - step.durationMs : Date.now(),
+      endedAt: typeof step.endedAt === "number" ? step.endedAt : undefined,
       tokens: {
         input: typeof step.inputTokens === "number" ? step.inputTokens : 0,
         output: typeof step.outputTokens === "number" ? step.outputTokens : 0,

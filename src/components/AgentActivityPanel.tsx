@@ -371,7 +371,6 @@ function AgentCard({
   const [stopping, setStopping] = useState(false);
   const [steerError, setSteerError] = useState<string>();
   const [promptOpen, setPromptOpen] = useState(false);
-  const output = step.recentOutput?.filter(Boolean).slice(-8) ?? [];
   const model = shortModel(step.model);
   const activityEvents = activity?.events ?? [];
   const newestActivityEvents = [...activityEvents].reverse();
@@ -523,7 +522,7 @@ function AgentCard({
             />
           )}
 
-          {activityEvents.length > 0 ? (
+          {activityEvents.length > 0 && (
             <div className="agent-output">
               <div className="agent-output__label">Activity stream</div>
               <div className="agent-activity-stream" aria-live="polite">
@@ -537,11 +536,6 @@ function AgentCard({
                   </div>
                 ))}
               </div>
-            </div>
-          ) : output.length > 0 && (
-            <div className="agent-output">
-              <div className="agent-output__label">Live output</div>
-              <div className="agent-output__content">{output.join("\n")}</div>
             </div>
           )}
 

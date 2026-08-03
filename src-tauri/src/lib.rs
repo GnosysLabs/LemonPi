@@ -1493,8 +1493,19 @@ fn read_subagent_activity(path: &Path, key: String) -> SubagentLiveActivity {
                 todos = Some(snapshot);
                 todos_updated_at = subagent_todo_updated_at(&record);
             }
-            let at = record.get("ts").and_then(Value::as_u64).unwrap_or_default();
-            match record.get("recordType").and_then(Value::as_str) {
+            let at = record
+                .get("ts")
+                .and_then(Value::as_u64)
+                .or_else(|| record.pointer("/message/timestamp").and_then(Value::as_u64))
+                .unwrap_or_default();
+            let record_type = record
+                .get("recordType")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    (record.get("type").and_then(Value::as_str) == Some("message"))
+                        .then_some("message")
+                });
+            match record_type {
                 Some("tool_start") => {
                     let tool = record
                         .get("toolName")
@@ -1531,7 +1542,10 @@ fn read_subagent_activity(path: &Path, key: String) -> SubagentLiveActivity {
                     );
                 }
                 Some("message") => {
-                    let role = record.get("role").and_then(Value::as_str);
+                    let role = record
+                        .get("role")
+                        .and_then(Value::as_str)
+                        .or_else(|| record.pointer("/message/role").and_then(Value::as_str));
                     if role == Some("assistant") {
                         let content = record
                             .get("message")
@@ -1568,7 +1582,9 @@ fn read_subagent_activity(path: &Path, key: String) -> SubagentLiveActivity {
                             }
                         }
                     } else if role == Some("toolResult")
-                        && record.get("isError").and_then(Value::as_bool) == Some(true)
+                        && (record.get("isError").and_then(Value::as_bool) == Some(true)
+                            || record.pointer("/message/isError").and_then(Value::as_bool)
+                                == Some(true))
                     {
                         if let Some(text) = record.get("text").and_then(Value::as_str) {
                             push_subagent_activity(&mut events, "error", text, at);
@@ -1787,7 +1803,7 @@ async fn get_subagent_activity(
                 let mut activity = resolve_subagent_transcript(&project, &target)
                     .map(|path| read_subagent_activity(&path, key.clone()))
                     .unwrap_or(SubagentLiveActivity {
-                        key,
+                        key: key.clone(),
                         headline: None,
                         headline_kind: None,
                         last_activity_at: None,
@@ -1795,11 +1811,22 @@ async fn get_subagent_activity(
                         todos: None,
                         todos_updated_at: None,
                     });
-                if let Some(snapshot) = resolve_subagent_session(&target)
-                    .and_then(|path| read_subagent_todos(&path, &target.agent))
-                {
-                    activity.todos = Some(snapshot.tasks);
-                    activity.todos_updated_at = snapshot.updated_at;
+                if let Some(session_path) = resolve_subagent_session(&target) {
+                    // A delegated worker may intentionally edit a different checkout from its
+                    // parent project. Its transcript then falls outside the parent's artifact
+                    // root, but its Pi session remains inside the trusted Pi session directory.
+                    // Recover the same reasoning stream from there instead of dropping it.
+                    if activity.events.is_empty() {
+                        let session_activity = read_subagent_activity(&session_path, key.clone());
+                        activity.headline = session_activity.headline;
+                        activity.headline_kind = session_activity.headline_kind;
+                        activity.last_activity_at = session_activity.last_activity_at;
+                        activity.events = session_activity.events;
+                    }
+                    if let Some(snapshot) = read_subagent_todos(&session_path, &target.agent) {
+                        activity.todos = Some(snapshot.tasks);
+                        activity.todos_updated_at = snapshot.updated_at;
+                    }
                 }
                 activity
             })
@@ -3581,6 +3608,37 @@ mod tests {
         assert_eq!(activity.last_activity_at, Some(3000));
         assert_eq!(activity.todos.as_ref().map(Vec::len), Some(1));
         assert_eq!(activity.todos.unwrap()[0].subject, "Audit navigation");
+    }
+
+    #[test]
+    fn subagent_session_file_can_restore_latest_reasoning() {
+        let path = env::temp_dir().join(format!(
+            "lemonpi-session-activity-{}.jsonl",
+            std::process::id(),
+        ));
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"Preparing the final validation pass\"}],\"timestamp\":5000}}\n",
+                "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Validation is complete.\"}],\"timestamp\":6000}}\n",
+            ),
+        )
+        .expect("write session activity fixture");
+
+        let activity = read_subagent_activity(&path, "run:0".to_string());
+        fs::remove_file(&path).expect("remove session activity fixture");
+
+        assert_eq!(activity.events.len(), 2);
+        assert_eq!(activity.events[0].kind, "reasoning");
+        assert_eq!(
+            activity.events[0].text,
+            "Preparing the final validation pass"
+        );
+        assert_eq!(activity.events[0].at, 5000);
+        assert_eq!(
+            activity.headline.as_deref(),
+            Some("Validation is complete.")
+        );
     }
 
     #[test]
