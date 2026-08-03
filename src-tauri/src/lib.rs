@@ -21,6 +21,7 @@ mod remote;
 
 use remote::{
     events::{EventHub, EventKind},
+    hydration::SafeLiveStateCache,
     projects::{KnownProjectInput, ProjectCatalog, RemoteProjectSummary, SessionSyncInput},
     service::RemoteService,
 };
@@ -41,6 +42,7 @@ const MAX_AGENT_FILE_BYTES: u64 = 256 * 1024;
 pub(crate) struct PiManager {
     registry: Mutex<PiRegistry>,
     events: EventHub,
+    hydration: SafeLiveStateCache,
 }
 
 #[derive(Default)]
@@ -899,9 +901,11 @@ fn forward_framed_result(
     pid: u32,
     project: &Path,
     events: &EventHub,
+    hydration: &SafeLiveStateCache,
 ) {
     match result {
         Ok(Some(mut event)) => {
+            hydration.observe(project, &event);
             if let Value::Object(fields) = &mut event {
                 fields.insert("__piPid".to_string(), Value::from(pid));
             }
@@ -914,6 +918,12 @@ fn forward_framed_result(
         }
         Ok(None) => {}
         Err(error) => emit_protocol_error(app, error),
+    }
+}
+
+fn clear_hydration_for_process_state(hydration: &SafeLiveStateCache, project: &Path, state: &str) {
+    if matches!(state, "started" | "exited" | "stopped" | "error") {
+        hydration.clear(project);
     }
 }
 
@@ -937,6 +947,7 @@ async fn forward_stdout<R>(
     pid: u32,
     project: PathBuf,
     events: EventHub,
+    hydration: SafeLiveStateCache,
 ) where
     R: AsyncRead + Unpin,
 {
@@ -947,13 +958,13 @@ async fn forward_stdout<R>(
         match reader.read(&mut chunk).await {
             Ok(0) => {
                 if let Some(result) = framer.finish() {
-                    forward_framed_result(result, &app, pid, &project, &events);
+                    forward_framed_result(result, &app, pid, &project, &events, &hydration);
                 }
                 break;
             }
             Ok(count) => {
                 for result in framer.push(&chunk[..count]) {
-                    forward_framed_result(result, &app, pid, &project, &events);
+                    forward_framed_result(result, &app, pid, &project, &events, &hydration);
                 }
             }
             Err(error) => {
@@ -989,9 +1000,15 @@ async fn stop_active(manager: &Arc<PiManager>) {
         let mut registry = manager.registry.lock().await;
         let active_project = registry.active_project.take();
         registry.active_trusted = None;
-        active_project.and_then(|project| registry.processes.remove(&project))
+        active_project.and_then(|project| {
+            registry
+                .processes
+                .remove(&project)
+                .map(|process| (project, process))
+        })
     };
-    if let Some(process) = process {
+    if let Some((project, process)) = process {
+        clear_hydration_for_process_state(&manager.hydration, &project, "stopped");
         let _ = process.stop.send(());
     }
 }
@@ -1099,6 +1116,7 @@ async fn start_pi(
         cwd: Some(path_for_frontend(&cwd_path)),
     };
 
+    clear_hydration_for_process_state(&manager.hydration, &cwd_path, "started");
     {
         let mut registry = manager.registry.lock().await;
         registry.active_project = Some(cwd_path.clone());
@@ -1128,6 +1146,7 @@ async fn start_pi(
     );
 
     let events_for_stdout = manager.events.clone();
+    let hydration_for_stdout = manager.hydration.clone();
     let project_for_stdout = cwd_path.clone();
     tauri::async_runtime::spawn(forward_stdout(
         stdout,
@@ -1135,6 +1154,7 @@ async fn start_pi(
         pid,
         project_for_stdout,
         events_for_stdout,
+        hydration_for_stdout,
     ));
     tauri::async_runtime::spawn(forward_stderr(stderr, app.clone()));
 
@@ -1157,7 +1177,7 @@ async fn start_pi(
         };
 
         let mut registry = manager_for_wait.registry.lock().await;
-        if registry
+        let removed_current = if registry
             .processes
             .get(&project_for_wait)
             .is_some_and(|process| process.pid == pid)
@@ -1166,8 +1186,18 @@ async fn start_pi(
             if registry.active_project.as_ref() == Some(&project_for_wait) {
                 registry.active_project = None;
             }
-        }
+            true
+        } else {
+            false
+        };
         drop(registry);
+        if removed_current {
+            clear_hydration_for_process_state(
+                &manager_for_wait.hydration,
+                &project_for_wait,
+                state,
+            );
+        }
 
         emit_process_event(
             &app_for_wait,
