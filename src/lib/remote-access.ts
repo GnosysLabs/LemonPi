@@ -81,13 +81,16 @@ export function formatPairedAt(pairedAt: string): string {
   return parsed.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
-export function connectionDetails(material: PairingMaterial): string {
-  return [
-    `Address: ${material.host}:${material.port}`,
-    `Pairing code: ${material.code}`,
-    `Certificate pin: ${material.certificatePin}`,
-    `Expires: ${material.expiresAt}`,
-  ].join("\n");
+/** The exact versioned payload understood by LemonPi Go's scanner and manual paste flow. */
+export function pairingPayload(material: PairingMaterial): string {
+  return JSON.stringify({
+    version: material.version,
+    host: material.host,
+    port: material.port,
+    hostId: material.hostId,
+    code: material.code,
+    certificatePin: material.certificatePin,
+  });
 }
 
 function isIpv4Segment(value: string): boolean {

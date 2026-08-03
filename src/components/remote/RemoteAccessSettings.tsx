@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import {
   cancelRemotePairing,
   getRemoteConfig,
@@ -16,12 +17,12 @@ import {
   ACCESS_MODE_LABELS,
   abbreviateHostId,
   completeRemoteConfig,
-  connectionDetails,
   describeRemoteStatus,
   formatPairedAt,
   formatPairingExpiry,
   pairingExpiry,
   pairingHostError,
+  pairingPayload,
   redactExpiredPairing,
   remotePortError,
   staleDeviceNotice,
@@ -282,10 +283,10 @@ export function RemoteAccessSettings({ onNotice }: RemoteAccessSettingsProps) {
   const copyPairingDetails = async () => {
     if (!pairing) return;
     try {
-      await navigator.clipboard.writeText(connectionDetails(pairing));
-      if (mountedRef.current) onNotice("Connection details copied.");
+      await navigator.clipboard.writeText(pairingPayload(pairing));
+      if (mountedRef.current) onNotice("Pairing JSON copied.");
     } catch {
-      if (mountedRef.current) setCommandError("Couldn't copy connection details. Copy them manually instead.");
+      if (mountedRef.current) setCommandError("Couldn't copy pairing JSON. Try again or scan the QR code instead.");
     }
   };
 
@@ -317,6 +318,10 @@ export function RemoteAccessSettings({ onNotice }: RemoteAccessSettingsProps) {
   };
 
   const visiblePairing = useMemo(() => redactExpiredPairing(pairing, now), [now, pairing]);
+  const visiblePairingPayload = useMemo(
+    () => visiblePairing ? pairingPayload(visiblePairing) : undefined,
+    [visiblePairing],
+  );
   const statusPresentation = status ? describeRemoteStatus(status) : undefined;
   const portError = draft ? remotePortError(draft.port) : undefined;
   const configChanged = Boolean(config && draft && (
@@ -425,14 +430,30 @@ export function RemoteAccessSettings({ onNotice }: RemoteAccessSettingsProps) {
         {!status.running && <div className="remote-access__muted" role="status">Start Remote Access before pairing a device.</div>}
         {status.running && visiblePairing && (
           <div className="remote-access__pairing-material">
-            <div className="remote-access__code"><span>Pairing code</span><strong>{visiblePairing.code}</strong><small role="status">Expires in {pairingExpiry(visiblePairing.expiresAt, now).label}</small></div>
+            <div className="remote-access__pairing-hero">
+              <div className="remote-access__qr">
+                <QRCodeSVG
+                  value={visiblePairingPayload ?? ""}
+                  size={196}
+                  level="M"
+                  marginSize={4}
+                  title="LemonPi pairing QR code"
+                />
+              </div>
+              <div className="remote-access__code">
+                <span>Scan with LemonPi Go</span>
+                <strong>{visiblePairing.code}</strong>
+                <small role="status">Pairing code · Expires in {pairingExpiry(visiblePairing.expiresAt, now).label}</small>
+                <p>Open LemonPi Go on your iPhone and scan this code to connect securely.</p>
+              </div>
+            </div>
             <dl>
               <div><dt>Address</dt><dd>{visiblePairing.host}:{visiblePairing.port}</dd></div>
               <div><dt>Certificate pin</dt><dd className="remote-access__pin">{visiblePairing.certificatePin}</dd></div>
               <div><dt>Expires</dt><dd>{formatPairingExpiry(visiblePairing.expiresAt)}</dd></div>
             </dl>
             <div className="remote-access__actions">
-              <button ref={copyButtonRef} type="button" onClick={() => void copyPairingDetails()}>Copy connection details</button>
+              <button ref={copyButtonRef} type="button" onClick={() => void copyPairingDetails()}>Copy pairing JSON</button>
               <button type="button" disabled={pairingBusy} onClick={() => void cancelPairing()}>{pairingBusy ? "Canceling…" : "Cancel pairing"}</button>
             </div>
           </div>

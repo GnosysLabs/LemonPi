@@ -5,7 +5,7 @@ This document is the normative wire contract for LemonPi Go and the opt-in Lemon
 ## Scope and invariants
 
 - Protocol version is the JSON integer `1`. It is carried in every HTTP response envelope, every `X-LemonPi-Protocol` response header, and the first WebSocket `hello` message.
-- The bridge exposes one TLS port: **8787**. All paths below are relative to `https://HOST:8787`; the event stream is `wss://HOST:8787/v1/events`.
+- The bridge exposes one configured TLS port, defaulting to **8787**. All paths below are relative to `https://HOST:PORT`; the event stream is `wss://HOST:PORT/v1/events`.
 - The host is authoritative for projects, project labels, project trust state, running-process state, sessions, timestamps, and Pi correlation IDs.
 - `projectId` and `sessionId` are opaque host-issued identifiers. Clients must treat them as uninterpreted strings matching `[A-Za-z0-9_-]{1,128}`. They are never filesystem paths or encodings of paths.
 - The API never accepts or returns filesystem paths, session-file paths, transcript paths, private keys, certificate private-key data, token digests, raw configuration paths, shell commands, package/settings mutation, or trust-escalation fields.
@@ -29,7 +29,7 @@ The desktop bridge uses a persistent self-signed TLS leaf certificate. The QR/ma
 }
 ```
 
-`host` is a single LAN address, Tailscale address, or hostname with no scheme, slash, query, fragment, or port. `port` is always `8787`. `hostId` is a persistent host UUID. `code` is the exact eight-character, uppercase Crockford Base32 pairing code shown by the desktop host. `certificatePin` is the unpadded base64url encoding of the SHA-256 digest of the DER bytes of the TLS leaf certificate (32 digest bytes, therefore 43 encoded characters).
+`host` is a single LAN address, Tailscale address, or hostname with no scheme, slash, query, fragment, or port. `port` is the desktop listener's configured port from `1` through `65535` (default `8787`). `hostId` is a persistent host UUID. `code` is the exact eight-character, uppercase Crockford Base32 pairing code shown by the desktop host. `certificatePin` is the unpadded base64url encoding of the SHA-256 digest of the DER bytes of the TLS leaf certificate (32 digest bytes, therefore 43 encoded characters).
 
 The client must verify that the TLS leaf certificate hashes to the pairing or previously stored pin. A pin mismatch is a hard connection failure; clients must not silently fall back to ordinary system trust, accept a new certificate, or use trust-on-first-use. The pairing payload can be carried as a QR code or copied/manual-entered as the same JSON object.
 

@@ -12,6 +12,7 @@ import {
   initialRemoteUiState,
   pairingExpiry,
   pairingHostError,
+  pairingPayload,
   parseRemotePort,
   redactExpiredPairing,
   shouldRefreshDevicesAfterRevoke,
@@ -77,6 +78,18 @@ describe("remote access helpers", () => {
     expect(pairingExpiry(material.expiresAt, now + 61_000).expired).toBe(true);
     expect(redactExpiredPairing(material, now + 60_000)).toBeUndefined();
     expect(redactExpiredPairing(material, now + 59_000)).toEqual(material);
+  });
+
+  it("creates the exact pairing payload consumed by LemonPi Go", () => {
+    expect(JSON.parse(pairingPayload(material))).toEqual({
+      version: 1,
+      host: "macbook.local",
+      port: 8787,
+      hostId: "host-identifier",
+      code: "123456",
+      certificatePin: "pin",
+    });
+    expect(pairingPayload(material)).not.toContain("expiresAt");
   });
 
   it("ignores stale and disposed async responses", () => {

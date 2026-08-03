@@ -317,13 +317,34 @@
   background: color-mix(in srgb, var(--lemon) 7%, var(--bg-raised));
 }
 
+.remote-access__pairing-hero {
+  display: grid;
+  grid-template-columns: 196px minmax(0, 1fr);
+  gap: 14px;
+}
+
+.remote-access__qr {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.remote-access__qr svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
 .remote-access__code {
   display: grid;
-  justify-items: center;
+  align-content: center;
+  justify-items: start;
   padding: 16px;
   border-radius: 9px;
   background: var(--bg-canvas);
-  text-align: center;
+  text-align: left;
 }
 
 .remote-access__code span,
@@ -339,6 +360,14 @@
   font-size: clamp(28px, 5vw, 40px);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.13em;
+}
+
+.remote-access__code p {
+  max-width: 430px;
+  margin: 7px 0 0;
+  color: var(--remote-muted);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .remote-access__pairing-material dl {
@@ -412,7 +441,9 @@
   .remote-access__connection-editor,
   .remote-access__fields,
   .remote-access__metadata,
+  .remote-access__pairing-hero,
   .remote-access__pairing-material dl { grid-template-columns: 1fr; }
+  .remote-access__qr { width: min(196px, 100%); }
   .remote-access__actions--config,
   .remote-access__save { width: 100%; }
   .remote-access__panel-heading,
