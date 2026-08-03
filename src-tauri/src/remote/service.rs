@@ -21,15 +21,25 @@ use std::{
 };
 use tokio::{
     net::TcpListener,
-    sync::{watch, Mutex},
+    sync::{watch, Mutex, Semaphore},
     task::JoinHandle,
 };
 use tokio_rustls::TlsAcceptor;
 
+/// Hard cap for this HTTP-only bridge slice. A future WebSocket implementation must introduce
+/// its own explicit lifecycle/budget policy rather than silently inheriting this HTTP budget.
+pub(crate) const MAX_REMOTE_CONNECTIONS: usize = 8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ListenerExit {
+    Shutdown,
+    AcceptError,
+}
+
 struct RunningServer {
     local_addr: SocketAddr,
     shutdown: watch::Sender<bool>,
-    task: JoinHandle<()>,
+    task: JoinHandle<ListenerExit>,
 }
 
 /// Safe local-settings view. It never contains a filesystem location, certificate private key,
@@ -71,6 +81,9 @@ pub(crate) struct RemoteDevice {
 pub(crate) struct RemoteService {
     storage: PathBuf,
     manager: Arc<PiManager>,
+    /// Serializes start, restart, disable, and startup-restore transitions. No public lifecycle
+    /// method may acquire `running` before this lock.
+    transition: Mutex<()>,
     config: Mutex<RemoteConfig>,
     identity: Arc<HostIdentity>,
     devices: Arc<Mutex<DeviceStore>>,
@@ -89,6 +102,7 @@ impl RemoteService {
         Ok(Self {
             storage,
             manager,
+            transition: Mutex::new(()),
             config: Mutex::new(config),
             identity,
             devices,
@@ -103,29 +117,26 @@ impl RemoteService {
     }
 
     pub(crate) async fn start_if_enabled(&self) -> RemoteResult<()> {
-        if self.config.lock().await.enabled {
-            self.start().await
-        } else {
-            Ok(())
-        }
+        let _transition = self.transition.lock().await;
+        self.start_locked().await
     }
 
     /// Persists the setting before enabling. Disabling tears down the listener even if persistence
     /// fails, so a local user's immediate security action is never delayed by a disk error.
     pub(crate) async fn set_config(&self, config: RemoteConfig) -> RemoteResult<()> {
         config.validate()?;
-        let save_result = RemoteConfigStore::new(&self.storage).save(&config);
-        if let Err(error) = save_result {
+        let _transition = self.transition.lock().await;
+        if let Err(error) = RemoteConfigStore::new(&self.storage).save(&config) {
             if !config.enabled {
-                self.stop().await;
+                self.stop_locked().await;
             }
             return Err(error);
         }
         *self.config.lock().await = config.clone();
         if config.enabled {
-            self.start().await
+            self.start_locked().await
         } else {
-            self.stop().await;
+            self.stop_locked().await;
             Ok(())
         }
     }
@@ -133,11 +144,95 @@ impl RemoteService {
     /// Starts a fresh listener after stopping an existing one. The listener is IPv4-only in v1;
     /// see the user-facing residual risk in the implementation report for IPv6 tailnets.
     pub(crate) async fn start(&self) -> RemoteResult<()> {
+        let _transition = self.transition.lock().await;
+        self.start_locked().await
+    }
+
+    pub(crate) async fn stop(&self) {
+        let _transition = self.transition.lock().await;
+        self.stop_locked().await;
+    }
+
+    pub(crate) async fn status(&self) -> RemoteStatus {
+        let _transition = self.transition.lock().await;
+        let config = self.config.lock().await.clone();
+        let running = self.listener_is_live_locked().await;
+        let pairing_active = if running {
+            self.pairing
+                .lock()
+                .await
+                .as_mut()
+                .and_then(|window| window.display_code_at(unix_seconds()))
+                .is_some()
+        } else {
+            false
+        };
+        RemoteStatus {
+            enabled: config.enabled,
+            running,
+            port: config.port,
+            access_mode: config.access_mode,
+            host_id: self.identity.host_id().to_string(),
+            pairing_active,
+            last_error: self.last_error.lock().await.clone(),
+        }
+    }
+
+    /// Opens a fresh single-use code only while the remote TLS host is actually running.
+    pub(crate) async fn start_pairing(&self, host: String) -> RemoteResult<PairingMaterial> {
+        if !valid_pairing_host(&host) {
+            return Err(RemoteError::InvalidConfiguration(
+                "pairing host is invalid".into(),
+            ));
+        }
+        let _transition = self.transition.lock().await;
+        if !self.listener_is_live_locked().await {
+            return Err(RemoteError::InvalidConfiguration(
+                "remote access is not running".into(),
+            ));
+        }
+        let config = self.config.lock().await.clone();
+        let now = unix_seconds();
+        *self.pairing.lock().await = Some(PairingWindow::open_at(now));
+        // The task can finish independently of a transition; re-check after allocating the local
+        // code so a dead listener never leaves a pairing window that looks usable.
+        if !self.listener_is_live_locked().await {
+            *self.pairing.lock().await = None;
+            return Err(RemoteError::InvalidConfiguration(
+                "remote access is not running".into(),
+            ));
+        }
+        let mut pairing = self.pairing.lock().await;
+        let window = pairing.as_mut().expect("pairing window was inserted");
+        let code = window
+            .display_code_at(now)
+            .expect("fresh pairing window is immediately readable")
+            .to_string();
+        Ok(PairingMaterial {
+            version: super::protocol::PROTOCOL_VERSION,
+            host,
+            port: config.port,
+            host_id: self.identity.host_id().to_string(),
+            code,
+            certificate_pin: self.identity.certificate_pin_base64url()?,
+            expires_at: rfc3339(window.expires_at()),
+        })
+    }
+
+    pub(crate) async fn cancel_pairing(&self) {
+        let _transition = self.transition.lock().await;
+        *self.pairing.lock().await = None;
+    }
+
+    /// Must be called with `transition` held. It owns the only stop/start sequence and does not
+    /// acquire the transition mutex itself, avoiding recursive lock deadlocks.
+    async fn start_locked(&self) -> RemoteResult<()> {
         let config = self.config.lock().await.clone();
         if !config.enabled {
+            self.stop_locked().await;
             return Ok(());
         }
-        self.stop().await;
+        self.stop_locked().await;
         let tls = tls_server_config(&self.identity)?;
         let listener = match TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, config.port)).await
         {
@@ -157,15 +252,14 @@ impl RemoteService {
             pairing: Arc::clone(&self.pairing),
             manager: Arc::clone(&self.manager),
         };
-        let app = router(state);
-        let acceptor = TlsAcceptor::from(tls);
         let (shutdown, shutdown_rx) = watch::channel(false);
         let task = tokio::spawn(run_listener(
             listener,
-            acceptor,
-            app,
+            TlsAcceptor::from(tls),
+            router(state),
             config.access_mode,
             shutdown_rx,
+            connection_budget(),
         ));
         *self.running.lock().await = Some(RunningServer {
             local_addr,
@@ -176,70 +270,47 @@ impl RemoteService {
         Ok(())
     }
 
-    pub(crate) async fn stop(&self) {
+    /// Must be called with `transition` held. It closes the listening socket before returning and
+    /// aborts only the listener task if it does not acknowledge shutdown promptly.
+    async fn stop_locked(&self) {
         let running = self.running.lock().await.take();
         if let Some(running) = running {
             let _ = running.shutdown.send(true);
-            let _ = tokio::time::timeout(Duration::from_secs(2), running.task).await;
+            let mut task = running.task;
+            if tokio::time::timeout(Duration::from_secs(2), &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+                let _ = task.await;
+            }
         }
         *self.pairing.lock().await = None;
     }
 
-    pub(crate) async fn status(&self) -> RemoteStatus {
-        let config = self.config.lock().await.clone();
-        let running = self.running.lock().await.is_some();
-        let now = unix_seconds();
-        let pairing_active = self
-            .pairing
-            .lock()
-            .await
-            .as_mut()
-            .and_then(|window| window.display_code_at(now))
-            .is_some();
-        RemoteStatus {
-            enabled: config.enabled,
-            running,
-            port: config.port,
-            access_mode: config.access_mode,
-            host_id: self.identity.host_id().to_string(),
-            pairing_active,
-            last_error: self.last_error.lock().await.clone(),
+    /// Must be called with `transition` held. Reaps an unexpectedly completed listener so status
+    /// and pairing are based on task liveness rather than a stale `Option` handle.
+    async fn listener_is_live_locked(&self) -> bool {
+        let finished = {
+            let running = self.running.lock().await;
+            match running.as_ref() {
+                Some(running) => running.task.is_finished(),
+                None => return false,
+            }
+        };
+        if !finished {
+            return true;
         }
-    }
-
-    /// Opens a fresh single-use code only while the remote TLS host is actually running.
-    pub(crate) async fn start_pairing(&self, host: String) -> RemoteResult<PairingMaterial> {
-        if !valid_pairing_host(&host) {
-            return Err(RemoteError::InvalidConfiguration(
-                "pairing host is invalid".into(),
-            ));
+        let running = self.running.lock().await.take();
+        if let Some(running) = running {
+            let outcome = running.task.await;
+            if !matches!(outcome, Ok(ListenerExit::Shutdown)) {
+                self.set_last_error("The remote host stopped unexpectedly.")
+                    .await;
+            }
         }
-        if !self.running.lock().await.is_some() {
-            return Err(RemoteError::InvalidConfiguration(
-                "remote access is not running".into(),
-            ));
-        }
-        let now = unix_seconds();
-        let mut pairing = self.pairing.lock().await;
-        *pairing = Some(PairingWindow::open_at(now));
-        let window = pairing.as_mut().expect("pairing window was inserted");
-        let code = window
-            .display_code_at(now)
-            .expect("fresh pairing window is immediately readable")
-            .to_string();
-        Ok(PairingMaterial {
-            version: super::protocol::PROTOCOL_VERSION,
-            host,
-            port: self.config.lock().await.port,
-            host_id: self.identity.host_id().to_string(),
-            code,
-            certificate_pin: self.identity.certificate_pin_base64url()?,
-            expires_at: rfc3339(window.expires_at()),
-        })
-    }
-
-    pub(crate) async fn cancel_pairing(&self) {
         *self.pairing.lock().await = None;
+        false
     }
 
     pub(crate) async fn list_devices(&self) -> Vec<RemoteDevice> {
@@ -265,12 +336,26 @@ impl RemoteService {
 
     #[cfg(test)]
     pub(crate) async fn listening_addr(&self) -> Option<SocketAddr> {
+        let _transition = self.transition.lock().await;
+        if !self.listener_is_live_locked().await {
+            return None;
+        }
         self.running
             .lock()
             .await
             .as_ref()
             .map(|running| running.local_addr)
     }
+
+    #[cfg(test)]
+    async fn tracked_listener_count(&self) -> usize {
+        let _transition = self.transition.lock().await;
+        usize::from(self.listener_is_live_locked().await)
+    }
+}
+
+fn connection_budget() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(MAX_REMOTE_CONNECTIONS))
 }
 
 async fn run_listener(
@@ -279,32 +364,49 @@ async fn run_listener(
     app: axum::Router,
     access_mode: AccessMode,
     mut shutdown: watch::Receiver<bool>,
-) {
+    connection_budget: Arc<Semaphore>,
+) -> ListenerExit {
     loop {
         let accepted = tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
-                    return;
+                    return ListenerExit::Shutdown;
                 }
                 continue;
             }
             accepted = listener.accept() => accepted,
         };
-        let Ok((stream, peer)) = accepted else {
-            continue;
+        let (stream, peer) = match accepted {
+            Ok(accepted) => accepted,
+            // Do not spin on a persistent listener failure. `status` reaps this completed task
+            // and surfaces only a stable local error string, never an OS/peer diagnostic.
+            Err(_) => return ListenerExit::AcceptError,
         };
         // This happens before TLS and before route handling. A denied TCP peer gets no protocol
         // information or error body to probe.
         if !allows_peer(access_mode, peer.ip()) {
             continue;
         }
-        tokio::spawn(serve_tls_connection(
-            acceptor.clone(),
-            stream,
-            peer,
-            app.clone(),
-            shutdown.clone(),
-        ));
+        // Accepted peers get a task only when a permit is immediately available. The permit stays
+        // alive through the handshake and HTTP connection, then releases automatically on timeout,
+        // shutdown, or normal completion. Excess sockets receive no protocol output.
+        let Ok(permit) = connection_budget.clone().try_acquire_owned() else {
+            continue;
+        };
+        let connection_acceptor = acceptor.clone();
+        let connection_app = app.clone();
+        let connection_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            serve_tls_connection(
+                connection_acceptor,
+                stream,
+                peer,
+                connection_app,
+                connection_shutdown,
+            )
+            .await;
+        });
     }
 }
 
@@ -353,8 +455,17 @@ mod tests {
     use tempfile::tempdir;
 
     fn unused_port() -> u16 {
-        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-        listener.local_addr().unwrap().port()
+        unused_ports(1)[0]
+    }
+
+    fn unused_ports(count: usize) -> Vec<u16> {
+        let reservations = (0..count)
+            .map(|_| std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap())
+            .collect::<Vec<_>>();
+        reservations
+            .iter()
+            .map(|listener| listener.local_addr().unwrap().port())
+            .collect()
     }
 
     #[tokio::test]
@@ -401,6 +512,148 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn serialized_restarts_close_old_ports_and_leave_no_orphan_listener() {
+        let root = tempdir().unwrap();
+        let service = Arc::new(
+            RemoteService::load(root.path().to_path_buf(), Arc::new(PiManager::default())).unwrap(),
+        );
+        let ports = unused_ports(3);
+        let (first_port, second_port, third_port) = (ports[0], ports[1], ports[2]);
+        service
+            .set_config(RemoteConfig {
+                enabled: true,
+                port: first_port,
+                ..RemoteConfig::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, first_port))
+                .await
+                .is_ok()
+        );
+        service
+            .set_config(RemoteConfig {
+                enabled: true,
+                port: second_port,
+                ..RemoteConfig::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, first_port))
+                .await
+                .is_err()
+        );
+        assert_eq!(service.tracked_listener_count().await, 1);
+
+        let first = {
+            let service = Arc::clone(&service);
+            tokio::spawn(async move {
+                service
+                    .set_config(RemoteConfig {
+                        enabled: true,
+                        port: first_port,
+                        ..RemoteConfig::default()
+                    })
+                    .await
+            })
+        };
+        let second = {
+            let service = Arc::clone(&service);
+            tokio::spawn(async move {
+                service
+                    .set_config(RemoteConfig {
+                        enabled: true,
+                        port: third_port,
+                        ..RemoteConfig::default()
+                    })
+                    .await
+            })
+        };
+        let third = {
+            let service = Arc::clone(&service);
+            tokio::spawn(async move { service.start().await })
+        };
+        let disable = {
+            let service = Arc::clone(&service);
+            tokio::spawn(async move {
+                service
+                    .set_config(RemoteConfig {
+                        enabled: false,
+                        port: third_port,
+                        ..RemoteConfig::default()
+                    })
+                    .await
+            })
+        };
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        third.await.unwrap().unwrap();
+        disable.await.unwrap().unwrap();
+
+        // Make the final operation deterministic after the deliberate race, then prove that every
+        // port involved in the transition is closed and no `RunningServer` is left behind.
+        service
+            .set_config(RemoteConfig {
+                enabled: false,
+                port: third_port,
+                ..RemoteConfig::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(service.tracked_listener_count().await, 0);
+        for port in ports {
+            assert!(
+                tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+                    .await
+                    .is_err(),
+                "port {port} remained open after serialized disable"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn finished_listener_is_reaped_from_status_and_rejected_for_pairing() {
+        let root = tempdir().unwrap();
+        let service =
+            RemoteService::load(root.path().to_path_buf(), Arc::new(PiManager::default())).unwrap();
+        let (shutdown, _) = watch::channel(false);
+        *service.running.lock().await = Some(RunningServer {
+            local_addr: "127.0.0.1:9443".parse().unwrap(),
+            shutdown,
+            task: tokio::spawn(async { ListenerExit::AcceptError }),
+        });
+        tokio::task::yield_now().await;
+        let status = service.status().await;
+        assert!(!status.running);
+        assert!(!status.pairing_active);
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some("The remote host stopped unexpectedly.")
+        );
+        assert!(service
+            .start_pairing("host.tailnet.ts.net".into())
+            .await
+            .is_err());
+        assert!(service.listening_addr().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn connection_budget_caps_eight_tasks_and_releases_permits() {
+        let budget = connection_budget();
+        let mut permits = (0..MAX_REMOTE_CONNECTIONS)
+            .map(|_| budget.clone().try_acquire_owned().unwrap())
+            .collect::<Vec<_>>();
+        assert!(budget.clone().try_acquire_owned().is_err());
+        drop(permits.pop());
+        let replacement = budget.clone().try_acquire_owned().unwrap();
+        drop(replacement);
+        drop(permits);
+        assert_eq!(budget.available_permits(), MAX_REMOTE_CONNECTIONS);
     }
 
     #[test]

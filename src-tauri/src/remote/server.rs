@@ -36,10 +36,11 @@ use rustls::{
 };
 use serde::Serialize;
 use std::{
+    future::Future,
     net::SocketAddr,
     path::PathBuf,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::{
@@ -51,6 +52,11 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 pub(crate) const MAX_HTTP_BODY_BYTES: usize = 2 * 1024 * 1024;
+/// Slow allowed peers must complete TLS before consuming a server task indefinitely.
+pub(crate) const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// This current slice has only short request/response routes. A future WebSocket stream must
+/// explicitly replace this policy rather than silently inheriting a 60-second HTTP deadline.
+pub(crate) const HTTP_CONNECTION_LIFETIME: Duration = Duration::from_secs(60);
 pub(crate) const EVENT_ENVELOPE_BYTES: u64 = 1024 * 1024;
 pub(crate) const DEVICE_LIMIT: u64 = 16;
 pub(crate) const SOCKET_LIMIT: u64 = 8;
@@ -118,6 +124,12 @@ pub(crate) fn tls_server_config(identity: &HostIdentity) -> RemoteResult<Arc<Ser
     Ok(Arc::new(config))
 }
 
+/// Runs a finite pre-TLS or HTTP operation. It is intentionally small and testable so the
+/// connection lifetime policy cannot drift from the task that holds a connection permit.
+async fn complete_within<T>(duration: Duration, operation: impl Future<Output = T>) -> Option<T> {
+    tokio::time::timeout(duration, operation).await.ok()
+}
+
 /// Serves one already-peer-validated TLS connection. TLS handshake failures are intentionally
 /// silent: reporting details would turn an unauthenticated socket into a certificate oracle.
 pub(crate) async fn serve_tls_connection(
@@ -130,7 +142,11 @@ pub(crate) async fn serve_tls_connection(
     // A listener stop also releases in-progress TLS handshakes and active request tasks. This
     // prevents a malicious peer that never completes a handshake from outliving a local disable.
     let served = async move {
-        let Ok(tls_stream) = acceptor.accept(stream).await else {
+        let Some(handshake) = complete_within(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await
+        else {
+            return;
+        };
+        let Ok(tls_stream) = handshake else {
             return;
         };
         let service = app
@@ -139,9 +155,12 @@ pub(crate) async fn serve_tls_connection(
             .await
             .expect("infallible Axum make service");
         let io = TokioIo::new(tls_stream);
-        let _ = HyperBuilder::new(TokioExecutor::new())
-            .serve_connection_with_upgrades(io, TowerToHyperService::new(service))
-            .await;
+        let _ = complete_within(
+            HTTP_CONNECTION_LIFETIME,
+            HyperBuilder::new(TokioExecutor::new())
+                .serve_connection_with_upgrades(io, TowerToHyperService::new(service)),
+        )
+        .await;
     };
     tokio::select! {
         _ = served => {}
@@ -877,6 +896,20 @@ mod tests {
         );
         assert!(!summary.contains(secret));
         assert!(!summary.contains("body"));
+    }
+
+    #[tokio::test]
+    async fn finite_deadline_helper_releases_stalled_connection_work() {
+        assert_eq!(
+            complete_within(Duration::from_millis(1), std::future::ready("complete")).await,
+            Some("complete")
+        );
+        assert_eq!(
+            complete_within(Duration::ZERO, std::future::pending::<()>()).await,
+            None
+        );
+        assert_eq!(TLS_HANDSHAKE_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(HTTP_CONNECTION_LIFETIME, Duration::from_secs(60));
     }
 
     #[test]
