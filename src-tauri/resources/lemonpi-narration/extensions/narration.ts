@@ -1122,10 +1122,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           throw new Error("The subagent steering request was malformed.");
         }
         await requestSubagentSteer(pi, runId, index, message);
-        ctx.ui.notify("Steer delivered directly to the subagent.", "info");
       } else if (isStopRequest) {
         await requestSubagentStop(pi, runId);
-        ctx.ui.notify("Stop requested directly for the subagent.", "info");
       } else {
         const status = payload.status === "complete" || payload.status === "completed"
           ? "completed"
