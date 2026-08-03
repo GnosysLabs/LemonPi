@@ -1242,15 +1242,19 @@ button:disabled {
   display: flex;
   height: 28px;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
 }
 
 .assistant-message__waiting i {
-  width: 4px;
-  height: 4px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
-  background: var(--faint);
+  background: color-mix(in srgb, var(--lemon) 58%, var(--faint));
   animation: thinking-pulse 1.25s var(--ease-heavy) infinite;
+}
+
+.assistant-message--preparing .assistant-message__rail span {
+  animation: preparing-rail-pulse 1.5s ease-in-out infinite;
 }
 
 .assistant-message__waiting i:nth-child(2) { animation-delay: 120ms; }
@@ -1259,6 +1263,10 @@ button:disabled {
 @keyframes thinking-pulse {
   0%, 70%, 100% { opacity: 0.3; transform: translateY(0); }
   35% { opacity: 1; transform: translateY(-3px); }
+}
+
+@keyframes preparing-rail-pulse {
+  50% { opacity: 0.5; transform: scale(0.82); }
 }
 
 .message-state {

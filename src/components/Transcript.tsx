@@ -87,10 +87,10 @@ function assistantTurnSummary(items: TranscriptItem[], index: number): string | 
 }
 
 function AssistantMessage({ item, summary }: { item: Extract<TranscriptItem, { kind: "assistant" }>; summary?: string }) {
-  if (!item.text && !summary && (item.status === "streaming" || item.status === "complete")) return null;
+  if (!item.text && !summary && item.status === "complete") return null;
 
   return (
-    <article className="assistant-message">
+    <article className={`assistant-message${item.status === "streaming" && !item.text && !summary ? " assistant-message--preparing" : ""}`}>
       <div className="assistant-message__rail" aria-hidden="true">
         <span />
       </div>
@@ -110,6 +110,19 @@ function AssistantMessage({ item, summary }: { item: Extract<TranscriptItem, { k
   );
 }
 
+function PreparingIndicator() {
+  return (
+    <article className="assistant-message assistant-message--preparing" role="status" aria-label="Pi is preparing a response">
+      <div className="assistant-message__rail" aria-hidden="true">
+        <span />
+      </div>
+      <div className="assistant-message__content">
+        <div className="assistant-message__waiting" aria-hidden="true"><i /><i /><i /></div>
+      </div>
+    </article>
+  );
+}
+
 export function Transcript({
   items,
   isStreaming,
@@ -124,6 +137,9 @@ export function Transcript({
   onChooseProject: () => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
+  const hasStreamingAssistant = items.some((item) => item.kind === "assistant" && item.status === "streaming");
+  const hasActiveTool = items.some((item) => item.kind === "tool" && (item.status === "queued" || item.status === "running"));
+  const showPreparingIndicator = isStreaming && !hasStreamingAssistant && !hasActiveTool;
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: isStreaming ? "auto" : "smooth", block: "end" });
@@ -192,6 +208,7 @@ export function Transcript({
         if (item.kind === "assistant") return <AssistantMessage item={item} summary={assistantTurnSummary(items, index)} key={item.id} />;
         return <ToolCard item={item} key={item.id} />;
       })}
+      {showPreparingIndicator && <PreparingIndicator />}
       <div ref={endRef} />
     </div>
   );
