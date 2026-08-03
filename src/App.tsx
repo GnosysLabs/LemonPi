@@ -8,6 +8,7 @@ import { SettingsSurface } from "./components/SettingsSurface";
 import { ProjectTrustDialog } from "./components/ProjectTrustDialog";
 import { StartupSplash } from "./components/StartupSplash";
 import { StatusStrip } from "./components/StatusStrip";
+import { TodoPanel } from "./components/TodoPanel";
 import { Transcript } from "./components/Transcript";
 import { WorkspaceRail } from "./components/WorkspaceRail";
 import { UpdateNotice } from "./components/UpdateNotice";
@@ -52,6 +53,7 @@ import { initialTranscriptState, reduceTranscript } from "./lib/transcript";
 import { decideStartupGate } from "./lib/startup-gate";
 import { buildPromptWithAttachments, promptImages, type ComposerAttachment } from "./lib/attachments";
 import { useAppUpdater } from "./lib/app-updater";
+import { todoSnapshotFromEvent, todoSnapshotFromMessages, type TodoSnapshot } from "./lib/extension-todos";
 import {
   baselineProjectFinalReplies,
   countUnreadFinalReplies,
@@ -208,6 +210,8 @@ export default function App() {
   const [dialogQueue, setDialogQueue] = useState<RpcExtensionUiRequest[]>([]);
   const [injectedComposerText, setInjectedComposerText] = useState<string>();
   const [extensionStatuses, setExtensionStatuses] = useState<Record<string, string>>({});
+  const [todoSnapshot, setTodoSnapshot] = useState<TodoSnapshot>();
+  const [hiddenCompletedTodoIds, setHiddenCompletedTodoIds] = useState<Set<number>>(() => new Set());
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [stderrTail, setStderrTail] = useState<string[]>([]);
   const [transcript, dispatchTranscript] = useReducer(reduceTranscript, initialTranscriptState);
@@ -218,6 +222,7 @@ export default function App() {
   const pendingRef = useRef(new Map<string, PendingRequest>());
   const projectRef = useRef<string | undefined>(undefined);
   const sessionRefreshRequestRef = useRef(0);
+  const todoSnapshotRef = useRef<TodoSnapshot | undefined>(undefined);
 
   const appUpdater = useAppUpdater();
   const finishStartup = useCallback(() => setStartupReady(true), []);
@@ -227,6 +232,20 @@ export default function App() {
     window.setTimeout(() => setToasts((current) => current.filter((toast) => toast.id !== id)), 5000);
   }, []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
+
+  const applyTodoSnapshot = useCallback((snapshot: TodoSnapshot | undefined, restored = false) => {
+    todoSnapshotRef.current = snapshot;
+    setTodoSnapshot(snapshot);
+    setHiddenCompletedTodoIds((current) => {
+      if (!snapshot) return new Set();
+      if (restored) return new Set(snapshot.tasks.filter((task) => task.status === "completed").map((task) => task.id));
+      const retained = new Set<number>();
+      for (const task of snapshot.tasks) {
+        if (task.status === "completed" && current.has(task.id)) retained.add(task.id);
+      }
+      return retained;
+    });
+  }, []);
 
   const rpc = useCallback(async (command: Record<string, unknown>, pending?: PendingRequest) => {
     const id = crypto.randomUUID();
@@ -311,6 +330,9 @@ export default function App() {
     const event: PiEvent = { ...rawEvent, __lemonId: String(++sequenceRef.current) };
     dispatchTranscript(event);
 
+    const nextTodos = todoSnapshotFromEvent(event);
+    if (nextTodos) applyTodoSnapshot(nextTodos);
+
     if ((event.type === "tool_execution_update" || event.type === "tool_execution_end") && event.toolName === "subagent") {
       const result = asRecord(event.type === "tool_execution_update" ? event.partialResult : event.result);
       const run = foregroundRunFromDetails(result?.details, event.type === "tool_execution_end");
@@ -349,6 +371,8 @@ export default function App() {
         document.title = event.title;
       } else if (event.method === "set_editor_text") {
         setInjectedComposerText(event.text ?? "");
+      } else if (event.method === "setWidget" && event.widgetKey === "rpiv-todos") {
+        // rpiv-todo's terminal widget has a dedicated native surface in LemonPi.
       } else if (event.method === "setWidget" && event.widgetLines?.length) {
         addToast(event.widgetLines.join(" · "), "info");
       }
@@ -367,6 +391,13 @@ export default function App() {
     }
 
     if (event.type === "agent_start") {
+      const currentTodos = todoSnapshotRef.current;
+      if (currentTodos) {
+        setHiddenCompletedTodoIds((current) => new Set([
+          ...current,
+          ...currentTodos.tasks.filter((task) => task.status === "completed").map((task) => task.id),
+        ]));
+      }
       setSessionState((current) => current ? { ...current, isStreaming: true } : current);
       // A newly logged user turn makes any previous final reply ineligible.
       void refreshSessions();
@@ -377,7 +408,7 @@ export default function App() {
       refreshState();
       void refreshSessions();
     }
-  }, [addToast, refreshSessions, refreshState]);
+  }, [addToast, applyTodoSnapshot, refreshSessions, refreshState]);
 
   useEffect(() => {
     let disposed = false;
@@ -639,6 +670,7 @@ export default function App() {
       setSessionState(undefined);
       setStats(undefined);
       setExtensionStatuses({});
+      applyTodoSnapshot(undefined);
       setForegroundRuns([]);
       setSubagentRuns([]);
       setSubagentActivity({});
@@ -648,7 +680,9 @@ export default function App() {
         {
           onSuccess: (data) => {
             const messages = asRecord(data)?.messages;
-            dispatchTranscript({ type: "lemonpi_hydrate", messages: Array.isArray(messages) ? messages : [] });
+            const sessionMessages = Array.isArray(messages) ? messages : [];
+            dispatchTranscript({ type: "lemonpi_hydrate", messages: sessionMessages });
+            applyTodoSnapshot(todoSnapshotFromMessages(sessionMessages), true);
             refreshState();
             if (initialRestore) finishStartup();
           },
@@ -724,6 +758,7 @@ export default function App() {
             setStats(undefined);
             setForegroundRuns([]);
             setSubagentRuns([]);
+            applyTodoSnapshot(undefined);
             refreshState();
             void refreshSessions();
           }
@@ -748,13 +783,16 @@ export default function App() {
           setStats(undefined);
           setForegroundRuns([]);
           setSubagentRuns([]);
+          applyTodoSnapshot(undefined);
           refreshState();
           void rpc(
             { type: "get_messages" },
             {
               onSuccess: (messagesData) => {
                 const messages = asRecord(messagesData)?.messages;
-                dispatchTranscript({ type: "lemonpi_hydrate", messages: Array.isArray(messages) ? messages : [] });
+                const sessionMessages = Array.isArray(messages) ? messages : [];
+                dispatchTranscript({ type: "lemonpi_hydrate", messages: sessionMessages });
+                applyTodoSnapshot(todoSnapshotFromMessages(sessionMessages), true);
                 setSessionSwitching(false);
                 refreshState();
                 void refreshSessions();
@@ -896,6 +934,7 @@ export default function App() {
             />
           </div>
           <div className="conversation-dock">
+            <TodoPanel snapshot={todoSnapshot} hiddenCompletedIds={hiddenCompletedTodoIds} />
             {Object.entries(extensionStatuses).length > 0 && (
               <div className="extension-statuses">
                 {Object.entries(extensionStatuses).map(([key, value]) => <span key={key}><i />{value}</span>)}

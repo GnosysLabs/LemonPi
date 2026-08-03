@@ -26,4 +26,6 @@ The extension also handles LemonPi's private RPC control messages for direct chi
 
 Main Pi is the sole owner of user clarification. It uses the required `ask_user_question` tool only when a decision genuinely blocks scope, safety, or the next useful action; discoverable facts and non-blocking preferences do not justify an interruption, and subagents return uncertainty to Main Pi instead of opening competing questionnaires.
 
+For multi-step work, Main Pi maintains the user-visible plan with the required `rpiv-todo` package. LemonPi reads the package's public tool-result snapshot to render native progress above the composer and restores it from the active session after reload, compaction, or session switching. The checklist supplements concise narration rather than replacing it. Todo state remains session-scoped by the package; a child checklist can be surfaced independently when that agent profile explicitly grants the `todo` extension tool.
+
 LemonPi loads `extensions/narration.ts` explicitly for every managed Pi process. It is not installed into the user's global Pi configuration.

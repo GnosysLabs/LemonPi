@@ -1,8 +1,11 @@
 import {
   Brain,
   Check,
+  Circle,
   CircleNotch,
   Clock,
+  ListChecks,
+  LockSimple,
   Pause,
   Robot,
   Signpost,
@@ -172,6 +175,35 @@ function AgentPromptModal({ agent, prompt, onClose }: { agent: string; prompt: s
   );
 }
 
+function AgentTodos({ todos }: { todos: NonNullable<SubagentLiveActivity["todos"]> }) {
+  const visible = todos.filter((task) => task.status !== "deleted");
+  if (visible.length === 0) return null;
+  const completed = new Set(visible.filter((task) => task.status === "completed").map((task) => task.id));
+  const ordered = [...visible].sort((left, right) => {
+    const rank = { in_progress: 0, pending: 1, completed: 2, deleted: 3 };
+    return rank[left.status] - rank[right.status] || left.id - right.id;
+  });
+  const completedCount = completed.size;
+  return (
+    <section className="agent-todos" aria-label="Agent checklist">
+      <header><span><ListChecks size={13} />Checklist</span><small>{completedCount}/{visible.length}</small></header>
+      <div className="agent-todos__list">
+        {ordered.map((task) => {
+          const blocked = task.status === "pending" && task.blockedBy.some((id) => !completed.has(id));
+          return (
+            <div className={`agent-todo agent-todo--${task.status}${blocked ? " agent-todo--blocked" : ""}`} key={task.id}>
+              <span className="agent-todo__status">
+                {task.status === "completed" ? <Check size={11} weight="bold" /> : task.status === "in_progress" ? <CircleNotch className="spin" size={12} /> : blocked ? <LockSimple size={10} /> : <Circle size={10} />}
+              </span>
+              <span><strong>{task.subject}</strong>{(task.activeForm || task.description) && <small>{task.status === "in_progress" ? task.activeForm ?? task.description : task.description}</small>}</span>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function AgentCard({
   run,
   step,
@@ -297,6 +329,8 @@ function AgentCard({
             {step.tokens && <span>{step.tokens.total.toLocaleString()} tok</span>}
             {step.turnCount != null && <span>{step.turnCount} turn{step.turnCount === 1 ? "" : "s"}</span>}
           </div>
+
+          {activity?.todos && <AgentTodos todos={activity.todos} />}
 
           {latestReasoning && (
             <section className="agent-reasoning-preview" aria-live="polite">

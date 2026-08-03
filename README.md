@@ -18,8 +18,9 @@ A native desktop workspace for the [Pi coding agent](https://pi.dev), built with
 - Remembers recent projects, their trust choices, and the last active workspace across launches.
 - Exposes Pi's user and project settings in a native categorized GUI, with a raw JSON escape hatch for new or extension-defined settings.
 - Manages user and project Pi packages through Pi's own install, update, list, and remove commands.
-- Treats `npm:pi-subagents`, `npm:pi-web-access`, and `npm:@juicesharp/rpiv-ask-user-question` as required core packages and installs them automatically through Pi before the first LemonPi session when needed.
+- Treats `npm:pi-subagents`, `npm:pi-web-access`, `npm:@juicesharp/rpiv-ask-user-question`, and `npm:@juicesharp/rpiv-todo` as required core packages and installs them automatically through Pi before the first LemonPi session when needed.
 - Renders structured agent questions as native choice cards, multi-select controls, custom-answer fields, and rich option previews instead of exposing Pi's flattened RPC fallback strings.
+- Renders `rpiv-todo`'s structured, session-persistent task snapshots as a native progress panel above the composer.
 
 The app intentionally uses Pi's subprocess RPC boundary instead of reimplementing Pi. This preserves the user's existing authentication, models, settings, skills, extensions, and session files.
 
@@ -123,7 +124,7 @@ Rust process supervisor
 pi --mode rpc
 ```
 
-LemonPi verifies the required `npm:pi-subagents`, `npm:pi-web-access`, and `npm:@juicesharp/rpiv-ask-user-question` packages before launching Pi and asks Pi's native package manager to install any missing member. Subagents supply orchestration and machine-readable lifecycle artifacts; web access registers research tools; ask-user-question gives the model a structured clarification tool. LemonPi turns that package's RPC fallback into a native questionnaire experience while preserving its response contract. Terminal rendering is never scraped.
+LemonPi verifies the required `npm:pi-subagents`, `npm:pi-web-access`, `npm:@juicesharp/rpiv-ask-user-question`, and `npm:@juicesharp/rpiv-todo` packages before launching Pi and asks Pi's native package manager to install any missing member. Subagents supply orchestration and machine-readable lifecycle artifacts; web access registers research tools; ask-user-question gives the model a structured clarification tool; and rpiv-todo supplies persistent task snapshots. LemonPi turns the question package's RPC fallback into a native questionnaire and the todo package's public tool-result envelope into a native progress panel. Terminal rendering is never scraped.
 
 ## Project trust
 

@@ -188,6 +188,15 @@ export interface SubagentLiveActivity {
   headlineKind?: SubagentActivityKind;
   lastActivityAt?: number;
   events: SubagentActivityEvent[];
+  todos?: Array<{
+    id: number;
+    subject: string;
+    description?: string;
+    activeForm?: string;
+    status: "pending" | "in_progress" | "completed" | "deleted";
+    blockedBy: number[];
+    owner?: string;
+  }>;
 }
 
 export interface SubagentActivityTarget {
@@ -263,6 +272,7 @@ export interface AgentMessage {
   toolCallId?: string;
   toolName?: string;
   isError?: boolean;
+  details?: unknown;
 }
 
 export type PiEvent = Record<string, unknown> & {

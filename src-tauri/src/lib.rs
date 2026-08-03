@@ -85,6 +85,11 @@ const REQUIRED_PI_PACKAGES: &[RequiredPiPackage] = &[
         npm_name: "@juicesharp/rpiv-ask-user-question",
         display_name: "@juicesharp/rpiv-ask-user-question",
     },
+    RequiredPiPackage {
+        source: "npm:@juicesharp/rpiv-todo",
+        npm_name: "@juicesharp/rpiv-todo",
+        display_name: "@juicesharp/rpiv-todo",
+    },
 ];
 
 #[derive(Serialize)]
@@ -151,6 +156,18 @@ struct SubagentActivityEvent {
     at: u64,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SubagentTodoTask {
+    id: u64,
+    subject: String,
+    description: Option<String>,
+    active_form: Option<String>,
+    status: String,
+    blocked_by: Vec<u64>,
+    owner: Option<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SubagentLiveActivity {
@@ -159,6 +176,7 @@ struct SubagentLiveActivity {
     headline_kind: Option<&'static str>,
     last_activity_at: Option<u64>,
     events: Vec<SubagentActivityEvent>,
+    todos: Option<Vec<SubagentTodoTask>>,
 }
 
 fn pi_candidates() -> Vec<PathBuf> {
@@ -1136,8 +1154,60 @@ fn push_subagent_activity(
     events.push(SubagentActivityEvent { kind, text, at });
 }
 
+fn subagent_todos_from_record(record: &Value) -> Option<Vec<SubagentTodoTask>> {
+    let message = record.get("message");
+    let role = record
+        .get("role")
+        .and_then(Value::as_str)
+        .or_else(|| message?.get("role").and_then(Value::as_str));
+    let tool_name = record
+        .get("toolName")
+        .and_then(Value::as_str)
+        .or_else(|| message?.get("toolName").and_then(Value::as_str));
+    let details = message
+        .and_then(|value| value.get("details"))
+        .or_else(|| record.get("details"))
+        .or_else(|| record.get("result").and_then(|value| value.get("details")));
+    if tool_name != Some("todo") || (role != Some("toolResult") && details.is_none()) {
+        return None;
+    }
+    let tasks = details?.get("tasks")?.as_array()?;
+    tasks
+        .iter()
+        .map(|task| {
+            let status = task.get("status")?.as_str()?;
+            if !matches!(status, "pending" | "in_progress" | "completed" | "deleted") {
+                return None;
+            }
+            Some(SubagentTodoTask {
+                id: task.get("id")?.as_u64()?,
+                subject: task.get("subject")?.as_str()?.to_string(),
+                description: task
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                active_form: task
+                    .get("activeForm")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                status: status.to_string(),
+                blocked_by: task
+                    .get("blockedBy")
+                    .and_then(Value::as_array)
+                    .map(|ids| ids.iter().filter_map(Value::as_u64).collect())
+                    .unwrap_or_default(),
+                owner: task
+                    .get("owner")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+        })
+        .collect()
+}
+
 fn read_subagent_activity(path: &Path, key: String) -> SubagentLiveActivity {
     let mut events = Vec::new();
+    let mut todos = None;
     let read_result = (|| -> Result<(), String> {
         let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
         let length = file.metadata().map_err(|error| error.to_string())?.len();
@@ -1160,6 +1230,9 @@ fn read_subagent_activity(path: &Path, key: String) -> SubagentLiveActivity {
             let Ok(record) = serde_json::from_str::<Value>(line) else {
                 continue;
             };
+            if let Some(snapshot) = subagent_todos_from_record(&record) {
+                todos = Some(snapshot);
+            }
             let at = record.get("ts").and_then(Value::as_u64).unwrap_or_default();
             match record.get("recordType").and_then(Value::as_str) {
                 Some("tool_start") => {
@@ -1261,6 +1334,7 @@ fn read_subagent_activity(path: &Path, key: String) -> SubagentLiveActivity {
         headline_kind,
         last_activity_at,
         events,
+        todos,
     }
 }
 
@@ -1285,6 +1359,7 @@ async fn get_subagent_activity(
                         headline_kind: None,
                         last_activity_at: None,
                         events: Vec::new(),
+                        todos: None,
                     })
             })
             .collect()
@@ -2455,6 +2530,8 @@ mod tests {
         assert!(required_pi_package("npm:pi-web-access@0.17.1").is_some());
         assert!(required_pi_package("npm:@juicesharp/rpiv-ask-user-question").is_some());
         assert!(required_pi_package("npm:@juicesharp/rpiv-ask-user-question@2.3.1").is_some());
+        assert!(required_pi_package("npm:@juicesharp/rpiv-todo").is_some());
+        assert!(required_pi_package("npm:@juicesharp/rpiv-todo@2.3.1").is_some());
         assert!(required_pi_package("npm:pi-subagents-extra").is_none());
         assert_eq!(npm_package_name("npm:@scope/tools@2.0.0"), Some("@scope/tools"));
     }
@@ -2486,6 +2563,7 @@ mod tests {
                 "{\"recordType\":\"message\",\"role\":\"assistant\",\"ts\":1000,\"message\":{\"content\":[{\"type\":\"thinking\",\"thinking\":\"Auditing the sidebar hierarchy and navigation states\"}]}}\n",
                 "{\"recordType\":\"tool_start\",\"toolName\":\"read\",\"argsPreview\":\"src/components/WorkspaceRail.tsx\",\"ts\":2000}\n",
                 "{\"recordType\":\"tool_end\",\"toolName\":\"read\",\"isError\":false,\"ts\":3000}\n",
+                "{\"recordType\":\"message\",\"role\":\"toolResult\",\"toolName\":\"todo\",\"ts\":4000,\"message\":{\"role\":\"toolResult\",\"toolName\":\"todo\",\"details\":{\"tasks\":[{\"id\":1,\"subject\":\"Audit navigation\",\"activeForm\":\"auditing navigation\",\"status\":\"in_progress\"}],\"nextId\":2}}}\n",
             ),
         )
         .expect("write transcript fixture");
@@ -2501,6 +2579,8 @@ mod tests {
         );
         assert_eq!(activity.headline.as_deref(), Some("Finished read"));
         assert_eq!(activity.last_activity_at, Some(3000));
+        assert_eq!(activity.todos.as_ref().map(Vec::len), Some(1));
+        assert_eq!(activity.todos.unwrap()[0].subject, "Audit navigation");
     }
 
     #[test]
