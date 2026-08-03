@@ -5,6 +5,7 @@
 //! host-derived display metadata.
 
 use super::{
+    protocol::{ProjectSummary, TrustState},
     read_json, restrict_file_permissions, write_json_atomically, RemoteError, RemoteResult,
     CURRENT_REMOTE_STORAGE_VERSION,
 };
@@ -342,6 +343,26 @@ impl ProjectCatalog {
         let stored_directory = project.session_directory.as_deref()?;
         let current_directory = canonical_directory(current_session_directory)?;
         (current_directory == stored_directory).then_some(current_directory)
+    }
+
+    /// Resolves one revalidated project to the frozen protocol projection without exposing its
+    /// internal binding or filesystem path.
+    pub(crate) fn safe_project(
+        &self,
+        project_id: &str,
+        active: Option<&Path>,
+    ) -> Option<ProjectSummary> {
+        let binding = self.resolve_project_binding(project_id)?;
+        Some(ProjectSummary {
+            project_id: binding.id,
+            display_name: project_display_name(&binding.path),
+            trust_state: if binding.trusted {
+                TrustState::Trusted
+            } else {
+                TrustState::Untrusted
+            },
+            is_active: active.is_some_and(|path| path == binding.path),
+        })
     }
 
     /// Safe wire-ready summaries; no filesystem locations are exposed.

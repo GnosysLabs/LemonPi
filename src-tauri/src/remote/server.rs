@@ -1,18 +1,20 @@
 //! The deliberately small, pinned-TLS HTTP surface for LemonPi Go v1.
 //!
-//! This module owns only `/health`, `/pair`, `/projects`, and the read-only session catalogue. It
-//! deliberately has no generic Pi command, filesystem, settings, or WebSocket route. Internal
-//! paths remain confined to crate-private code; handlers serialize only explicitly safe projections.
+//! This module owns only `/health`, `/pair`, `/projects`, and authenticated read-only hydration
+//! routes. It deliberately has no generic Pi command, filesystem, settings, or WebSocket route.
+//! Internal paths remain confined to crate-private code; handlers serialize only safe projections.
 
 use super::{
     auth::{DeviceStore, PairingAttempt, PairingWindow},
     config::{AccessMode, RemoteConfig},
+    hydration::{self, HydrationError},
     identity::HostIdentity,
     policy::allows_peer,
-    projects::{ProjectCatalog, RemoteProjectSummary, SessionSyncInput},
+    projects::{InternalProjectBinding, ProjectCatalog, RemoteProjectSummary, SessionSyncInput},
     protocol::{
-        Capability, Envelope, Health, Limits, PairRequest, PairResponse, PairedDevice,
-        ProtocolError, SessionSummary, SessionsResponse,
+        Capability, Envelope, Health, Limits, MessagesResponse, PairRequest, PairResponse,
+        PairedDevice, ProjectSummary, ProtocolError, SafeMessage, SessionState, SessionSummary,
+        SessionsResponse, StateResponse,
     },
     RemoteError, RemoteResult,
 };
@@ -38,7 +40,7 @@ use serde::Serialize;
 use std::{
     future::Future,
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -71,7 +73,7 @@ const CAPABILITIES_HEADER: &str = "x-lemonpi-capabilities";
 
 /// Only capabilities backed by this listener slice are advertised. The frozen model accepts the
 /// complete v1 token vocabulary, but an unfinished capability is never advertised as available.
-const AVAILABLE_CAPABILITIES: &[Capability] = &[Capability::Projects];
+const AVAILABLE_CAPABILITIES: &[Capability] = &[Capability::Projects, Capability::State];
 
 #[derive(Clone)]
 pub(crate) struct BridgeState {
@@ -102,6 +104,29 @@ enum SessionCatalogError {
     HostUnavailable,
 }
 
+struct StateProjectResource {
+    binding: InternalProjectBinding,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StateResourceError {
+    ProjectNotFound,
+    HostUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MessagesResourceError {
+    ProjectNotFound,
+    SessionNotFound,
+    HostUnavailable,
+}
+
+struct MessagesQuery {
+    project_id: String,
+    session_id: String,
+    limit: usize,
+}
+
 /// Builds the v1 router. The actual TCP listener also checks peers before TLS negotiation; this
 /// route-level check keeps the rule true for every request and permits deterministic router tests.
 pub(crate) fn router(state: BridgeState) -> Router {
@@ -110,6 +135,8 @@ pub(crate) fn router(state: BridgeState) -> Router {
         .route("/v1/pair", post(pair))
         .route("/v1/projects", get(projects))
         .route("/v1/sessions", get(sessions))
+        .route("/v1/state", get(state_snapshot))
+        .route("/v1/messages", get(messages))
         .with_state(state)
 }
 
@@ -357,9 +384,15 @@ async fn projects(
         );
     }
     let active_project = state.manager.remote_active_project().await;
-    let catalog = match ProjectCatalog::load_or_create(&state.storage) {
-        Ok(catalog) => catalog,
-        Err(_) => {
+    let storage = state.storage.clone();
+    let summaries = match tokio::task::spawn_blocking(move || {
+        ProjectCatalog::load_or_create(&storage)
+            .map(|catalog| catalog.safe_projects(active_project.as_deref()))
+    })
+    .await
+    {
+        Ok(Ok(summaries)) => summaries,
+        Ok(Err(_)) | Err(_) => {
             return error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 &context.request_id,
@@ -373,7 +406,7 @@ async fn projects(
         StatusCode::OK,
         &context.request_id,
         ProjectsPayload {
-            projects: catalog.safe_projects(active_project.as_deref()),
+            projects: summaries,
             accepted_capabilities: context.accepted_capabilities,
         },
     )
@@ -452,6 +485,405 @@ async fn sessions(
             sessions,
             accepted_capabilities: context.accepted_capabilities,
         },
+    )
+}
+
+async fn state_snapshot(
+    State(state): State<BridgeState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let context = match validate_request(&headers, peer, state.config.access_mode) {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    if !is_authenticated(&headers, &state).await {
+        return unauthenticated(&context.request_id);
+    }
+    if !AVAILABLE_CAPABILITIES.contains(&Capability::State) {
+        return error(
+            StatusCode::NOT_IMPLEMENTED,
+            &context.request_id,
+            "capability_unavailable",
+            "Live state is not available on this host.",
+            false,
+        );
+    }
+    let Some(project_id) = project_id_query(&uri) else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            &context.request_id,
+            "malformed_request",
+            "The state request is invalid.",
+            false,
+        );
+    };
+
+    let active_project = state.manager.remote_active_project().await;
+    let storage = state.storage.clone();
+    let requested_project_id = project_id.clone();
+    let resource = match tokio::task::spawn_blocking(move || {
+        state_project_resource(&storage, &requested_project_id, active_project.as_deref())
+    })
+    .await
+    {
+        Ok(Ok(resource)) => resource,
+        Ok(Err(error_kind)) => {
+            return state_resource_error(&context.request_id, error_kind);
+        }
+        Err(_) => {
+            return state_resource_error(&context.request_id, StateResourceError::HostUnavailable);
+        }
+    };
+    if !resource.binding.trusted {
+        return state_resource_error(&context.request_id, StateResourceError::HostUnavailable);
+    }
+
+    let Some(live) = state
+        .manager
+        .remote_live_state(&resource.binding.path)
+        .await
+    else {
+        return state_resource_error(&context.request_id, StateResourceError::HostUnavailable);
+    };
+    let active_session = if let Some(session_path) = live.state.session_file.clone() {
+        let storage = state.storage.clone();
+        let requested_project_id = project_id.clone();
+        let project_path = resource.binding.path.clone();
+        let mapped_path = session_path.clone();
+        let session_id = match tokio::task::spawn_blocking(move || {
+            state_session_id(&storage, &requested_project_id, &project_path, &mapped_path)
+        })
+        .await
+        {
+            Ok(Ok(session_id)) => session_id,
+            Ok(Err(error_kind)) => {
+                return state_resource_error(&context.request_id, error_kind);
+            }
+            Err(_) => {
+                return state_resource_error(
+                    &context.request_id,
+                    StateResourceError::HostUnavailable,
+                );
+            }
+        };
+        Some((session_id, session_path))
+    } else {
+        None
+    };
+
+    // Revalidate catalogue trust and the optional active session mapping after all blocking work.
+    let storage = state.storage.clone();
+    let requested_project_id = project_id.clone();
+    let project_path = resource.binding.path.clone();
+    let active_session_for_check = active_session.clone();
+    let project = match tokio::task::spawn_blocking(move || {
+        revalidate_state_project(
+            &storage,
+            &requested_project_id,
+            &project_path,
+            active_session_for_check.as_ref(),
+        )
+    })
+    .await
+    {
+        Ok(Ok(project)) => project,
+        Ok(Err(error_kind)) => {
+            return state_resource_error(&context.request_id, error_kind);
+        }
+        Err(_) => {
+            return state_resource_error(&context.request_id, StateResourceError::HostUnavailable);
+        }
+    };
+    if !state.manager.remote_live_state_is_current(&live).await {
+        return state_resource_error(&context.request_id, StateResourceError::HostUnavailable);
+    }
+
+    let session_name = active_session
+        .as_ref()
+        .and_then(|_| live.state.session_name.clone());
+    let session_id = active_session.map(|(session_id, _)| session_id);
+    success(
+        StatusCode::OK,
+        &context.request_id,
+        StateResponse {
+            project,
+            state: SessionState {
+                session_id,
+                session_name,
+                is_streaming: live.state.is_streaming,
+                is_compacting: live.state.is_compacting,
+                thinking_level: live.state.thinking_level.as_str().to_string(),
+                message_count: live.state.message_count,
+                pending_message_count: live.state.pending_message_count,
+            },
+            accepted_capabilities: context.accepted_capabilities,
+        },
+    )
+}
+
+async fn messages(
+    State(state): State<BridgeState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let context = match validate_request(&headers, peer, state.config.access_mode) {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    if !is_authenticated(&headers, &state).await {
+        return unauthenticated(&context.request_id);
+    }
+    if !AVAILABLE_CAPABILITIES.contains(&Capability::State) {
+        return error(
+            StatusCode::NOT_IMPLEMENTED,
+            &context.request_id,
+            "capability_unavailable",
+            "Transcript hydration is not available on this host.",
+            false,
+        );
+    }
+    let Some(query) = messages_query(&uri) else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            &context.request_id,
+            "malformed_request",
+            "The messages request is invalid.",
+            false,
+        );
+    };
+
+    let storage = state.storage.clone();
+    let requested_project_id = query.project_id.clone();
+    let requested_session_id = query.session_id.clone();
+    let limit = query.limit;
+    let result = tokio::task::spawn_blocking(move || {
+        hydrated_messages(
+            &storage,
+            &requested_project_id,
+            &requested_session_id,
+            limit,
+        )
+    })
+    .await;
+    let projected = match result {
+        Ok(Ok(messages)) => messages,
+        Ok(Err(error_kind)) => {
+            return messages_resource_error(&context.request_id, error_kind);
+        }
+        Err(_) => {
+            return messages_resource_error(
+                &context.request_id,
+                MessagesResourceError::HostUnavailable,
+            );
+        }
+    };
+
+    success(
+        StatusCode::OK,
+        &context.request_id,
+        MessagesResponse {
+            project_id: query.project_id,
+            session_id: query.session_id,
+            messages: projected,
+            accepted_capabilities: context.accepted_capabilities,
+        },
+    )
+}
+
+fn state_project_resource(
+    storage: &Path,
+    project_id: &str,
+    active_project: Option<&Path>,
+) -> Result<StateProjectResource, StateResourceError> {
+    let catalog =
+        ProjectCatalog::load_or_create(storage).map_err(|_| StateResourceError::HostUnavailable)?;
+    let binding = catalog
+        .resolve_project_binding(project_id)
+        .ok_or(StateResourceError::ProjectNotFound)?;
+    // Resolve the safe projection here as well so catalogue metadata and canonical binding must
+    // both be valid before any manager state is consulted.
+    catalog
+        .safe_project(project_id, active_project)
+        .ok_or(StateResourceError::ProjectNotFound)?;
+    Ok(StateProjectResource { binding })
+}
+
+fn state_session_id(
+    storage: &Path,
+    project_id: &str,
+    project_path: &Path,
+    session_path: &Path,
+) -> Result<String, StateResourceError> {
+    session_catalogue(storage, project_id).map_err(|error| match error {
+        SessionCatalogError::ProjectNotFound => StateResourceError::ProjectNotFound,
+        SessionCatalogError::HostUnavailable => StateResourceError::HostUnavailable,
+    })?;
+    let catalog =
+        ProjectCatalog::load_or_create(storage).map_err(|_| StateResourceError::HostUnavailable)?;
+    let binding = catalog
+        .resolve_project_binding(project_id)
+        .ok_or(StateResourceError::ProjectNotFound)?;
+    if !binding.trusted || binding.path != project_path {
+        return Err(StateResourceError::HostUnavailable);
+    }
+    let directory =
+        session_directory(&binding.path).map_err(|_| StateResourceError::HostUnavailable)?;
+    catalog
+        .session_id_for_path(project_id, &directory, session_path)
+        .ok_or(StateResourceError::HostUnavailable)
+}
+
+fn revalidate_state_project(
+    storage: &Path,
+    project_id: &str,
+    expected_project: &Path,
+    active_session: Option<&(String, PathBuf)>,
+) -> Result<ProjectSummary, StateResourceError> {
+    let catalog =
+        ProjectCatalog::load_or_create(storage).map_err(|_| StateResourceError::HostUnavailable)?;
+    let binding = catalog
+        .resolve_project_binding(project_id)
+        .ok_or(StateResourceError::ProjectNotFound)?;
+    if binding.path != expected_project {
+        return Err(StateResourceError::ProjectNotFound);
+    }
+    if !binding.trusted {
+        return Err(StateResourceError::HostUnavailable);
+    }
+    if let Some((session_id, expected_session)) = active_session {
+        let directory =
+            session_directory(&binding.path).map_err(|_| StateResourceError::HostUnavailable)?;
+        if catalog
+            .resolve_session_path(project_id, session_id, &directory)
+            .as_deref()
+            != Some(expected_session)
+        {
+            return Err(StateResourceError::HostUnavailable);
+        }
+    }
+    catalog
+        .safe_project(project_id, Some(expected_project))
+        .ok_or(StateResourceError::ProjectNotFound)
+}
+
+fn hydrated_messages(
+    storage: &Path,
+    project_id: &str,
+    session_id: &str,
+    limit: usize,
+) -> Result<Vec<SafeMessage>, MessagesResourceError> {
+    let catalog = ProjectCatalog::load_or_create(storage)
+        .map_err(|_| MessagesResourceError::HostUnavailable)?;
+    let binding = catalog
+        .resolve_project_binding(project_id)
+        .ok_or(MessagesResourceError::ProjectNotFound)?;
+    if !binding.trusted {
+        return Err(MessagesResourceError::HostUnavailable);
+    }
+    let directory =
+        session_directory(&binding.path).map_err(|_| MessagesResourceError::HostUnavailable)?;
+    let Some(session_path) = catalog.resolve_session_path(project_id, session_id, &directory)
+    else {
+        return if catalog.resolve_project_binding(project_id).is_some() {
+            Err(MessagesResourceError::SessionNotFound)
+        } else {
+            Err(MessagesResourceError::ProjectNotFound)
+        };
+    };
+    let messages = hydration::project_transcript(&binding.path, &session_path, session_id, limit)
+        .map_err(|error| match error {
+        HydrationError::InvalidProject => MessagesResourceError::ProjectNotFound,
+        HydrationError::InvalidSession => MessagesResourceError::SessionNotFound,
+        HydrationError::InvalidLimit
+        | HydrationError::InvalidHeader
+        | HydrationError::CwdMismatch
+        | HydrationError::FileTooLarge
+        | HydrationError::RecordTooLarge
+        | HydrationError::MalformedRecord
+        | HydrationError::ResponseTooLarge
+        | HydrationError::FileChanged
+        | HydrationError::Io => MessagesResourceError::HostUnavailable,
+    })?;
+
+    // Do not return a projection if catalogue trust or either canonical binding changed mid-read.
+    let catalog = ProjectCatalog::load_or_create(storage)
+        .map_err(|_| MessagesResourceError::HostUnavailable)?;
+    let current_binding = catalog
+        .resolve_project_binding(project_id)
+        .ok_or(MessagesResourceError::ProjectNotFound)?;
+    if !current_binding.trusted {
+        return Err(MessagesResourceError::HostUnavailable);
+    }
+    if current_binding.path != binding.path {
+        return Err(MessagesResourceError::ProjectNotFound);
+    }
+    let current_directory = session_directory(&current_binding.path)
+        .map_err(|_| MessagesResourceError::HostUnavailable)?;
+    if catalog
+        .resolve_session_path(project_id, session_id, &current_directory)
+        .as_deref()
+        != Some(&session_path)
+    {
+        return Err(MessagesResourceError::SessionNotFound);
+    }
+    Ok(messages)
+}
+
+fn state_resource_error(request_id: &str, kind: StateResourceError) -> Response {
+    match kind {
+        StateResourceError::ProjectNotFound => error(
+            StatusCode::NOT_FOUND,
+            request_id,
+            "project_not_found",
+            "The requested project is not available.",
+            false,
+        ),
+        StateResourceError::HostUnavailable => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            request_id,
+            "host_unavailable",
+            "The host cannot provide live state right now.",
+            true,
+        ),
+    }
+}
+
+fn messages_resource_error(request_id: &str, kind: MessagesResourceError) -> Response {
+    match kind {
+        MessagesResourceError::ProjectNotFound => error(
+            StatusCode::NOT_FOUND,
+            request_id,
+            "project_not_found",
+            "The requested project is not available.",
+            false,
+        ),
+        MessagesResourceError::SessionNotFound => error(
+            StatusCode::NOT_FOUND,
+            request_id,
+            "session_not_found",
+            "The requested session is not available.",
+            false,
+        ),
+        MessagesResourceError::HostUnavailable => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            request_id,
+            "host_unavailable",
+            "The host cannot provide messages right now.",
+            true,
+        ),
+    }
+}
+
+fn unauthenticated(request_id: &str) -> Response {
+    error(
+        StatusCode::UNAUTHORIZED,
+        request_id,
+        "unauthenticated",
+        "Authentication is required.",
+        false,
     )
 }
 
@@ -646,12 +1078,58 @@ fn project_id_query(uri: &Uri) -> Option<String> {
         return None;
     }
     let value = decode_query_component(value)?;
-    (!value.is_empty()
+    valid_opaque_id(&value).then_some(value)
+}
+
+fn messages_query(uri: &Uri) -> Option<MessagesQuery> {
+    let query = uri.query()?;
+    let mut project_id = None;
+    let mut session_id = None;
+    let mut limit = None;
+    let mut member_count = 0_usize;
+    for member in query.split('&') {
+        member_count = member_count.checked_add(1)?;
+        let (name, value) = member.split_once('=')?;
+        let name = decode_query_component(name)?;
+        let value = decode_query_component(value)?;
+        match name.as_str() {
+            "projectId" if project_id.is_none() && valid_opaque_id(&value) => {
+                project_id = Some(value);
+            }
+            "sessionId" if session_id.is_none() && valid_opaque_id(&value) => {
+                session_id = Some(value);
+            }
+            "limit" if limit.is_none() => {
+                limit = canonical_limit(&value);
+                limit?;
+            }
+            _ => return None,
+        }
+    }
+    (member_count == 3).then_some(MessagesQuery {
+        project_id: project_id?,
+        session_id: session_id?,
+        limit: limit?,
+    })
+}
+
+fn valid_opaque_id(value: &str) -> bool {
+    !value.is_empty()
         && value.len() <= 128
         && value
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
-    .then_some(value)
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn canonical_limit(value: &str) -> Option<usize> {
+    if value.is_empty()
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || value.len() > 1 && value.starts_with('0')
+    {
+        return None;
+    }
+    let parsed = value.parse::<usize>().ok()?;
+    (1..=200).contains(&parsed).then_some(parsed)
 }
 
 fn decode_query_component(value: &str) -> Option<String> {
@@ -1036,6 +1514,56 @@ mod tests {
         std::fs::write(path, format!("{contents}\n")).unwrap();
     }
 
+    fn write_records(path: &Path, records: &[serde_json::Value]) {
+        let contents = records
+            .iter()
+            .map(|record| serde_json::to_string(record).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(path, format!("{contents}\n")).unwrap();
+    }
+
+    fn sync_session(storage: &Path, project_id: &str, directory: &Path, session: &Path) -> String {
+        let mut catalog = ProjectCatalog::load_or_create(storage).unwrap();
+        catalog
+            .sync_sessions(
+                project_id,
+                directory,
+                &[SessionSyncInput {
+                    path: session.to_path_buf(),
+                }],
+            )
+            .unwrap();
+        catalog
+            .session_id_for_path(project_id, directory, session)
+            .unwrap()
+    }
+
+    fn live_state_event(session: Option<&Path>, session_name: Option<&str>) -> serde_json::Value {
+        let mut data = serde_json::json!({
+            "isStreaming": false,
+            "isCompacting": false,
+            "thinkingLevel": "high",
+            "messageCount": 12,
+            "pendingMessageCount": 0,
+            "sessionId": "raw-pi-session-id-never-serialize",
+            "model": { "id": "private-model" },
+        });
+        if let Some(session) = session {
+            data["sessionFile"] = serde_json::Value::String(session.to_string_lossy().into_owned());
+        }
+        if let Some(session_name) = session_name {
+            data["sessionName"] = serde_json::Value::String(session_name.to_string());
+        }
+        serde_json::json!({
+            "type": "response",
+            "command": "get_state",
+            "success": true,
+            "id": "raw-correlation-id",
+            "data": data,
+        })
+    }
+
     #[tokio::test]
     async fn protocol_precedence_headers_and_peer_policy_are_enforced() {
         let root = tempdir().unwrap();
@@ -1096,7 +1624,7 @@ mod tests {
         assert_eq!(value["protocol"], 1);
         assert_eq!(
             value["data"]["capabilities"],
-            serde_json::json!(["projects"])
+            serde_json::json!(["projects", "state"])
         );
         assert_eq!(
             value["data"]["acceptedCapabilities"],
@@ -1301,7 +1829,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sessions_returns_safe_stable_opaque_catalogue_and_projects_only_capability() {
+    async fn sessions_returns_safe_stable_opaque_catalogue_and_full_capability_intersection() {
         let _environment_lock = SESSION_DIRECTORY_ENV.lock().unwrap();
         let root = tempdir().unwrap();
         let project = root.path().join("private-project-location");
@@ -1367,7 +1895,7 @@ mod tests {
                 "data": {
                     "projectId": project_id,
                     "sessions": [first["data"]["sessions"][0].clone()],
-                    "acceptedCapabilities": ["projects"],
+                    "acceptedCapabilities": ["projects", "state"],
                 },
             })
         );
@@ -1487,6 +2015,630 @@ mod tests {
             .unwrap();
         assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(response_json(revoked).await, missing_auth_body);
+    }
+
+    #[tokio::test]
+    async fn state_returns_fixture_compatible_safe_snapshot_and_omits_absent_session() {
+        let _environment_lock = SESSION_DIRECTORY_ENV.lock().unwrap();
+        let root = tempdir().unwrap();
+        let project = root.path().join("private-project-location");
+        let sessions = root.path().join("private-session-directory");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&sessions).unwrap();
+        let project = project.canonicalize().unwrap();
+        let _override = SessionDirectoryOverride::set(&sessions);
+        let state = state(root.path().to_path_buf()).await;
+        let project_id = sync_project(root.path(), &project, true);
+        let session = sessions.join("private-active-session.jsonl");
+        write_session(
+            &session,
+            &project,
+            "raw-pi-session-id-never-serialize",
+            Some("/private/parent-session.jsonl"),
+            Some("Remote bridge"),
+            "Start remote work",
+        );
+        authorize(&state).await;
+        state.manager.remote_test_activate(&project, true).await;
+        state
+            .manager
+            .remote_test_observe(
+                &project,
+                &live_state_event(Some(&session), Some("Remote bridge")),
+            )
+            .await;
+
+        let app = router(state.clone());
+        let request_id = "734cd9ef-1afe-48b5-8893-7d806679c6fd";
+        let uri = format!("/v1/state?projectId={project_id}");
+        let mut request = authorized_request(Method::GET, &uri, request_id);
+        request.headers_mut().insert(
+            CAPABILITIES_HEADER,
+            "events,state,projects,rpc".parse().unwrap(),
+        );
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), MAX_HTTP_BODY_BYTES)
+            .await
+            .unwrap();
+        let serialized = String::from_utf8(bytes.to_vec()).unwrap();
+        for secret in [
+            project.to_string_lossy().as_ref(),
+            sessions.to_string_lossy().as_ref(),
+            session.to_string_lossy().as_ref(),
+            "raw-pi-session-id-never-serialize",
+            "raw-correlation-id",
+            "private-model",
+            TEST_TOKEN,
+            "__piPid",
+            "generation",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "leaked {secret}: {serialized}"
+            );
+        }
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let session_id = value["data"]["state"]["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(session_id.starts_with("session_"));
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "protocol": 1,
+                "requestId": request_id,
+                "data": {
+                    "project": {
+                        "projectId": project_id,
+                        "displayName": "private-project-location",
+                        "trustState": "trusted",
+                        "isActive": true,
+                    },
+                    "state": {
+                        "sessionId": session_id,
+                        "sessionName": "Remote bridge",
+                        "isStreaming": false,
+                        "isCompacting": false,
+                        "thinkingLevel": "high",
+                        "messageCount": 12,
+                        "pendingMessageCount": 0,
+                    },
+                    "acceptedCapabilities": ["projects", "state"],
+                },
+            })
+        );
+
+        state
+            .manager
+            .remote_test_observe(&project, &live_state_event(None, Some("must be omitted")))
+            .await;
+        let response = app
+            .oneshot(authorized_request(Method::GET, &uri, request_id))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = response_json(response).await;
+        assert!(value["data"]["state"].get("sessionId").is_none());
+        assert!(value["data"]["state"].get("sessionName").is_none());
+        assert_eq!(
+            value["data"]["acceptedCapabilities"],
+            serde_json::json!(["projects", "state"])
+        );
+    }
+
+    #[tokio::test]
+    async fn state_rejects_untrusted_inactive_missing_cache_and_stale_generations_safely() {
+        let _environment_lock = SESSION_DIRECTORY_ENV.lock().unwrap();
+        let root = tempdir().unwrap();
+        let project = root.path().join("secret-project");
+        let sessions = root.path().join("secret-sessions");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&sessions).unwrap();
+        let project = project.canonicalize().unwrap();
+        let _override = SessionDirectoryOverride::set(&sessions);
+        let state = state(root.path().to_path_buf()).await;
+        let project_id = sync_project(root.path(), &project, true);
+        authorize(&state).await;
+        let app = router(state.clone());
+        let request_id = "7c9b9c14-e910-4be7-8878-5d3ed02b2f02";
+        let uri = format!("/v1/state?projectId={project_id}");
+
+        let inactive = app
+            .clone()
+            .oneshot(authorized_request(Method::GET, &uri, request_id))
+            .await
+            .unwrap();
+        assert_eq!(inactive.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response_json(inactive).await["error"]["code"],
+            "host_unavailable"
+        );
+
+        state.manager.remote_test_activate(&project, true).await;
+        let no_cache = app
+            .clone()
+            .oneshot(authorized_request(Method::GET, &uri, request_id))
+            .await
+            .unwrap();
+        assert_eq!(no_cache.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        state
+            .manager
+            .remote_test_observe(&project, &live_state_event(None, None))
+            .await;
+        let candidate = state.manager.remote_live_state(&project).await.unwrap();
+        state
+            .manager
+            .remote_test_observe(&project, &serde_json::json!({ "type": "agent_start" }))
+            .await;
+        assert!(!state.manager.remote_live_state_is_current(&candidate).await);
+        state
+            .manager
+            .remote_test_observe(&project, &serde_json::json!({ "type": "agent_settled" }))
+            .await;
+        state.manager.remote_test_activate(&project, true).await;
+        assert!(!state.manager.remote_live_state_is_current(&candidate).await);
+
+        assert_eq!(sync_project(root.path(), &project, false), project_id);
+        state.manager.remote_test_activate(&project, false).await;
+        let untrusted = app
+            .clone()
+            .oneshot(authorized_request(Method::GET, &uri, request_id))
+            .await
+            .unwrap();
+        assert_eq!(untrusted.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = to_bytes(untrusted.into_body(), MAX_HTTP_BODY_BYTES)
+            .await
+            .unwrap();
+        let serialized = String::from_utf8_lossy(&bytes);
+        for secret in [
+            project.to_string_lossy().as_ref(),
+            sessions.to_string_lossy().as_ref(),
+            "raw-pi-session-id-never-serialize",
+        ] {
+            assert!(!serialized.contains(secret));
+        }
+
+        let unknown = "unknown-project";
+        let response = app
+            .oneshot(authorized_request(
+                Method::GET,
+                &format!("/v1/state?projectId={unknown}"),
+                request_id,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let bytes = to_bytes(response.into_body(), MAX_HTTP_BODY_BYTES)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains(unknown));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["error"]["code"],
+            "project_not_found"
+        );
+    }
+
+    #[tokio::test]
+    async fn messages_returns_last_safe_messages_in_order_with_full_capabilities() {
+        let _environment_lock = SESSION_DIRECTORY_ENV.lock().unwrap();
+        let root = tempdir().unwrap();
+        let project = root.path().join("private-project");
+        let sessions = root.path().join("private-sessions");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&sessions).unwrap();
+        let project = project.canonicalize().unwrap();
+        let sessions = sessions.canonicalize().unwrap();
+        let _override = SessionDirectoryOverride::set(&sessions);
+        let state = state(root.path().to_path_buf()).await;
+        let project_id = sync_project(root.path(), &project, true);
+        let session = sessions.join("private-transcript.jsonl");
+        write_records(
+            &session,
+            &[
+                serde_json::json!({
+                    "type": "session",
+                    "id": "raw-pi-session-id",
+                    "cwd": project,
+                    "parentSession": "/private/raw-parent.jsonl",
+                }),
+                serde_json::json!({
+                    "type": "message",
+                    "id": "raw-user-message-id",
+                    "timestamp": "2026-08-03T01:20:00.000Z",
+                    "message": {
+                        "role": "user",
+                        "content": format!("first at {} <lemonpi-attachment name=\"secret\">attachment-secret</lemonpi-attachment>", project.display()),
+                        "details": "private-details",
+                    },
+                }),
+                serde_json::json!({
+                    "type": "message",
+                    "id": "raw-assistant-message-id",
+                    "timestamp": "2026-08-03T01:20:01.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "stopReason": "stop",
+                        "content": [
+                            { "type": "thinking", "thinking": format!("thinking in {}", sessions.display()) },
+                            { "type": "text", "text": "safe assistant text raw-assistant-message-id" },
+                            { "type": "toolCall", "id": "raw-tool-id", "name": "safe_tool", "arguments": { "secret": "raw-tool-args" } },
+                            { "type": "image", "data": "raw-attachment-data" },
+                        ],
+                    },
+                }),
+                serde_json::json!({
+                    "type": "message",
+                    "timestamp": "2026-08-03T01:20:02.000Z",
+                    "message": {
+                        "role": "toolResult",
+                        "toolCallId": "raw-tool-id",
+                        "content": "raw-tool-output",
+                        "details": "raw-tool-details",
+                        "isError": false,
+                    },
+                }),
+                serde_json::json!({
+                    "type": "message",
+                    "timestamp": "2026-08-03T01:20:03.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "stopReason": "error",
+                        "content": "safe final summary",
+                    },
+                }),
+            ],
+        );
+        let session_id = sync_session(root.path(), &project_id, &sessions, &session);
+        authorize(&state).await;
+        let app = router(state);
+        let request_id = "7c9b9c14-e910-4be7-8878-5d3ed02b2f02";
+        let uri = format!("/v1/messages?limit=3&sessionId={session_id}&projectId={project_id}");
+        let mut request = authorized_request(Method::GET, &uri, request_id);
+        request.headers_mut().insert(
+            CAPABILITIES_HEADER,
+            "state,events,projects".parse().unwrap(),
+        );
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), MAX_HTTP_BODY_BYTES)
+            .await
+            .unwrap();
+        let serialized = String::from_utf8(bytes.to_vec()).unwrap();
+        for secret in [
+            project.to_string_lossy().as_ref(),
+            sessions.to_string_lossy().as_ref(),
+            session.to_string_lossy().as_ref(),
+            "raw-pi-session-id",
+            "raw-parent",
+            "raw-user-message-id",
+            "raw-assistant-message-id",
+            "raw-tool-id",
+            "raw-tool-args",
+            "raw-tool-output",
+            "raw-tool-details",
+            "raw-attachment-data",
+            "attachment-secret",
+            "private-details",
+            TEST_TOKEN,
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "leaked {secret}: {serialized}"
+            );
+        }
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["data"]["projectId"], project_id);
+        assert_eq!(value["data"]["sessionId"], session_id);
+        assert_eq!(
+            value["data"]["acceptedCapabilities"],
+            serde_json::json!(["projects", "state"])
+        );
+        let messages = value["data"]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["text"], "safe assistant text [redacted]");
+        assert_eq!(messages[0]["thinking"], "thinking in [redacted]");
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["toolName"], "safe_tool");
+        assert_eq!(messages[1]["toolStatus"], "complete");
+        assert_eq!(messages[2]["text"], "safe final summary");
+        assert_eq!(messages[2]["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn messages_maps_unknown_untrusted_and_malformed_resources_to_safe_errors() {
+        let _environment_lock = SESSION_DIRECTORY_ENV.lock().unwrap();
+        let root = tempdir().unwrap();
+        let project = root.path().join("private-project");
+        let sessions = root.path().join("private-sessions");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&sessions).unwrap();
+        let project = project.canonicalize().unwrap();
+        let sessions = sessions.canonicalize().unwrap();
+        let _override = SessionDirectoryOverride::set(&sessions);
+        let state = state(root.path().to_path_buf()).await;
+        let project_id = sync_project(root.path(), &project, true);
+        let session = sessions.join("malformed.jsonl");
+        write_session(&session, &project, "raw-pi-id", None, None, "safe");
+        let session_id = sync_session(root.path(), &project_id, &sessions, &session);
+        authorize(&state).await;
+        let app = router(state);
+        let request_id = "7c9b9c14-e910-4be7-8878-5d3ed02b2f02";
+
+        for (uri, status, code, secret) in [
+            (
+                "/v1/messages?projectId=unknown-project&sessionId=unknown-session&limit=10"
+                    .to_string(),
+                StatusCode::NOT_FOUND,
+                "project_not_found",
+                "unknown-project",
+            ),
+            (
+                format!("/v1/messages?projectId={project_id}&sessionId=unknown-session&limit=10"),
+                StatusCode::NOT_FOUND,
+                "session_not_found",
+                "unknown-session",
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(authorized_request(Method::GET, &uri, request_id))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+            let bytes = to_bytes(response.into_body(), MAX_HTTP_BODY_BYTES)
+                .await
+                .unwrap();
+            assert!(!String::from_utf8_lossy(&bytes).contains(secret));
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["error"]["code"],
+                code
+            );
+        }
+
+        assert_eq!(sync_project(root.path(), &project, false), project_id);
+        let uri = format!("/v1/messages?projectId={project_id}&sessionId={session_id}&limit=10");
+        let response = app
+            .clone()
+            .oneshot(authorized_request(Method::GET, &uri, request_id))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "host_unavailable"
+        );
+
+        assert_eq!(sync_project(root.path(), &project, true), project_id);
+        std::fs::write(&session, "not-json\n").unwrap();
+        let response = app
+            .clone()
+            .oneshot(authorized_request(Method::GET, &uri, request_id))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = to_bytes(response.into_body(), MAX_HTTP_BODY_BYTES)
+            .await
+            .unwrap();
+        let serialized = String::from_utf8_lossy(&bytes);
+        assert!(!serialized.contains("not-json"));
+        assert!(!serialized.contains(project.to_string_lossy().as_ref()));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["error"]["code"],
+            "host_unavailable"
+        );
+
+        let oversized = sessions.join("oversized.jsonl");
+        write_records(
+            &oversized,
+            &[serde_json::json!({
+                "type": "session",
+                "id": "raw-oversized-id",
+                "cwd": project,
+            })],
+        );
+        let oversized_id = sync_session(root.path(), &project_id, &sessions, &oversized);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&oversized)
+            .unwrap()
+            .set_len(hydration::MAX_TRANSCRIPT_FILE_BYTES + 1)
+            .unwrap();
+        let oversized_uri =
+            format!("/v1/messages?projectId={project_id}&sessionId={oversized_id}&limit=10");
+        let response = app
+            .oneshot(authorized_request(Method::GET, &oversized_uri, request_id))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "host_unavailable"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn state_and_messages_revalidate_replaced_projects_and_sessions() {
+        use std::os::unix::fs::symlink;
+
+        let _environment_lock = SESSION_DIRECTORY_ENV.lock().unwrap();
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        let sessions = root.path().join("sessions");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&sessions).unwrap();
+        let project = project.canonicalize().unwrap();
+        let sessions = sessions.canonicalize().unwrap();
+        let _override = SessionDirectoryOverride::set(&sessions);
+        let state = state(root.path().to_path_buf()).await;
+        let project_id = sync_project(root.path(), &project, true);
+        let session = sessions.join("active.jsonl");
+        write_session(
+            &session,
+            &project,
+            "raw-replaced-session-id",
+            None,
+            Some("Replaced secret name"),
+            "REPLACED_SESSION_SECRET",
+        );
+        let session_id = sync_session(root.path(), &project_id, &sessions, &session);
+        authorize(&state).await;
+        state.manager.remote_test_activate(&project, true).await;
+        state
+            .manager
+            .remote_test_observe(
+                &project,
+                &live_state_event(Some(&session), Some("Replaced secret name")),
+            )
+            .await;
+        let app = router(state);
+        let request_id = "7c9b9c14-e910-4be7-8878-5d3ed02b2f02";
+
+        let moved_session = root.path().join("moved-session.jsonl");
+        std::fs::rename(&session, &moved_session).unwrap();
+        symlink(&moved_session, &session).unwrap();
+        let messages_uri =
+            format!("/v1/messages?projectId={project_id}&sessionId={session_id}&limit=10");
+        let response = app
+            .clone()
+            .oneshot(authorized_request(Method::GET, &messages_uri, request_id))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let bytes = to_bytes(response.into_body(), MAX_HTTP_BODY_BYTES)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("REPLACED_SESSION_SECRET"));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["error"]["code"],
+            "session_not_found"
+        );
+
+        let state_uri = format!("/v1/state?projectId={project_id}");
+        let response = app
+            .clone()
+            .oneshot(authorized_request(Method::GET, &state_uri, request_id))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = to_bytes(response.into_body(), MAX_HTTP_BODY_BYTES)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("Replaced secret name"));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["error"]["code"],
+            "host_unavailable"
+        );
+
+        let moved_project = root.path().join("moved-project");
+        std::fs::rename(&project, &moved_project).unwrap();
+        symlink(&moved_project, &project).unwrap();
+        let response = app
+            .oneshot(authorized_request(Method::GET, &state_uri, request_id))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "project_not_found"
+        );
+    }
+
+    #[tokio::test]
+    async fn state_and_messages_auth_precedes_strict_query_validation_and_revocation() {
+        let root = tempdir().unwrap();
+        let state = state(root.path().to_path_buf()).await;
+        let app = router(state.clone());
+        let request_id = "7c9b9c14-e910-4be7-8878-5d3ed02b2f02";
+        let malformed_uris = [
+            "/v1/state",
+            "/v1/state?projectId=",
+            "/v1/state?projectId=one&projectId=two",
+            "/v1/state?projectId=%2Fprivate%2Fproject",
+            "/v1/messages?projectId=one&sessionId=two",
+            "/v1/messages?projectId=one&sessionId=two&limit=0",
+            "/v1/messages?projectId=one&sessionId=two&limit=01",
+            "/v1/messages?projectId=one&sessionId=two&limit=201",
+            "/v1/messages?projectId=one&sessionId=two&limit=999999999999999999999999999999999999",
+            "/v1/messages?projectId=one&sessionId=two&limit=+1",
+            "/v1/messages?projectId=one&sessionId=two&limit=1.0",
+            "/v1/messages?projectId=one&sessionId=two&limit=1&extra=x",
+            "/v1/messages?projectId=one&projectId=two&sessionId=three&limit=1",
+            "/v1/messages?projectId=one&sessionId=%FF&limit=1",
+            "/v1/messages?projectId=one&sessionId=two&limit=%ZZ",
+        ];
+
+        let unauthenticated_response = app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                malformed_uris[0],
+                request_id,
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated_response.status(), StatusCode::UNAUTHORIZED);
+        let unauthenticated_body = response_json(unauthenticated_response).await;
+        let mut invalid = request(Method::GET, malformed_uris[4], request_id, Body::empty());
+        invalid.headers_mut().insert(
+            header::AUTHORIZATION,
+            "Bearer invalid-token".parse().unwrap(),
+        );
+        let invalid_response = app.clone().oneshot(invalid).await.unwrap();
+        assert_eq!(invalid_response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response_json(invalid_response).await, unauthenticated_body);
+
+        authorize(&state).await;
+        for uri in malformed_uris {
+            let response = app
+                .clone()
+                .oneshot(authorized_request(Method::GET, uri, request_id))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(
+                response_json(response).await["error"]["code"],
+                "malformed_request",
+                "{uri}"
+            );
+        }
+
+        state
+            .devices
+            .lock()
+            .await
+            .revoke("82c6fbb6-fa93-4672-8b48-b7755a947e7d")
+            .unwrap();
+        for uri in [malformed_uris[0], malformed_uris[4]] {
+            let response = app
+                .clone()
+                .oneshot(authorized_request(Method::GET, uri, request_id))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(response_json(response).await, unauthenticated_body);
+        }
+    }
+
+    #[test]
+    fn query_projection_helpers_accept_any_order_and_reject_noncanonical_limits() {
+        let query = messages_query(
+            &"/v1/messages?limit=200&project%49d=project_abc&sessionId=session_xyz"
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(query.project_id, "project_abc");
+        assert_eq!(query.session_id, "session_xyz");
+        assert_eq!(query.limit, 200);
+        for invalid in ["", "0", "00", "01", "+1", " 1", "1.0", "201"] {
+            assert!(canonical_limit(invalid).is_none(), "{invalid}");
+        }
     }
 
     #[tokio::test]

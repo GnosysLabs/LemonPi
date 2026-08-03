@@ -21,7 +21,7 @@ mod remote;
 
 use remote::{
     events::{EventHub, EventKind},
-    hydration::SafeLiveStateCache,
+    hydration::{SafeLiveState, SafeLiveStateCache},
     projects::{KnownProjectInput, ProjectCatalog, RemoteProjectSummary, SessionSyncInput},
     service::RemoteService,
 };
@@ -49,7 +49,17 @@ pub(crate) struct PiManager {
 struct PiRegistry {
     active_project: Option<PathBuf>,
     active_trusted: Option<bool>,
+    active_generation: Option<u64>,
+    next_generation: u64,
     processes: HashMap<PathBuf, ManagedPi>,
+}
+
+/// Crate-private proof that a safe cache snapshot belonged to one exact active Pi generation.
+/// Neither the generation nor the canonical project path is serializable.
+pub(crate) struct RemoteLiveStateSnapshot {
+    project: PathBuf,
+    generation: u64,
+    pub(crate) state: SafeLiveState,
 }
 
 impl PiManager {
@@ -58,12 +68,72 @@ impl PiManager {
     pub(crate) async fn remote_active_project(&self) -> Option<PathBuf> {
         self.registry.lock().await.active_project.clone()
     }
+
+    /// Returns safe live state only when the exact canonical project is the trusted active Pi
+    /// generation. Holding the registry lock through the cache clone gives the route one coherent
+    /// observation without sending a Pi command or exposing process identity.
+    pub(crate) async fn remote_live_state(
+        &self,
+        project: &Path,
+    ) -> Option<RemoteLiveStateSnapshot> {
+        let registry = self.registry.lock().await;
+        if registry.active_project.as_deref() != Some(project)
+            || registry.active_trusted != Some(true)
+        {
+            return None;
+        }
+        let generation = registry.active_generation?;
+        let state = self
+            .hydration
+            .snapshot_generation_canonical(project, generation)?;
+        Some(RemoteLiveStateSnapshot {
+            project: project.to_path_buf(),
+            generation,
+            state,
+        })
+    }
+
+    /// Rechecks both process generation and cache contents immediately before a state response.
+    pub(crate) async fn remote_live_state_is_current(
+        &self,
+        candidate: &RemoteLiveStateSnapshot,
+    ) -> bool {
+        let registry = self.registry.lock().await;
+        registry.active_project.as_ref() == Some(&candidate.project)
+            && registry.active_trusted == Some(true)
+            && registry.active_generation == Some(candidate.generation)
+            && self
+                .hydration
+                .snapshot_generation_canonical(&candidate.project, candidate.generation)
+                .as_ref()
+                == Some(&candidate.state)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn remote_test_activate(&self, project: &Path, trusted: bool) -> u64 {
+        let mut registry = self.registry.lock().await;
+        registry.next_generation = registry.next_generation.checked_add(1).unwrap();
+        let generation = registry.next_generation;
+        registry.active_project = Some(project.to_path_buf());
+        registry.active_trusted = Some(trusted);
+        registry.active_generation = Some(generation);
+        generation
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn remote_test_observe(&self, project: &Path, event: &Value) {
+        let generation = self.registry.lock().await.active_generation.unwrap();
+        self.hydration
+            .observe_generation(project, generation, event);
+    }
 }
 
 struct ManagedPi {
     stdin: Arc<Mutex<ChildStdin>>,
     stop: oneshot::Sender<()>,
     pid: u32,
+    generation: u64,
+    trusted: bool,
     info: PiProcessInfo,
 }
 
@@ -899,13 +969,14 @@ fn forward_framed_result(
     result: Result<Option<Value>, String>,
     app: &AppHandle,
     pid: u32,
+    generation: u64,
     project: &Path,
     events: &EventHub,
     hydration: &SafeLiveStateCache,
 ) {
     match result {
         Ok(Some(mut event)) => {
-            hydration.observe(project, &event);
+            hydration.observe_generation(project, generation, &event);
             if let Value::Object(fields) = &mut event {
                 fields.insert("__piPid".to_string(), Value::from(pid));
             }
@@ -945,6 +1016,7 @@ async fn forward_stdout<R>(
     mut reader: R,
     app: AppHandle,
     pid: u32,
+    generation: u64,
     project: PathBuf,
     events: EventHub,
     hydration: SafeLiveStateCache,
@@ -958,13 +1030,17 @@ async fn forward_stdout<R>(
         match reader.read(&mut chunk).await {
             Ok(0) => {
                 if let Some(result) = framer.finish() {
-                    forward_framed_result(result, &app, pid, &project, &events, &hydration);
+                    forward_framed_result(
+                        result, &app, pid, generation, &project, &events, &hydration,
+                    );
                 }
                 break;
             }
             Ok(count) => {
                 for result in framer.push(&chunk[..count]) {
-                    forward_framed_result(result, &app, pid, &project, &events, &hydration);
+                    forward_framed_result(
+                        result, &app, pid, generation, &project, &events, &hydration,
+                    );
                 }
             }
             Err(error) => {
@@ -1000,6 +1076,7 @@ async fn stop_active(manager: &Arc<PiManager>) {
         let mut registry = manager.registry.lock().await;
         let active_project = registry.active_project.take();
         registry.active_trusted = None;
+        registry.active_generation = None;
         active_project.and_then(|project| {
             registry
                 .processes
@@ -1059,12 +1136,14 @@ async fn start_pi(
 
     {
         let mut registry = manager.registry.lock().await;
-        if let Some(info) = registry
+        if let Some((info, generation, process_trusted)) = registry
             .processes
             .get(&cwd_path)
-            .map(|process| process.info.clone())
+            .map(|process| (process.info.clone(), process.generation, process.trusted))
         {
             registry.active_project = Some(cwd_path.clone());
+            registry.active_trusted = Some(process_trusted);
+            registry.active_generation = Some(generation);
             return Ok(info);
         }
     }
@@ -1117,20 +1196,29 @@ async fn start_pi(
     };
 
     clear_hydration_for_process_state(&manager.hydration, &cwd_path, "started");
-    {
+    let generation = {
         let mut registry = manager.registry.lock().await;
+        registry.next_generation = registry
+            .next_generation
+            .checked_add(1)
+            .ok_or_else(|| "Pi process generation space is exhausted.".to_string())?;
+        let generation = registry.next_generation;
         registry.active_project = Some(cwd_path.clone());
         registry.active_trusted = Some(trusted);
+        registry.active_generation = Some(generation);
         registry.processes.insert(
             cwd_path.clone(),
             ManagedPi {
                 stdin: Arc::clone(&stdin),
                 stop: stop_tx,
                 pid,
+                generation,
+                trusted,
                 info: info.clone(),
             },
         );
-    }
+        generation
+    };
 
     emit_process_event(
         &app,
@@ -1152,6 +1240,7 @@ async fn start_pi(
         stdout,
         app.clone(),
         pid,
+        generation,
         project_for_stdout,
         events_for_stdout,
         hydration_for_stdout,
@@ -1180,11 +1269,15 @@ async fn start_pi(
         let removed_current = if registry
             .processes
             .get(&project_for_wait)
-            .is_some_and(|process| process.pid == pid)
+            .is_some_and(|process| process.pid == pid && process.generation == generation)
         {
             registry.processes.remove(&project_for_wait);
-            if registry.active_project.as_ref() == Some(&project_for_wait) {
+            if registry.active_project.as_ref() == Some(&project_for_wait)
+                && registry.active_generation == Some(generation)
+            {
                 registry.active_project = None;
+                registry.active_trusted = None;
+                registry.active_generation = None;
             }
             true
         } else {

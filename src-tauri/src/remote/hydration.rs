@@ -84,13 +84,26 @@ pub(crate) struct SafeLiveState {
 
 /// Cheap cloneable state cache keyed only by canonical project paths. Lock hold times are limited
 /// to one map lookup/update; filesystem and JSON validation happens before acquiring the lock.
+#[derive(Clone)]
+struct GenerationState {
+    generation: u64,
+    state: SafeLiveState,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct SafeLiveStateCache {
-    inner: Arc<Mutex<HashMap<PathBuf, SafeLiveState>>>,
+    inner: Arc<Mutex<HashMap<PathBuf, GenerationState>>>,
 }
 
 impl SafeLiveStateCache {
     pub(crate) fn observe(&self, project: &Path, event: &Value) {
+        self.observe_generation(project, 0, event);
+    }
+
+    /// Associates process output with its exact manager generation. Late output from an exited
+    /// process can at worst make the new generation temporarily unavailable; it can never be
+    /// mistaken for the new process's state.
+    pub(crate) fn observe_generation(&self, project: &Path, generation: u64, event: &Value) {
         let Some(project) = canonical_project(project) else {
             return;
         };
@@ -102,16 +115,30 @@ impl SafeLiveStateCache {
                 let Some(candidate) = state_candidate(&project, event) else {
                     return;
                 };
-                self.lock().insert(project, candidate);
+                self.lock().insert(
+                    project,
+                    GenerationState {
+                        generation,
+                        state: candidate,
+                    },
+                );
             }
             Some("agent_start") => {
-                if let Some(snapshot) = self.lock().get_mut(&project) {
-                    snapshot.is_streaming = true;
+                if let Some(snapshot) = self
+                    .lock()
+                    .get_mut(&project)
+                    .filter(|snapshot| snapshot.generation == generation)
+                {
+                    snapshot.state.is_streaming = true;
                 }
             }
             Some("agent_settled") => {
-                if let Some(snapshot) = self.lock().get_mut(&project) {
-                    snapshot.is_streaming = false;
+                if let Some(snapshot) = self
+                    .lock()
+                    .get_mut(&project)
+                    .filter(|snapshot| snapshot.generation == generation)
+                {
+                    snapshot.state.is_streaming = false;
                 }
             }
             _ => {}
@@ -129,7 +156,27 @@ impl SafeLiveStateCache {
 
     pub(crate) fn snapshot(&self, project: &Path) -> Option<SafeLiveState> {
         let project = canonical_project(project)?;
-        self.lock().get(&project).cloned()
+        self.snapshot_canonical(&project)
+    }
+
+    /// Looks up a caller-revalidated canonical project without performing filesystem work. The
+    /// manager uses this while holding its process registry lock so generation and cache state are
+    /// observed at one point in time.
+    pub(crate) fn snapshot_canonical(&self, project: &Path) -> Option<SafeLiveState> {
+        self.lock()
+            .get(project)
+            .map(|snapshot| snapshot.state.clone())
+    }
+
+    pub(crate) fn snapshot_generation_canonical(
+        &self,
+        project: &Path,
+        generation: u64,
+    ) -> Option<SafeLiveState> {
+        self.lock()
+            .get(project)
+            .filter(|snapshot| snapshot.generation == generation)
+            .map(|snapshot| snapshot.state.clone())
     }
 
     #[cfg(test)]
@@ -137,7 +184,7 @@ impl SafeLiveStateCache {
         self.lock().contains_key(project)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, SafeLiveState>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, GenerationState>> {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1169,6 +1216,40 @@ mod tests {
         cache.clear(&first);
         assert!(cache.snapshot(&first).is_none());
         assert_eq!(cache.snapshot(&second).unwrap().message_count, 2);
+    }
+
+    #[test]
+    fn late_process_output_cannot_be_read_or_mutate_a_new_generation() {
+        let fixture = Fixture::new();
+        fixture.write(&[fixture.header()]);
+        let cache = SafeLiveStateCache::default();
+        let event = fixture.state_event(json!({ "isStreaming": false }));
+        cache.observe_generation(&fixture.project, 2, &event);
+        assert!(cache
+            .snapshot_generation_canonical(&fixture.project, 1)
+            .is_none());
+        assert!(
+            !cache
+                .snapshot_generation_canonical(&fixture.project, 2)
+                .unwrap()
+                .is_streaming
+        );
+
+        cache.observe_generation(&fixture.project, 1, &json!({ "type": "agent_start" }));
+        assert!(
+            !cache
+                .snapshot_generation_canonical(&fixture.project, 2)
+                .unwrap()
+                .is_streaming
+        );
+
+        cache.observe_generation(&fixture.project, 1, &event);
+        assert!(cache
+            .snapshot_generation_canonical(&fixture.project, 2)
+            .is_none());
+        assert!(cache
+            .snapshot_generation_canonical(&fixture.project, 1)
+            .is_some());
     }
 
     #[test]
