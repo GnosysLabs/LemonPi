@@ -6,11 +6,13 @@ import {
   applyDelegationSafetyContracts,
   checkoutSnapshotPolicyIssue,
   compileDelegationContracts,
+  delegationConcurrencyPolicyIssue,
   declaredExecutionMode,
   delegatesImplementation,
   isManagedWorktreePatchCommand,
   missionHasActiveOwnership,
   missionWakeIsBlocked,
+  MINIMUM_USEFUL_CONCURRENT_AGENTS,
   parallelWriterPolicyIssue,
   remainingPlanFromTodoResult,
   retainWorkConservingLanes,
@@ -146,6 +148,59 @@ assert.equal(authoritativeRuntimeWorkerState({ fleet: { version: 1, entries: [{}
 assert.equal(authoritativeRuntimeWorkerState({ fleet: { version: 1, entries: [], totalActive: 0, omitted: 0 } }), "idle");
 assert.equal(authoritativeRuntimeWorkerState({ fleet: { version: 1, entries: [], totalActive: -1, omitted: 0 } }), "unknown");
 assert.equal(authoritativeRuntimeWorkerState({ text: "No active async runs." }), "unknown");
+assert.equal(MINIMUM_USEFUL_CONCURRENT_AGENTS, 3);
+
+const readOnlyLane = (agent, outcome) => ({
+  agent,
+  task: `Execution mode: read-only\n${outcome}. Do not modify any project files.`,
+});
+assert.match(
+  delegationConcurrencyPolicyIssue(readOnlyLane("reviewer", "Review the recovered patch"), 0),
+  /requires at least 3/,
+);
+assert.match(
+  delegationConcurrencyPolicyIssue({
+    tasks: [readOnlyLane("reviewer", "Review the recovered patch"), readOnlyLane("explorer", "Isolate the hanging validation target")],
+  }, 0),
+  /leave only 2 useful delegated agents active/,
+);
+assert.equal(delegationConcurrencyPolicyIssue({
+  tasks: [
+    readOnlyLane("reviewer", "Review the recovered patch"),
+    readOnlyLane("explorer", "Isolate the hanging validation target"),
+    readOnlyLane("planner", "Map the next independent repair lanes"),
+  ],
+}, 0), undefined);
+const readOnlyWave = {
+  concurrency: 1,
+  tasks: [
+    readOnlyLane("reviewer", "Review the recovered patch"),
+    readOnlyLane("explorer", "Isolate the hanging validation target"),
+    readOnlyLane("planner", "Map the next independent repair lanes"),
+  ],
+};
+compileDelegationContracts(readOnlyWave);
+assert.equal(readOnlyWave.concurrency, 3);
+assert.equal(
+  delegationConcurrencyPolicyIssue(readOnlyLane("reviewer", "Review the recovered patch"), 2),
+  undefined,
+);
+assert.match(
+  delegationConcurrencyPolicyIssue({ chain: [
+    readOnlyLane("reviewer", "Review first"),
+    readOnlyLane("explorer", "Investigate second"),
+    readOnlyLane("planner", "Plan third"),
+  ] }, 0),
+  /leave only 1 useful delegated agent active/,
+);
+assert.equal(delegationConcurrencyPolicyIssue({
+  agent: "reviewer",
+  task: `Execution mode: read-only
+Review the one-line security correction.
+Concurrency exception: atomic
+Concurrency detail: The requested outcome is one indivisible read-only verdict over a one-line correction.
+Parallel lanes considered: implementation, validation isolation, and architecture review are already complete.`,
+}, 0), undefined);
 
 const lane = (outcome, paths) => ({
   agent: "worker",
