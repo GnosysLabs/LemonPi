@@ -6,6 +6,8 @@ const SUBAGENT_TERMINAL_PREFIX = "__lemonpi_subagent_terminal_v1__:";
 const SUBAGENT_RPC_REQUEST_EVENT = "subagents:rpc:v1:request";
 const SUBAGENT_RPC_REPLY_PREFIX = "subagents:rpc:v1:reply:";
 const SUBAGENT_RPC_TIMEOUT_MS = 6_000;
+const RESTORE_STATUS_RPC_TIMEOUT_MS = 2_000;
+const RESTORE_RECONCILE_DELAYS_MS = [500, 1_500, 3_000] as const;
 const CHILD_TODO_SEED_TAG = "lemonpi-child-todo-seed";
 const CURRENT_CHILD_OWNER = "__lemonpi_current_child__";
 
@@ -110,7 +112,7 @@ const DELEGATION_RECOVERY = `A delegated run failed and no replacement delegatio
 const ATTENTION_RECOVERY = `A delegated run reported needs_attention and the previous response did not inspect or control it. Act now instead of narrating passive waiting. Use the subagent status/transcript controls for the exact run. If it remains alive without an active tool or new output, steer it once to return its result or blocker immediately. If intervention cannot be delivered, stop it and preserve useful transcript findings for one fresh, smaller replacement. Do not leave it marked running indefinitely and do not launch a competing writer.`;
 const PLAN_CONTINUATION = `Your visible task plan still contains unfinished work, but you settled with no delegated agent active. Continue the stranded plan now instead of waiting for another user message. Give the user a concise visible update, then execute or delegate the next bounded action. If the task is genuinely blocked or waiting for the user, move it out of in-progress state and explain the exact blocker; never leave an idle task spinning.`;
 const MISSION_INTEGRATION = `A durable LemonPi mission has delegated results waiting for Main Pi, but no child is active. Inspect the exact terminal run and integrate its result now. If more work remains, dispatch the next bounded lane in this turn. If the mission is complete or blocked, give the user a concrete explanation instead of leaving it idle.`;
-const MISSION_RECONCILE = `LemonPi restored an unfinished mission after a session lifecycle transition. Reconcile it now: inspect the recorded delegated run ids through subagent status, integrate any terminal result, and continue the next ready action. If a recorded child is still active, report that briefly and end the turn so completion can wake you. Do not launch a duplicate writer.`;
+const MISSION_RECONCILE_ATTENTION = `LemonPi could not automatically reconcile a recorded delegated run after a session lifecycle transition. Inspect the exact recorded run once and take the appropriate action. Do not poll it repeatedly: if it is active, end the turn; if it is terminal, integrate it; if it needs attention, intervene.`;
 
 function visibleText(content: unknown): string {
   if (typeof content === "string") return content.trim();
@@ -123,22 +125,23 @@ function visibleText(content: unknown): string {
     .trim();
 }
 
-function requestSubagentControl(
+function requestSubagentRpc<T>(
   pi: ExtensionAPI,
-  method: "steer" | "stop",
-  params: { id: string; index?: number; message?: string },
-): Promise<void> {
+  method: "status" | "steer" | "stop",
+  params: { id?: string; index?: number; message?: string },
+  timeoutMs = SUBAGENT_RPC_TIMEOUT_MS,
+): Promise<T> {
   return new Promise((resolve, reject) => {
     const requestId = globalThis.crypto.randomUUID();
     let settled = false;
     let timeoutId: ReturnType<typeof setTimeout>;
     const unsubscribe = pi.events.on(`${SUBAGENT_RPC_REPLY_PREFIX}${requestId}`, (payload) => {
-      const reply = payload as { requestId?: string; success?: boolean; error?: { message?: string } };
+      const reply = payload as { requestId?: string; success?: boolean; data?: T; error?: { message?: string } };
       if (reply.requestId !== requestId || settled) return;
       settled = true;
       clearTimeout(timeoutId);
       unsubscribe();
-      if (reply.success === true) resolve();
+      if (reply.success === true) resolve(reply.data as T);
       else reject(new Error(reply.error?.message ?? `The subagent rejected the ${method} request.`));
     });
     timeoutId = setTimeout(() => {
@@ -146,7 +149,7 @@ function requestSubagentControl(
       settled = true;
       unsubscribe();
       reject(new Error(`The subagent did not acknowledge the ${method} request.`));
-    }, SUBAGENT_RPC_TIMEOUT_MS);
+    }, timeoutMs);
 
     pi.events.emit(SUBAGENT_RPC_REQUEST_EVENT, {
       version: 1,
@@ -158,11 +161,15 @@ function requestSubagentControl(
 }
 
 function requestSubagentSteer(pi: ExtensionAPI, id: string, index: number, message: string): Promise<void> {
-  return requestSubagentControl(pi, "steer", { id, index, message });
+  return requestSubagentRpc<void>(pi, "steer", { id, index, message });
 }
 
 function requestSubagentStop(pi: ExtensionAPI, id: string): Promise<void> {
-  return requestSubagentControl(pi, "stop", { id });
+  return requestSubagentRpc<void>(pi, "stop", { id });
+}
+
+function requestSubagentStatus(pi: ExtensionAPI, id?: string): Promise<unknown> {
+  return requestSubagentRpc<unknown>(pi, "status", id ? { id } : {}, RESTORE_STATUS_RPC_TIMEOUT_MS);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -494,6 +501,44 @@ function writerLifecycleStatus(value: unknown): WriterLifecycleStatus | undefine
   return undefined;
 }
 
+export type SubagentStatusDisposition = "active" | "needs_attention" | "completed" | "failed" | "paused" | "stopped" | "empty" | "unknown";
+
+export function subagentStatusDisposition(value: unknown): SubagentStatusDisposition {
+  const root = asRecord(value);
+  if (!root) return "unknown";
+  const details = asRecord(root.details);
+  const lifecycle = writerLifecycleStatus(root) ?? writerLifecycleStatus(details);
+  if (lifecycle) return lifecycle;
+  const rawState = typeof root.state === "string" ? root.state : typeof details?.state === "string" ? details.state : undefined;
+  const rawActivity = typeof root.activityState === "string" ? root.activityState : typeof details?.activityState === "string" ? details.activityState : undefined;
+  if (rawActivity === "needs_attention") return "needs_attention";
+  if (rawState === "queued" || rawState === "pending" || rawState === "running") return "active";
+
+  const text = typeof root.text === "string"
+    ? root.text
+    : visibleText(root.content);
+  const state = /^State:\s*(queued|pending|running|complete|completed|failed|paused|stopped|rejected)\b/im.exec(text)?.[1]?.toLowerCase();
+  if (/^Activity:\s*needs attention\b/im.test(text)) return "needs_attention";
+  if (state === "queued" || state === "pending" || state === "running") return "active";
+  if (state === "complete" || state === "completed") return "completed";
+  if (state === "failed" || state === "rejected") return "failed";
+  if (state === "paused") return "paused";
+  if (state === "stopped") return "stopped";
+
+  const fleet = asRecord(root.fleet);
+  if (typeof fleet?.totalActive === "number") {
+    if (fleet.totalActive > 0) return "active";
+    if (/\bno active\b/i.test(text)) return "empty";
+  }
+  return "unknown";
+}
+
+export function restoredStatusAction(disposition: SubagentStatusDisposition): "stay_silent" | "wake_integration" | "wake_intervention" {
+  if (disposition === "active") return "stay_silent";
+  if (disposition === "completed" || disposition === "failed" || disposition === "stopped" || disposition === "empty") return "wake_integration";
+  return "wake_intervention";
+}
+
 function delegationRunId(value: unknown): string | undefined {
   const result = asRecord(value);
   const details = asRecord(result?.details);
@@ -710,12 +755,15 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   let mainAgentRunning = false;
   let lastMissionWakeAt = 0;
   let restoreWakeTimer: ReturnType<typeof setTimeout> | undefined;
+  let restoreReconcileGeneration = 0;
   const activeDelegationRuns = new Set<string>();
   const delegationToolCalls = new Set<string>();
-  const statusToolCalls = new Map<string, string | undefined>();
+  const statusToolCalls = new Map<string, { key: string; target?: string }>();
+  const activeStatusChecksThisTurn = new Set<string>();
   const writerToolCalls = new Map<string, { agent: string; async: boolean }>();
   const terminalWriterRuns = new Map<string, WriterLifecycleStatus>();
   const integratedTerminalRuns = new Set<string>();
+  const restoreInterventionMissions = new Set<string>();
 
   const persistMission = () => {
     if (!mission) return;
@@ -752,9 +800,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     && mission.phase !== "paused"
     && (mission.phase === "integration" || mission.remainingTask));
 
-  const requestMissionWake = (reason: "plan" | "integration" | "reconcile", forceReconcile = false): boolean => {
+  const requestMissionWake = (reason: "plan" | "integration"): boolean => {
     if (!mission || mainAgentRunning) return false;
-    if (!forceReconcile && (activeDelegationRuns.size > 0 || writerOccupied || !missionNeedsMain())) return false;
+    if (activeDelegationRuns.size > 0 || writerOccupied || !missionNeedsMain()) return false;
     if (lastAssistantStopReason === "aborted" || lastAssistantStopReason === "error") return false;
     if (mission.wakeAttempts >= 3) {
       mission.phase = "paused";
@@ -762,16 +810,14 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       return false;
     }
     const now = Date.now();
-    if (!forceReconcile && now - lastMissionWakeAt < 4_000) return false;
+    if (now - lastMissionWakeAt < 4_000) return false;
     mission.wakeAttempts += 1;
     persistMission();
     lastMissionWakeAt = now;
     const task = mission.remainingTask;
-    const content = reason === "reconcile"
-      ? `${MISSION_RECONCILE}\n\nRecorded runs: ${mission.activeRunIds.join(", ") || "none"}${task ? `\nRemaining task #${task.id}: ${task.subject}` : ""}`
-      : reason === "integration"
-        ? MISSION_INTEGRATION
-        : `${PLAN_CONTINUATION}${task ? `\n\nStranded task #${task.id}: ${task.subject} (${task.status})` : ""}`;
+    const content = reason === "integration"
+      ? MISSION_INTEGRATION
+      : `${PLAN_CONTINUATION}${task ? `\n\nStranded task #${task.id}: ${task.subject} (${task.status})` : ""}`;
     pi.sendMessage(
       { customType: `lemonpi-mission-${reason}`, content, display: false },
       { deliverAs: "followUp", triggerTurn: true },
@@ -779,24 +825,126 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     return true;
   };
 
+  const sendRestoreIntervention = (missionId: string, runId: string | undefined, reason: string) => {
+    if (restoreInterventionMissions.has(missionId)) return;
+    restoreInterventionMissions.add(missionId);
+    pi.sendMessage(
+      {
+        customType: "lemonpi-mission-reconcile-attention",
+        content: `${MISSION_RECONCILE_ATTENTION}${runId ? `\n\nRecorded run: ${runId}` : ""}\nReconciliation result: ${reason}`,
+        display: false,
+      },
+      { deliverAs: "followUp", triggerTurn: true },
+    );
+  };
+
+  const scheduleRestoredMissionReconciliation = (missionId: string, generation: number, attempt: number) => {
+    if (restoreWakeTimer) clearTimeout(restoreWakeTimer);
+    const delay = RESTORE_RECONCILE_DELAYS_MS[Math.min(attempt, RESTORE_RECONCILE_DELAYS_MS.length - 1)]!;
+    restoreWakeTimer = setTimeout(() => {
+      restoreWakeTimer = undefined;
+      void reconcileRestoredMission(missionId, generation, attempt);
+    }, delay);
+  };
+
+  const reconcileRestoredMission = async (missionId: string, generation: number, attempt: number): Promise<void> => {
+    if (!mission || mission.id !== missionId || generation !== restoreReconcileGeneration) return;
+    const targets = mission.activeRunIds.length > 0
+      ? [...mission.activeRunIds]
+      : mission.writerActive
+        ? [undefined]
+        : [];
+
+    if (targets.length === 0) {
+      if (mission.phase === "delegated") mission.phase = "integration";
+      mission.writerActive = false;
+      writerOccupied = false;
+      persistMission();
+      requestMissionWake(mission.phase === "integration" ? "integration" : "plan");
+      return;
+    }
+
+    const settled = await Promise.allSettled(targets.map((runId) => requestSubagentStatus(pi, runId)));
+    if (!mission || mission.id !== missionId || generation !== restoreReconcileGeneration) return;
+    const dispositions = settled.map((result) => result.status === "fulfilled" ? subagentStatusDisposition(result.value) : "unknown" as const);
+    if (dispositions.some((disposition) => disposition === "unknown")) {
+      if (attempt + 1 < RESTORE_RECONCILE_DELAYS_MS.length) {
+        scheduleRestoredMissionReconciliation(missionId, generation, attempt + 1);
+        return;
+      }
+      const failure = settled.find((result) => result.status === "rejected");
+      const reason = failure?.status === "rejected"
+        ? failure.reason instanceof Error ? failure.reason.message : String(failure.reason)
+        : "The subagent runtime returned an unrecognized status.";
+      sendRestoreIntervention(missionId, targets[dispositions.indexOf("unknown")], reason);
+      return;
+    }
+
+    const terminal: Array<{ runId: string; status: Exclude<WriterLifecycleStatus, "paused"> }> = [];
+    let intervention: { runId?: string; reason: string; needsAttention?: boolean } | undefined;
+    dispositions.forEach((disposition, index) => {
+      const runId = targets[index];
+      if (restoredStatusAction(disposition) === "stay_silent") return;
+      if (disposition === "needs_attention") {
+        intervention ??= { ...(runId ? { runId } : {}), reason: "The worker needs attention.", needsAttention: true };
+        return;
+      }
+      if (disposition === "paused") {
+        intervention ??= { ...(runId ? { runId } : {}), reason: "The recorded worker is paused." };
+        return;
+      }
+      if (runId) activeDelegationRuns.delete(runId);
+      else activeDelegationRuns.clear();
+      if (runId && (disposition === "completed" || disposition === "failed" || disposition === "stopped")) {
+        terminal.push({ runId, status: disposition });
+      }
+    });
+
+    mission.activeRunIds = mission.activeRunIds.filter((runId) => activeDelegationRuns.has(runId));
+    const untargetedWriterActive = targets.some((runId, index) => runId === undefined
+      && ["active", "needs_attention", "paused"].includes(dispositions[index]!));
+    writerOccupied = (mission.activeRunIds.length > 0 || untargetedWriterActive) && mission.writerActive;
+    mission.writerActive = writerOccupied;
+    activeWriterRunId = mission.activeRunIds.length === 1 && writerOccupied ? mission.activeRunIds[0] : undefined;
+    if (!writerOccupied) activeWriterAgent = undefined;
+    if (mission.activeRunIds.length === 0 && !writerOccupied) mission.phase = "integration";
+    mission.wakeAttempts = 0;
+    persistMission();
+
+    for (const item of terminal) wakeForTerminalRun(item.runId, undefined, item.status);
+    if (intervention?.needsAttention && intervention.runId) {
+      attentionRecovery = { runId: intervention.runId };
+      attentionActionObserved = false;
+      attentionRepairRequested = false;
+      pi.sendMessage(
+        { customType: "lemonpi-attention-recovery", content: `${ATTENTION_RECOVERY}\n\nTarget run: ${intervention.runId}`, display: false },
+        { deliverAs: "followUp", triggerTurn: true },
+      );
+    } else if (intervention) {
+      sendRestoreIntervention(missionId, intervention.runId, intervention.reason);
+    } else if (terminal.length === 0 && mission.activeRunIds.length === 0) {
+      requestMissionWake("integration");
+    }
+  };
+
   const restoreMission = (ctx: { sessionManager: { getBranch(): Iterable<unknown> } }) => {
     const restored = replayMissionState(ctx.sessionManager.getBranch());
+    restoreReconcileGeneration += 1;
+    const generation = restoreReconcileGeneration;
     mission = restored;
     activeDelegationRuns.clear();
     remainingPlanTask = restored?.remainingTask ? { ...restored.remainingTask } : undefined;
     planContinuationAttempts = restored?.wakeAttempts ?? 0;
     writerOccupied = restored?.writerActive ?? false;
     if (restored) restored.activeRunIds.forEach((runId) => activeDelegationRuns.add(runId));
+    activeWriterRunId = restored?.writerActive && restored.activeRunIds.length === 1 ? restored.activeRunIds[0] : undefined;
+    if (!restored?.writerActive) activeWriterAgent = undefined;
     if (restoreWakeTimer) clearTimeout(restoreWakeTimer);
     if (!restored
       || restored.phase === "complete"
       || restored.phase === "paused"
       || Date.now() - restored.updatedAt > 7 * 24 * 60 * 60 * 1_000) return;
-    mission.wakeAttempts = 0;
-    restoreWakeTimer = setTimeout(() => {
-      restoreWakeTimer = undefined;
-      requestMissionWake("reconcile", true);
-    }, 750);
+    scheduleRestoredMissionReconciliation(restored.id, generation, 0);
   };
 
   pi.on("session_start", async (_event, ctx) => restoreMission(ctx));
@@ -991,7 +1139,14 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     const isManagementAction = typeof input.action === "string" && input.action.trim().length > 0;
     if (input.action === "status") {
       const target = typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : undefined;
-      statusToolCalls.set(event.toolCallId, target);
+      const key = target ?? "__active_runs__";
+      if (activeStatusChecksThisTurn.has(key)) {
+        return {
+          block: true,
+          reason: "This run was already confirmed active during the current turn. Do not poll it again. End the turn so its completion or needs-attention event can wake Main Pi.",
+        };
+      }
+      statusToolCalls.set(event.toolCallId, { key, ...(target ? { target } : {}) });
     }
     if (input.action === "resume") {
       const message = typeof input.message === "string" ? input.message.trimEnd() : "";
@@ -1104,6 +1259,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       details?: { event?: { runId?: unknown; index?: unknown; to?: unknown } };
     };
     const notification = visibleText(message.content);
+    if (event.message.role === "user") activeStatusChecksThisTurn.clear();
     if (event.message.role === "user" && message.customType == null) {
       sawToolActivity = false;
       visibleExplanationAfterLastTool = false;
@@ -1169,11 +1325,15 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_end", async (event) => {
-    const statusTarget = statusToolCalls.get(event.toolCallId);
+    const statusCall = statusToolCalls.get(event.toolCallId);
     const wasStatusCall = statusToolCalls.delete(event.toolCallId);
     if (wasStatusCall) {
-      const status = writerLifecycleStatus(event.result) ?? (event.isError ? "failed" : undefined);
-      const runId = delegationRunId(event.result) ?? statusTarget;
+      const disposition = event.isError ? "unknown" : subagentStatusDisposition(event.result);
+      if (disposition === "active" || disposition === "needs_attention") activeStatusChecksThisTurn.add(statusCall!.key);
+      const status = disposition === "completed" || disposition === "failed" || disposition === "paused" || disposition === "stopped"
+        ? disposition
+        : writerLifecycleStatus(event.result) ?? (event.isError ? "failed" : undefined);
+      const runId = delegationRunId(event.result) ?? statusCall?.target;
       if (status && status !== "paused") {
         if (runId) activeDelegationRuns.delete(runId);
         if (mission) {

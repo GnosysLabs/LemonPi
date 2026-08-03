@@ -8,7 +8,9 @@ import {
   parallelWriterPolicyIssue,
   remainingPlanFromTodoResult,
   replayMissionState,
+  restoredStatusAction,
   shouldWakeForPlanContinuation,
+  subagentStatusDisposition,
 } from "../src-tauri/resources/lemonpi-narration/extensions/narration.ts";
 
 const planningTask = `Execution mode: read-only
@@ -78,6 +80,13 @@ assert.equal(shouldWakeForPlanContinuation({ hasRemainingTask: true, activeDeleg
 assert.equal(shouldWakeForPlanContinuation({ hasRemainingTask: true, activeDelegationCount: 0, writerOccupied: false, intentionallyStopped: false, attempts: 2 }), true);
 assert.equal(shouldWakeForPlanContinuation({ hasRemainingTask: true, activeDelegationCount: 0, writerOccupied: false, intentionallyStopped: false, attempts: 3 }), false);
 assert.equal(shouldWakeForPlanContinuation({ hasRemainingTask: true, activeDelegationCount: 0, writerOccupied: false, intentionallyStopped: true, attempts: 0 }), false);
+assert.equal(subagentStatusDisposition({ text: "Run: run-1\nState: running\nActivity: active" }), "active");
+assert.equal(subagentStatusDisposition({ text: "Run: run-1\nState: running\nActivity: needs attention" }), "needs_attention");
+assert.equal(subagentStatusDisposition({ text: "Run: run-1\nState: complete" }), "completed");
+assert.equal(subagentStatusDisposition({ text: "No active async runs.", fleet: { totalActive: 0 } }), "empty");
+assert.equal(restoredStatusAction("active"), "stay_silent");
+assert.equal(restoredStatusAction("completed"), "wake_integration");
+assert.equal(restoredStatusAction("needs_attention"), "wake_intervention");
 
 const lane = (outcome, paths) => ({
   agent: "worker",
