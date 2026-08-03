@@ -5,6 +5,7 @@
 
 mod auth;
 mod config;
+pub(crate) mod events;
 mod identity;
 mod policy;
 

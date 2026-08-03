@@ -16,10 +16,12 @@ use tokio::{
     sync::{oneshot, Mutex},
 };
 
-// Persistence and policy helpers for a future opt-in remote bridge. This module intentionally
-// starts no listener and is not connected to any Tauri command or current runtime path.
+// Private persistence, policy, and transport-neutral event helpers for a future opt-in remote
+// bridge. This module starts no listener and exposes no remote Tauri command.
 #[allow(dead_code)]
 mod remote;
+
+use remote::events::{EventHub, EventKind};
 
 const MAX_RPC_RECORD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SESSION_FILES: usize = 250;
@@ -36,6 +38,7 @@ const MAX_AGENT_FILE_BYTES: u64 = 256 * 1024;
 #[derive(Default)]
 struct PiManager {
     registry: Mutex<PiRegistry>,
+    events: EventHub,
 }
 
 #[derive(Default)]
@@ -68,6 +71,7 @@ struct PiProcessEvent {
     pid: Option<u32>,
     code: Option<i32>,
     message: Option<String>,
+    project: Option<String>,
 }
 
 struct RequiredPiPackage {
@@ -782,12 +786,23 @@ async fn list_pi_sessions(cwd: String) -> Result<Vec<PiSessionSummary>, String> 
         .map_err(|error| format!("Could not inspect project sessions: {error}"))?
 }
 
-fn forward_framed_result(result: Result<Option<Value>, String>, app: &AppHandle, pid: u32) {
+fn forward_framed_result(
+    result: Result<Option<Value>, String>,
+    app: &AppHandle,
+    pid: u32,
+    project: &Path,
+    events: &EventHub,
+) {
     match result {
         Ok(Some(mut event)) => {
             if let Value::Object(fields) = &mut event {
                 fields.insert("__piPid".to_string(), Value::from(pid));
             }
+            events.publish(
+                Some(project.to_path_buf()),
+                EventKind::PiEvent,
+                event.clone(),
+            );
             let _ = app.emit("pi-event", event);
         }
         Ok(None) => {}
@@ -795,8 +810,27 @@ fn forward_framed_result(result: Result<Option<Value>, String>, app: &AppHandle,
     }
 }
 
-async fn forward_stdout<R>(mut reader: R, app: AppHandle, pid: u32)
-where
+fn emit_process_event(app: &AppHandle, events: &EventHub, project: &Path, event: PiProcessEvent) {
+    events.publish(
+        Some(project.to_path_buf()),
+        EventKind::ProcessEvent,
+        json!({
+            "state": event.state,
+            "pid": event.pid,
+            "code": event.code,
+            "message": event.message.clone(),
+        }),
+    );
+    let _ = app.emit("pi-process-event", event);
+}
+
+async fn forward_stdout<R>(
+    mut reader: R,
+    app: AppHandle,
+    pid: u32,
+    project: PathBuf,
+    events: EventHub,
+) where
     R: AsyncRead + Unpin,
 {
     let mut chunk = vec![0; 16 * 1024];
@@ -806,13 +840,13 @@ where
         match reader.read(&mut chunk).await {
             Ok(0) => {
                 if let Some(result) = framer.finish() {
-                    forward_framed_result(result, &app, pid);
+                    forward_framed_result(result, &app, pid, &project, &events);
                 }
                 break;
             }
             Ok(count) => {
                 for result in framer.push(&chunk[..count]) {
-                    forward_framed_result(result, &app, pid);
+                    forward_framed_result(result, &app, pid, &project, &events);
                 }
             }
             Err(error) => {
@@ -973,22 +1007,34 @@ async fn start_pi(
         );
     }
 
-    let _ = app.emit(
-        "pi-process-event",
+    emit_process_event(
+        &app,
+        &manager.events,
+        &cwd_path,
         PiProcessEvent {
             state: "started",
             pid: Some(pid),
             code: None,
             message: None,
+            project: Some(path_for_frontend(&cwd_path)),
         },
     );
 
-    tauri::async_runtime::spawn(forward_stdout(stdout, app.clone(), pid));
+    let events_for_stdout = manager.events.clone();
+    let project_for_stdout = cwd_path.clone();
+    tauri::async_runtime::spawn(forward_stdout(
+        stdout,
+        app.clone(),
+        pid,
+        project_for_stdout,
+        events_for_stdout,
+    ));
     tauri::async_runtime::spawn(forward_stderr(stderr, app.clone()));
 
     let manager_for_wait = Arc::clone(manager.inner());
     let app_for_wait = app.clone();
     let project_for_wait = cwd_path.clone();
+    let events_for_wait = manager.events.clone();
     tauri::async_runtime::spawn(async move {
         let (state, status) = tokio::select! {
             status = child.wait() => ("exited", status),
@@ -1016,13 +1062,16 @@ async fn start_pi(
         }
         drop(registry);
 
-        let _ = app_for_wait.emit(
-            "pi-process-event",
+        emit_process_event(
+            &app_for_wait,
+            &events_for_wait,
+            &project_for_wait,
             PiProcessEvent {
                 state,
                 pid: Some(pid),
                 code,
                 message,
+                project: Some(path_for_frontend(&project_for_wait)),
             },
         );
     });
@@ -1030,25 +1079,34 @@ async fn start_pi(
     Ok(info)
 }
 
-#[tauri::command]
-async fn send_pi(manager: State<'_, Arc<PiManager>>, command: Value) -> Result<(), String> {
+fn encode_validated_pi_command(command: &Value) -> Result<Vec<u8>, String> {
     if !command.is_object() || command.get("type").and_then(Value::as_str).is_none() {
         return Err("RPC commands must be JSON objects with a string type.".to_string());
     }
 
-    let mut payload = serde_json::to_vec(&command)
+    let mut payload = serde_json::to_vec(command)
         .map_err(|error| format!("Could not encode RPC command: {error}"))?;
     if payload.len() > MAX_RPC_RECORD_BYTES {
         return Err("RPC command is too large.".to_string());
     }
     payload.push(b'\n');
+    Ok(payload)
+}
 
+/// Sends a validated command to one already-running canonical project. This helper never starts a
+/// Pi process or changes its trust state; callers must select a project that `start_pi` has already
+/// registered.
+async fn send_validated_pi_command_to_project(
+    manager: &PiManager,
+    project: &Path,
+    command: &Value,
+) -> Result<(), String> {
+    let payload = encode_validated_pi_command(command)?;
     let stdin = {
         let registry = manager.registry.lock().await;
         registry
-            .active_project
-            .as_ref()
-            .and_then(|project| registry.processes.get(project))
+            .processes
+            .get(project)
             .map(|process| Arc::clone(&process.stdin))
             .ok_or_else(|| "Pi is not running.".to_string())?
     };
@@ -1062,6 +1120,33 @@ async fn send_pi(manager: State<'_, Arc<PiManager>>, command: Value) -> Result<(
         .flush()
         .await
         .map_err(|error| format!("Could not flush Pi stdin: {error}"))
+}
+
+fn select_pi_command_project(
+    requested_project: Option<String>,
+    active_project: Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    match requested_project {
+        Some(project) => PathBuf::from(project)
+            .canonicalize()
+            .map_err(|error| format!("Could not open project folder: {error}")),
+        None => active_project.ok_or_else(|| "Pi is not running.".to_string()),
+    }
+}
+
+#[tauri::command]
+async fn send_pi(
+    manager: State<'_, Arc<PiManager>>,
+    command: Value,
+    project: Option<String>,
+) -> Result<(), String> {
+    let active_project = {
+        let registry = manager.registry.lock().await;
+        registry.active_project.clone()
+    };
+    let project = select_pi_command_project(project, active_project)?;
+
+    send_validated_pi_command_to_project(manager.inner(), &project, &command).await
 }
 
 fn safe_subagent_name(value: &str) -> String {
@@ -2985,6 +3070,70 @@ mod tests {
     fn trust_decision_maps_to_explicit_cli_flag() {
         assert_eq!(project_trust_arg(true), "--approve");
         assert_eq!(project_trust_arg(false), "--no-approve");
+    }
+
+    #[test]
+    fn command_encoding_requires_a_typed_rpc_and_preserves_the_record_bound() {
+        assert_eq!(
+            encode_validated_pi_command(&json!({ "payload": {} })),
+            Err("RPC commands must be JSON objects with a string type.".to_string())
+        );
+
+        let encoded = encode_validated_pi_command(&json!({
+            "type": "get_state",
+            "payload": {},
+        }))
+        .unwrap();
+        assert!(encoded.ends_with(b"\n"));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&encoded[..encoded.len() - 1]).unwrap(),
+            json!({ "type": "get_state", "payload": {} })
+        );
+
+        let oversized = json!({
+            "type": "prompt",
+            "payload": "x".repeat(MAX_RPC_RECORD_BYTES),
+        });
+        assert_eq!(
+            encode_validated_pi_command(&oversized),
+            Err("RPC command is too large.".to_string())
+        );
+    }
+
+    #[test]
+    fn explicit_command_project_is_canonical_and_does_not_replace_the_active_project() {
+        let root = env::temp_dir().join(format!(
+            "lemonpi-command-project-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let active = root.join("active");
+        let requested = root.join("requested");
+        fs::create_dir_all(&active).unwrap();
+        fs::create_dir_all(&requested).unwrap();
+        let canonical_active = active.canonicalize().unwrap();
+        let canonical_requested = requested.canonicalize().unwrap();
+
+        assert_eq!(
+            select_pi_command_project(
+                Some(requested.to_string_lossy().into_owned()),
+                Some(canonical_active.clone()),
+            )
+            .unwrap(),
+            canonical_requested
+        );
+        assert_eq!(
+            select_pi_command_project(None, Some(canonical_active.clone())).unwrap(),
+            canonical_active
+        );
+        assert_eq!(
+            select_pi_command_project(None, None),
+            Err("Pi is not running.".to_string())
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -78,8 +78,8 @@ export async function runPiPackageAction(
   return invoke<PiPackagesSnapshot>("run_pi_package_action", { action, source, scope });
 }
 
-export async function sendPi(command: RpcCommand | object): Promise<void> {
-  return invoke("send_pi", { command });
+export async function sendPi(command: RpcCommand | object, project?: string | null): Promise<void> {
+  return invoke("send_pi", { command, project: project ?? null });
 }
 
 export async function onPiEvent(handler: (event: PiEvent) => void): Promise<UnlistenFn> {

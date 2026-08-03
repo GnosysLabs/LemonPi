@@ -109,6 +109,7 @@ export interface PiProcessEvent {
   pid?: number;
   code?: number;
   message?: string;
+  project?: string;
 }
 
 export interface SubagentToolActivity {
