@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { subagentPromptSummary } from "./subagent-prompt";
+import { subagentPromptSummary, subagentWorkerSummary } from "./subagent-prompt";
 
 describe("subagentPromptSummary", () => {
   it("uses a multiline chunk outcome instead of runner metadata", () => {
@@ -27,5 +27,15 @@ describe("subagentPromptSummary", () => {
     ].join("\n");
 
     expect(subagentPromptSummary(prompt)).toBe("Implement the project switcher.");
+  });
+
+  it("prefers the dispatcher summary and limits it to eight words", () => {
+    const prompt = [
+      "You are reviving a previous subagent conversation.",
+      "Worker summary: Repair remote settings layout and validation behavior today",
+    ].join("\n");
+
+    expect(subagentWorkerSummary(prompt)).toBe("Repair remote settings layout and validation behavior today");
+    expect(subagentPromptSummary(prompt)).toBe("Repair remote settings layout and validation behavior today");
   });
 });

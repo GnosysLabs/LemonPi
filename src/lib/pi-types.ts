@@ -139,6 +139,7 @@ export interface SubagentStepStatus {
   agent: string;
   context?: "fresh" | "fork";
   description?: string;
+  summary?: string;
   prompt?: string;
   phase?: string;
   label?: string;

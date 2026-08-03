@@ -55,6 +55,7 @@ import { decideStartupGate } from "./lib/startup-gate";
 import { buildPromptWithAttachments, promptImages, type ComposerAttachment } from "./lib/attachments";
 import { useAppUpdater } from "./lib/app-updater";
 import { todoSnapshotFromEvent, todoSnapshotFromMessages, type TodoSnapshot } from "./lib/extension-todos";
+import { subagentWorkerSummary } from "./lib/subagent-prompt";
 import {
   baselineProjectFinalReplies,
   countUnreadFinalReplies,
@@ -151,11 +152,13 @@ function foregroundRunFromDetails(value: unknown, final: boolean): SubagentRunSt
     const rawStatus = typeof step.status === "string" ? step.status : final ? "complete" : "running";
     const status = rawStatus === "completed" ? "complete" : rawStatus as "pending" | "running" | "complete" | "failed" | "paused" | "stopped" | "rejected";
     const total = typeof step.tokens === "number" ? step.tokens : 0;
+    const task = typeof step.task === "string" ? step.task : undefined;
     return {
       index: typeof step.index === "number" ? step.index : undefined,
       agent: step.agent,
-      description: typeof step.task === "string" ? step.task : undefined,
-      prompt: typeof step.task === "string" ? step.task : undefined,
+      description: task,
+      summary: task ? subagentWorkerSummary(task) : undefined,
+      prompt: task,
       status,
       sessionFile: typeof step.sessionFile === "string" ? step.sessionFile : undefined,
       transcriptPath: typeof step.transcriptPath === "string" ? step.transcriptPath : undefined,

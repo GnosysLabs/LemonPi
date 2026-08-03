@@ -23,13 +23,14 @@ const IndependentDispatchSchema = {
         type: "object",
         properties: {
           agent: { type: "string", description: "Executable runtime agent name from the live roster." },
+          summary: { type: "string", maxLength: 96, description: "Concrete worker purpose in eight words or fewer, written for the Command Center card." },
           task: { type: "string", description: "One independently actionable outcome with scope and completion condition." },
           cwd: { type: "string", description: "Repository or project directory for this lane." },
           model: { type: "string", description: "Optional model override for this lane." },
           skill: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }, { type: "boolean" }] },
           acceptance: {},
         },
-        required: ["agent", "task"],
+        required: ["agent", "summary", "task"],
         additionalProperties: false,
       },
     },
@@ -147,7 +148,7 @@ You are Main Pi, the read-only supervisor and integration owner. You do not impl
 Independent dispatch is the default:
 
 1. Before meaningful execution, spend only a brief pass mapping the whole outcome graph: implementation, investigation, UX, platform, validation preparation, integration, and any material review boundary. Look several steps ahead. A later-step lane may start now whenever its inputs are already stable.
-2. Use \`lemonpi_dispatch\` for every implementation lane and whenever two or more read-only lanes are ready, with one lane per independent outcome. LemonPi launches every lane as a separate async run, not as a grouped subagent job. Each child completion wakes Main Pi independently, so inspect and integrate that result immediately while siblings continue. Refill newly-ready work without waiting for the original set to finish.
+2. Use \`lemonpi_dispatch\` for every implementation lane and whenever two or more read-only lanes are ready, with one lane per independent outcome. Every lane must include a concrete \`summary\` of eight words or fewer describing that worker's purpose for the user; never use runner boilerplate, role names, or generic phrases. LemonPi launches every lane as a separate async run, not as a grouped subagent job. Each child completion wakes Main Pi independently, so inspect and integrate that result immediately while siblings continue. Refill newly-ready work without waiting for the original set to finish.
 3. A direct single read-only delegation is appropriate only when exactly one useful read-only lane is ready. There is no numerical quota: never manufacture agents, but never serialize independent work for convenience, superficial file overlap, a dirty checkout, or because the first lane is easiest to describe.
 4. Grouped \`subagent.tasks\` and chains are exceptional. Use them only when the user needs one atomic aggregate result whose partial child results are not independently actionable. Ordinary parallel research, implementation, review, and validation are independent lanes.
 5. Choose agents from the live roster by capability, including custom user agents. Call \`subagent({ action: "list" })\` once when the roster is not already known and role choice matters, then reuse it. Use planners, designers, scouts, context builders, reviewers, or other specialists when their output changes a real decision; do not create ceremonial diversity or default every task to worker/planner/reviewer.
@@ -242,6 +243,7 @@ const CHUNK_DONE_WHEN = /(?:^|\n)\s*done when\s*:\s*\S/i;
 const CHUNK_OUT_OF_SCOPE = /(?:^|\n)\s*out of scope\s*:\s*\S/i;
 const NO_DEPENDENCIES = /(?:^|\n)\s*depends on\s*:\s*none\s*(?:\n|$)/i;
 const SLICE_TARGET = /(?:^|\n)\s*slice target\s*:\s*under 5 minutes\s*(?:\n|$)/i;
+const WORKER_SUMMARY = /(?:^|\n)\s*worker summary\s*:\s*\S/i;
 const CHECKOUT_SNAPSHOT_START = "<lemonpi-checkout-snapshot>";
 const CHECKOUT_SNAPSHOT_END = "</lemonpi-checkout-snapshot>";
 const CHECKOUT_SNAPSHOT_BLOCK = /\n*<lemonpi-checkout-snapshot>[\s\S]*?<\/lemonpi-checkout-snapshot>\s*/gi;
@@ -363,8 +365,16 @@ function conciseTaskSummary(task: string): string {
   const line = task
     .split("\n")
     .map((value) => value.trim())
-    .find((value) => value && !/^(?:execution mode|chunk outcome|in scope|done when|out of scope|owned paths|depends on|single-writer reason|single-writer detail|review justification|child checklist|normative contract|shared .+ rules|tests?|validation)\s*:/i.test(value));
+    .find((value) => value && !/^(?:worker summary|execution mode|chunk outcome|in scope|done when|out of scope|owned paths|depends on|single-writer reason|single-writer detail|review justification|child checklist|normative contract|shared .+ rules|tests?|validation)\s*:/i.test(value));
   return (line ?? "Complete the delegated outcome").replace(/^[-*]\s+/, "").slice(0, 180);
+}
+
+export function normalizeWorkerSummary(value: unknown, task: string): string {
+  const authored = typeof value === "string" ? value : "";
+  const candidate = cleanChecklistText(authored).replace(/^worker summary\s*:\s*/i, "")
+    || conciseTaskSummary(task);
+  return candidate.split(/\s+/).filter(Boolean).slice(0, 8).join(" ").slice(0, 96)
+    || "Complete delegated outcome";
 }
 
 function cleanChecklistText(value: string): string {
@@ -503,7 +513,8 @@ export function compileDelegationContracts(input: Record<string, unknown>): void
     if (!record) return;
     if (typeof record.agent === "string") {
       const originalTask = typeof record.task === "string" ? record.task.trim() : "";
-      const summary = conciseTaskSummary(originalTask);
+      const summary = normalizeWorkerSummary(record.summary, originalTask);
+      delete record.summary;
       const mode = inferredExecutionMode(record.agent, originalTask);
       let task = originalTask;
       // Keep the human task first so Command Center shows the delegated outcome instead of
@@ -514,6 +525,7 @@ export function compileDelegationContracts(input: Record<string, unknown>): void
         task = `${task.trimEnd()}\nDepends on: none`;
       }
       if (!SLICE_TARGET.test(task)) task = `${task.trimEnd()}\nSlice target: under 5 minutes`;
+      if (!WORKER_SUMMARY.test(task)) task = `${task.trimEnd()}\nWorker summary: ${summary}`;
       record.task = appendDefaultChecklist(task, summary);
     }
     for (const key of ["tasks", "chain", "parallel"] as const) {

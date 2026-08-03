@@ -11,6 +11,7 @@ import {
   isManagedWorktreePatchCommand,
   missionHasActiveOwnership,
   missionWakeIsBlocked,
+  normalizeWorkerSummary,
   remainingPlanFromTodoResult,
   replayMissionState,
   restoredStatusAction,
@@ -32,13 +33,16 @@ applyDelegationSafetyContracts(readOnlyLaunch);
 assert.deepEqual(readOnlyLaunch.agentContract, { version: 1 });
 assert.match(readOnlyLaunch.task, /Do not modify any project files/);
 
-const writerLaunch = { agent: "worker", task: implementationTask, cwd: "/tmp/example" };
+const writerLaunch = { agent: "worker", summary: "Implement compact status state", task: implementationTask, cwd: "/tmp/example" };
 compileDelegationContracts(writerLaunch);
 assert.match(writerLaunch.task, /^Add the compacting state/);
 assert.match(writerLaunch.task, /^Execution mode: implementation$/m);
 assert.match(writerLaunch.task, /^Chunk outcome:/m);
 assert.match(writerLaunch.task, /^Child checklist:/m);
+assert.match(writerLaunch.task, /^Worker summary: Implement compact status state$/m);
+assert.equal(writerLaunch.summary, undefined);
 assert.equal(delegatesImplementation(writerLaunch), true);
+assert.equal(normalizeWorkerSummary("one two three four five six seven eight nine", implementationTask), "one two three four five six seven eight");
 
 const writerSpawn = independentSpawnParams(writerLaunch);
 assert.equal(writerSpawn.implementation, true);

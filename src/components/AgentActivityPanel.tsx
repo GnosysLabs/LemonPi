@@ -394,7 +394,7 @@ function AgentCard({
   const restoringTodos = active && visibleTodos.length > 0 && !todoSnapshotFresh;
   const finalizing = active && todoSnapshotFresh && visibleTodos.length > 0 && visibleTodos.every((task) => task.status === "completed");
   const promptText = step.prompt?.trim() || step.description?.trim();
-  const promptSummary = promptText ? subagentPromptSummary(promptText) : undefined;
+  const promptSummary = step.summary?.trim() || (promptText ? subagentPromptSummary(promptText) : undefined);
   let showingPrompt = false;
   let currentActivity = activity?.headline ?? step.status;
 

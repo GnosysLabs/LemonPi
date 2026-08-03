@@ -8,7 +8,18 @@ function readableLine(value: string): string {
     .trim();
 }
 
+export function subagentWorkerSummary(value: string): string | undefined {
+  const line = value.replace(/\r\n/g, "\n").split("\n")
+    .find((candidate) => /^\s*worker summary\s*:/i.test(candidate));
+  if (!line) return undefined;
+  const summary = readableLine(line.replace(/^\s*worker summary\s*:\s*/i, ""));
+  if (!summary) return undefined;
+  return summary.split(/\s+/).slice(0, 8).join(" ");
+}
+
 export function subagentPromptSummary(value: string): string {
+  const workerSummary = subagentWorkerSummary(value);
+  if (workerSummary) return workerSummary;
   const lines = value.replace(/\r\n/g, "\n").split("\n").map((line) => line.trim());
   const chunkIndex = lines.findIndex((line) => /^chunk outcome\s*:/i.test(line));
 

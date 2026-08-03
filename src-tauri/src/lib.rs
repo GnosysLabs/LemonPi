@@ -3275,6 +3275,22 @@ fn normalize_subagent_prompt(value: &str) -> String {
     prompt.trim().to_string()
 }
 
+fn subagent_worker_summary(prompt: &str) -> Option<String> {
+    let summary = prompt.lines().find_map(|line| {
+        let (label, value) = line.split_once(':')?;
+        label
+            .trim()
+            .eq_ignore_ascii_case("worker summary")
+            .then_some(value.trim())
+    })?;
+    let summary = summary
+        .split_whitespace()
+        .take(8)
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!summary.is_empty()).then_some(summary)
+}
+
 fn read_subagent_prompts(async_dir: &Path) -> HashMap<usize, String> {
     let Ok(file) = fs::File::open(async_dir.join("events.jsonl")) else {
         return HashMap::new();
@@ -3363,6 +3379,9 @@ async fn get_subagent_runs(session_file: String) -> Result<Vec<Value>, String> {
             for (index, step) in steps.iter_mut().enumerate() {
                 if let (Some(prompt), Some(fields)) = (prompts.get(&index), step.as_object_mut()) {
                     fields.insert("prompt".to_string(), Value::from(prompt.clone()));
+                    if let Some(summary) = subagent_worker_summary(prompt) {
+                        fields.insert("summary".to_string(), Value::from(summary));
+                    }
                 }
             }
         }
@@ -3795,6 +3814,15 @@ mod tests {
         assert_eq!(
             strip_internal_child_prompt_blocks(prompt),
             "Chunk outcome: inspect the parser.\nChild checklist:\n- Inspect parser :: Find the seam"
+        );
+    }
+
+    #[test]
+    fn delegated_prompt_exposes_an_eight_word_worker_summary() {
+        let prompt = "Worker summary: Repair remote settings layout and validation behavior today now";
+        assert_eq!(
+            subagent_worker_summary(prompt).as_deref(),
+            Some("Repair remote settings layout and validation behavior today")
         );
     }
 
