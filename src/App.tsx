@@ -117,6 +117,15 @@ function isActiveSubagentRun(run: SubagentRunStatus): boolean {
   return run.steps?.some((step) => ["running", "queued", "pending"].includes(step.status)) ?? false;
 }
 
+type TerminalSubagentState = "complete" | "failed" | "stopped" | "rejected";
+
+function terminalSubagentState(run: SubagentRunStatus): TerminalSubagentState | undefined {
+  const state = String(run.state);
+  if (state === "complete" || state === "completed") return "complete";
+  if (state === "failed" || state === "stopped" || state === "rejected") return state;
+  return undefined;
+}
+
 function foregroundRunFromDetails(value: unknown, final: boolean): SubagentRunStatus | undefined {
   const details = asRecord(value);
   if (!details || typeof details.runId !== "string" || details.asyncId) return undefined;
@@ -596,12 +605,64 @@ export default function App() {
 
     let disposed = false;
     let timeoutId: number | undefined;
+    let initialized = false;
+    const lifecycleByRun = new Map<string, "active" | "terminal" | "other">();
+    const notifiedTerminalRuns = new Set<string>();
+    const pendingWakeTimers = new Map<string, number>();
+
+    const cancelWake = (runId: string) => {
+      const wakeTimer = pendingWakeTimers.get(runId);
+      if (wakeTimer !== undefined) window.clearTimeout(wakeTimer);
+      pendingWakeTimers.delete(runId);
+    };
+
+    const scheduleTerminalWake = (run: SubagentRunStatus, status: TerminalSubagentState) => {
+      if (pendingWakeTimers.has(run.runId) || notifiedTerminalRuns.has(run.runId)) return;
+      const wakeTimer = window.setTimeout(() => {
+        pendingWakeTimers.delete(run.runId);
+        if (disposed || lifecycleByRun.get(run.runId) !== "terminal" || notifiedTerminalRuns.has(run.runId)) return;
+        const controlMessage = `__lemonpi_subagent_terminal_v1__:${JSON.stringify({
+          runId: run.runId,
+          sessionId: sessionFile,
+          status,
+          agent: run.steps?.[0]?.agent,
+        })}`;
+        void rpc(
+          { type: "prompt", message: controlMessage, streamingBehavior: "followUp" },
+          {
+            onSuccess: () => notifiedTerminalRuns.add(run.runId),
+            onError: () => notifiedTerminalRuns.delete(run.runId),
+          },
+        );
+      }, 2_000);
+      pendingWakeTimers.set(run.runId, wakeTimer);
+    };
+
     const poll = async () => {
       let nextDelay = 2500;
       try {
         const runs = await getSubagentRuns(sessionFile);
         if (disposed) return;
         setSubagentRuns(runs);
+        if (!initialized) {
+          for (const run of runs) {
+            lifecycleByRun.set(run.runId, isActiveSubagentRun(run) ? "active" : terminalSubagentState(run) ? "terminal" : "other");
+          }
+          initialized = true;
+        } else {
+          for (const run of runs) {
+            const previous = lifecycleByRun.get(run.runId);
+            const status = terminalSubagentState(run);
+            const current = isActiveSubagentRun(run) ? "active" : status ? "terminal" : "other";
+            if (current === "active") {
+              cancelWake(run.runId);
+              notifiedTerminalRuns.delete(run.runId);
+            } else if (current === "terminal" && status && previous !== "terminal") {
+              scheduleTerminalWake(run, status);
+            }
+            lifecycleByRun.set(run.runId, current);
+          }
+        }
         const activeCount = runs.reduce(
           (count, run) => count + (run.steps?.filter((step) => ["running", "queued", "pending"].includes(step.status)).length ?? (["running", "queued"].includes(run.state) ? 1 : 0)),
           0,
@@ -618,8 +679,9 @@ export default function App() {
     return () => {
       disposed = true;
       if (timeoutId) window.clearTimeout(timeoutId);
+      for (const wakeTimer of pendingWakeTimers.values()) window.clearTimeout(wakeTimer);
     };
-  }, [connection, sessionState?.sessionFile]);
+  }, [connection, rpc, sessionState?.sessionFile]);
 
   const chooseProject = useCallback(async () => {
     const selected = await open({ directory: true, multiple: false, title: "Open a project in LemonPi" });

@@ -2,9 +2,15 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const SUBAGENT_STEER_PREFIX = "__lemonpi_subagent_steer_v1__:";
 const SUBAGENT_STOP_PREFIX = "__lemonpi_subagent_stop_v1__:";
+const SUBAGENT_TERMINAL_PREFIX = "__lemonpi_subagent_terminal_v1__:";
 const SUBAGENT_RPC_REQUEST_EVENT = "subagents:rpc:v1:request";
 const SUBAGENT_RPC_REPLY_PREFIX = "subagents:rpc:v1:reply:";
 const SUBAGENT_RPC_TIMEOUT_MS = 6_000;
+const CHILD_TODO_GUIDANCE = `
+
+<lemonpi-child-checklist>
+Use the \`todo\` tool at the start of this delegated task to create a short checklist of the meaningful steps you will perform. Keep exactly one ordinary task in progress, update the checklist as your approach changes, and mark each item complete immediately after its outcome is actually verified. The checklist is visible to the user in LemonPi, so use specific outcome-oriented labels rather than duplicating individual tool calls. Do not skip the checklist merely because the parent supplied a chunk contract.
+</lemonpi-child-checklist>`;
 
 const NARRATION_CONTRACT = `
 <lemonpi-visible-narration>
@@ -159,6 +165,25 @@ function stripPerDispatchBudgets(value: unknown): void {
   visit(value);
 }
 
+function addChildTodoGuidance(value: unknown): void {
+  const visit = (candidate: unknown) => {
+    const record = asRecord(candidate);
+    if (!record) return;
+    if (typeof record.agent === "string") {
+      const task = typeof record.task === "string" ? record.task.trimEnd() : "";
+      if (!task.includes("<lemonpi-child-checklist>")) {
+        record.task = `${task}${CHILD_TODO_GUIDANCE}`.trimStart();
+      }
+    }
+    for (const key of ["tasks", "chain", "parallel"] as const) {
+      const nested = record[key];
+      if (Array.isArray(nested)) nested.forEach(visit);
+      else if (nested !== undefined) visit(nested);
+    }
+  };
+  visit(value);
+}
+
 function hasBoundedChunkContract(task: string): boolean {
   return CHUNK_OUTCOME.test(task)
     && CHUNK_IN_SCOPE.test(task)
@@ -211,6 +236,17 @@ function delegationRunId(value: unknown): string | undefined {
   const details = asRecord(result?.details);
   const candidate = details?.runId ?? details?.asyncId ?? result?.runId ?? result?.id;
   return typeof candidate === "string" && candidate.trim() ? candidate.trim() : undefined;
+}
+
+function delegationSessionId(value: unknown): string | undefined {
+  const result = asRecord(value);
+  const details = asRecord(result?.details);
+  const candidate = details?.sessionId ?? result?.sessionId;
+  return typeof candidate === "string" && candidate.trim() ? candidate.trim() : undefined;
+}
+
+function terminalRunKey(sessionId: string | undefined, runId: string): string {
+  return `${sessionId ?? "unknown"}:${runId}`;
 }
 
 function verifiedAcceptanceWithoutRuntimeCommands(value: unknown): boolean {
@@ -320,6 +356,31 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   const rosterListToolCalls = new Map<string, number>();
   const writerToolCalls = new Map<string, { agent: string; async: boolean }>();
   const terminalWriterRuns = new Map<string, WriterLifecycleStatus>();
+  const integratedTerminalRuns = new Set<string>();
+
+  const rememberTerminalRun = (key: string) => {
+    integratedTerminalRuns.add(key);
+    if (integratedTerminalRuns.size > 128) integratedTerminalRuns.delete(integratedTerminalRuns.values().next().value!);
+  };
+
+  const wakeForTerminalRun = (
+    runId: string,
+    sessionId: string | undefined,
+    status: Exclude<WriterLifecycleStatus, "paused">,
+    agent?: string,
+  ) => {
+    const key = terminalRunKey(sessionId, runId);
+    if (integratedTerminalRuns.has(key)) return;
+    rememberTerminalRun(key);
+    pi.sendMessage(
+      {
+        customType: "lemonpi-subagent-integration",
+        content: `Delegated run ${runId}${agent ? ` (${agent})` : ""} reached terminal state ${status}. Inspect that exact run's status and result, integrate its findings or changes, perform the appropriate validation, and give the user a concrete progress or completion explanation. Do not launch a duplicate worker for the same completed chunk.`,
+        display: false,
+      },
+      { deliverAs: "followUp", triggerTurn: true },
+    );
+  };
 
   const settleWriter = (status: WriterLifecycleStatus) => {
     if (status === "paused") return;
@@ -332,6 +393,12 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (status === "failed" && wasOccupied) consecutiveWriterFailures += 1;
   };
 
+  pi.events.on("subagent:async-started", (payload) => {
+    const runId = delegationRunId(payload);
+    if (!runId) return;
+    integratedTerminalRuns.delete(terminalRunKey(delegationSessionId(payload), runId));
+  });
+
   pi.events.on("subagent:async-complete", (payload) => {
     const runId = delegationRunId(payload);
     const status = writerLifecycleStatus(payload);
@@ -339,6 +406,13 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       terminalWriterRuns.set(runId, status);
       if (terminalWriterRuns.size > 64) terminalWriterRuns.delete(terminalWriterRuns.keys().next().value!);
       if (writerOccupied && activeWriterRunId === runId) settleWriter(status);
+      if (status !== "paused") {
+        const root = asRecord(payload);
+        const sessionId = delegationSessionId(payload);
+        const agent = typeof root?.agent === "string" ? root.agent : undefined;
+        if (root?.intercomDelivered === true) wakeForTerminalRun(runId, sessionId, status, agent);
+        else rememberTerminalRun(terminalRunKey(sessionId, runId));
+      }
     }
     const failure = delegationFailure(payload, false);
     if (failure) {
@@ -356,18 +430,22 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
 
     const isSteerRequest = event.text.startsWith(SUBAGENT_STEER_PREFIX);
     const isStopRequest = event.text.startsWith(SUBAGENT_STOP_PREFIX);
-    if (!isSteerRequest && !isStopRequest) return { action: "continue" };
+    const isTerminalRequest = event.text.startsWith(SUBAGENT_TERMINAL_PREFIX);
+    if (!isSteerRequest && !isStopRequest && !isTerminalRequest) return { action: "continue" };
 
     try {
-      const prefix = isSteerRequest ? SUBAGENT_STEER_PREFIX : SUBAGENT_STOP_PREFIX;
+      const prefix = isSteerRequest ? SUBAGENT_STEER_PREFIX : isStopRequest ? SUBAGENT_STOP_PREFIX : SUBAGENT_TERMINAL_PREFIX;
       const payload = JSON.parse(event.text.slice(prefix.length)) as {
         runId?: unknown;
         index?: unknown;
         message?: unknown;
+        sessionId?: unknown;
+        status?: unknown;
+        agent?: unknown;
       };
       const runId = typeof payload.runId === "string" ? payload.runId.trim() : "";
       if (!/^[A-Za-z0-9-]{4,128}$/.test(runId)) {
-        throw new Error(`The subagent ${isSteerRequest ? "steering" : "stop"} request was malformed.`);
+        throw new Error(`The subagent ${isSteerRequest ? "steering" : isStopRequest ? "stop" : "completion"} request was malformed.`);
       }
 
       if (isSteerRequest) {
@@ -378,9 +456,25 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         }
         await requestSubagentSteer(pi, runId, index, message);
         ctx.ui.notify("Steer delivered directly to the subagent.", "info");
-      } else {
+      } else if (isStopRequest) {
         await requestSubagentStop(pi, runId);
         ctx.ui.notify("Stop requested directly for the subagent.", "info");
+      } else {
+        const status = payload.status === "complete" || payload.status === "completed"
+          ? "completed"
+          : payload.status === "failed" || payload.status === "rejected"
+            ? "failed"
+            : payload.status === "stopped"
+              ? "stopped"
+              : undefined;
+        const sessionId = typeof payload.sessionId === "string" && payload.sessionId.length <= 4_096
+          ? payload.sessionId
+          : undefined;
+        const agent = typeof payload.agent === "string" && payload.agent.length <= 200
+          ? payload.agent
+          : undefined;
+        if (!status) throw new Error("The subagent completion request was malformed.");
+        wakeForTerminalRun(runId, sessionId, status, agent);
       }
     } catch (error) {
       ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -493,6 +587,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           reason: "LemonPi makes Main Pi the integration owner unless explicit runtime verify commands are supplied.",
         };
       }
+      addChildTodoGuidance(input);
     }
 
     // pi-subagents supports async natively. LemonPi supplies the product-level

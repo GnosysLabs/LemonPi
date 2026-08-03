@@ -175,19 +175,26 @@ function AgentPromptModal({ agent, prompt, onClose }: { agent: string; prompt: s
   );
 }
 
-function AgentTodos({ todos }: { todos: NonNullable<SubagentLiveActivity["todos"]> }) {
+function AgentTodos({ todos, active }: { todos: NonNullable<SubagentLiveActivity["todos"]>; active: boolean }) {
   const visible = todos.filter((task) => task.status !== "deleted");
-  if (visible.length === 0) return null;
+  if (visible.length === 0 && !active) return null;
   const completed = new Set(visible.filter((task) => task.status === "completed").map((task) => task.id));
   const ordered = [...visible].sort((left, right) => {
     const rank = { in_progress: 0, pending: 1, completed: 2, deleted: 3 };
     return rank[left.status] - rank[right.status] || left.id - right.id;
   });
   const completedCount = completed.size;
+  const progress = visible.length > 0 ? Math.round((completedCount / visible.length) * 100) : 0;
   return (
-    <section className="agent-todos" aria-label="Agent checklist">
-      <header><span><ListChecks size={13} />Checklist</span><small>{completedCount}/{visible.length}</small></header>
-      <div className="agent-todos__list">
+    <section className={`agent-todos${visible.length === 0 ? " agent-todos--empty" : ""}`} aria-label="Agent tasks">
+      <header>
+        <span><ListChecks size={15} />Tasks</span>
+        {visible.length > 0 && <small>{completedCount} of {visible.length}</small>}
+      </header>
+      {visible.length > 0 && <div className="agent-todos__progress" aria-hidden="true"><i style={{ width: `${progress}%` }} /></div>}
+      {visible.length === 0 ? (
+        <div className="agent-todos__empty"><CircleNotch className="spin" size={13} /><span>Waiting for this agent to outline its work…</span></div>
+      ) : <div className="agent-todos__list">
         {ordered.map((task) => {
           const blocked = task.status === "pending" && task.blockedBy.some((id) => !completed.has(id));
           return (
@@ -199,7 +206,7 @@ function AgentTodos({ todos }: { todos: NonNullable<SubagentLiveActivity["todos"
             </div>
           );
         })}
-      </div>
+      </div>}
     </section>
   );
 }
@@ -330,8 +337,6 @@ function AgentCard({
             {step.turnCount != null && <span>{step.turnCount} turn{step.turnCount === 1 ? "" : "s"}</span>}
           </div>
 
-          {activity?.todos && <AgentTodos todos={activity.todos} />}
-
           {latestReasoning && (
             <section className="agent-reasoning-preview" aria-live="polite">
               <div className="agent-reasoning-preview__header">
@@ -363,6 +368,8 @@ function AgentCard({
               {steerError && <span className="agent-steer__error" role="alert">{steerError}</span>}
             </form>
           )}
+
+          {(active || (activity?.todos?.length ?? 0) > 0) && <AgentTodos todos={activity?.todos ?? []} active={active} />}
 
           {activityEvents.length > 0 ? (
             <div className="agent-output">

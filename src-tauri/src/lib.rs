@@ -274,11 +274,7 @@ fn pi_command(executable: &PathBuf) -> Result<Command, String> {
     Ok(command)
 }
 
-async fn run_pi_cli(
-    executable: &PathBuf,
-    cwd: &Path,
-    args: &[&str],
-) -> Result<String, String> {
+async fn run_pi_cli(executable: &PathBuf, cwd: &Path, args: &[&str]) -> Result<String, String> {
     let output = pi_command(executable)?
         .args(args)
         .current_dir(cwd)
@@ -577,12 +573,10 @@ fn final_reply_metadata(value: &Value, message_number: usize) -> PiSessionFinalR
     // Pi currently writes an outer ISO timestamp and an inner numeric message
     // timestamp. Retain either representation verbatim so the receipt stays
     // stable even if Pi changes which representation it emits.
-    let timestamp = session_scalar_marker(value.get("timestamp")).or_else(|| {
-        session_scalar_marker(message.and_then(|message| message.get("timestamp")))
-    });
-    let id = session_scalar_marker(value.get("id")).or_else(|| {
-        session_scalar_marker(message.and_then(|message| message.get("id")))
-    });
+    let timestamp = session_scalar_marker(value.get("timestamp"))
+        .or_else(|| session_scalar_marker(message.and_then(|message| message.get("timestamp"))));
+    let id = session_scalar_marker(value.get("id"))
+        .or_else(|| session_scalar_marker(message.and_then(|message| message.get("id"))));
     let marker = match (&timestamp, &id) {
         (Some(timestamp), Some(id)) => format!("timestamp:{timestamp}|id:{id}"),
         (Some(timestamp), None) => format!("timestamp:{timestamp}|message:{message_number}"),
@@ -906,6 +900,7 @@ async fn start_pi(
     let executable = find_pi()?;
     let version = pi_version(&executable).await?;
     ensure_required_pi_packages(&executable).await?;
+    ensure_builtin_subagent_todo_access(&pi_agent_dir()?)?;
     let narration_extension = narration_extension_path(&app)?;
     let mut command = pi_command(&executable)?;
     command
@@ -1376,6 +1371,7 @@ struct DiscoveredAgent {
     definition_path: Option<PathBuf>,
     base_model: Option<String>,
     base_thinking: Option<String>,
+    base_tools: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -1519,6 +1515,7 @@ fn read_agent_definition(path: &Path, source: &'static str) -> Option<Discovered
     let mut description = None;
     let mut model = None;
     let mut thinking = None;
+    let mut tools = None;
     for line in lines {
         if line.trim() == "---" {
             break;
@@ -1532,6 +1529,16 @@ fn read_agent_definition(path: &Path, source: &'static str) -> Option<Discovered
             "description" if !value.is_empty() => description = Some(value),
             "model" if !value.is_empty() => model = Some(value),
             "thinking" if !value.is_empty() && value != "false" => thinking = Some(value),
+            "tools" => {
+                let value = value.trim_matches(|character| character == '[' || character == ']');
+                tools = Some(
+                    value
+                        .split(',')
+                        .map(clean_frontmatter_value)
+                        .filter(|tool| !tool.is_empty())
+                        .collect(),
+                );
+            }
             _ => {}
         }
     }
@@ -1543,7 +1550,103 @@ fn read_agent_definition(path: &Path, source: &'static str) -> Option<Discovered
         definition_path: Some(path.to_path_buf()),
         base_model: model,
         base_thinking: thinking,
+        base_tools: tools,
     })
+}
+
+fn setting_string_list(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Some(Value::String(value)) => value
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn ensure_builtin_subagent_todo_access(agent_dir: &Path) -> Result<(), String> {
+    let todo_extension = agent_dir.join("npm/node_modules/@juicesharp/rpiv-todo/index.ts");
+    if !todo_extension.is_file() {
+        return Err(
+            "LemonPi installed rpiv-todo, but its child extension entry point is unavailable."
+                .to_string(),
+        );
+    }
+
+    let mut builtins = HashMap::new();
+    collect_agent_definitions(
+        &agent_dir.join("npm/node_modules/pi-subagents/agents"),
+        "builtin",
+        &mut builtins,
+    );
+    let settings_path = agent_dir.join("settings.json");
+    let mut settings = read_settings_object(&settings_path)?;
+    let subagents = settings
+        .entry("subagents".to_string())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "Settings field 'subagents' must be an object.".to_string())?;
+    let overrides = subagents
+        .entry("agentOverrides".to_string())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| {
+            "Settings field 'subagents.agentOverrides' must be an object.".to_string()
+        })?;
+    let extension_path = path_for_frontend(&todo_extension);
+    let mut changed = false;
+
+    for agent in builtins.values() {
+        let Some(base_tools) = agent.base_tools.as_ref() else {
+            continue;
+        };
+        let entry = overrides
+            .entry(agent.name.clone())
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| format!("Override for '{}' must be an object.", agent.name))?;
+
+        let mut tools = if entry.contains_key("tools") {
+            setting_string_list(entry.get("tools"))
+        } else {
+            base_tools.clone()
+        };
+        if !tools.iter().any(|tool| tool == "todo") {
+            tools.push("todo".to_string());
+        }
+        let next_tools = Value::Array(tools.into_iter().map(Value::String).collect());
+        if entry.get("tools") != Some(&next_tools) {
+            entry.insert("tools".to_string(), next_tools);
+            changed = true;
+        }
+
+        let mut extensions = setting_string_list(entry.get("subagentOnlyExtensions"));
+        if !extensions
+            .iter()
+            .any(|extension| extension == &extension_path)
+        {
+            extensions.push(extension_path.clone());
+        }
+        let next_extensions = Value::Array(extensions.into_iter().map(Value::String).collect());
+        if entry.get("subagentOnlyExtensions") != Some(&next_extensions) {
+            entry.insert("subagentOnlyExtensions".to_string(), next_extensions);
+            changed = true;
+        }
+    }
+
+    if changed {
+        write_settings_object(&settings_path, &settings)?;
+    }
+    Ok(())
 }
 
 fn collect_agent_definitions(
@@ -1628,6 +1731,7 @@ fn build_subagent_settings_snapshot(
                         definition_path: None,
                         base_model: None,
                         base_thinking: None,
+                        base_tools: None,
                     });
             }
         }
@@ -1985,7 +2089,9 @@ fn merge_settings(base: &mut Value, overlay: &Value) {
 fn settings_path_for_scope(scope: &str, project: Option<&Path>) -> Result<PathBuf, String> {
     validate_settings_scope(scope, project)?;
     if scope == "project" {
-        Ok(project_settings_path(project.expect("validated project scope")))
+        Ok(project_settings_path(
+            project.expect("validated project scope"),
+        ))
     } else {
         Ok(pi_agent_dir()?.join("settings.json"))
     }
@@ -1998,7 +2104,9 @@ fn build_pi_settings_snapshot(
     let path = settings_path_for_scope(&scope, project.as_deref())?;
     let selected = Value::Object(read_settings_object(&path)?);
     let effective_settings = if scope == "project" {
-        let mut effective = Value::Object(read_settings_object(&pi_agent_dir()?.join("settings.json"))?);
+        let mut effective = Value::Object(read_settings_object(
+            &pi_agent_dir()?.join("settings.json"),
+        )?);
         merge_settings(&mut effective, &selected);
         effective
     } else {
@@ -2029,9 +2137,9 @@ fn valid_setting_path(path: &str) -> bool {
         && path.split('.').all(|segment| {
             !segment.is_empty()
                 && segment.len() <= 80
-                && segment
-                    .chars()
-                    .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+                && segment.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+                })
         })
 }
 
@@ -2188,7 +2296,11 @@ async fn build_pi_packages_snapshot(
             });
         }
     }
-    packages.sort_by(|left, right| left.scope.cmp(&right.scope).then_with(|| left.source.cmp(&right.source)));
+    packages.sort_by(|left, right| {
+        left.scope
+            .cmp(&right.scope)
+            .then_with(|| left.source.cmp(&right.source))
+    });
     Ok(PiPackagesSnapshot {
         core_ready: REQUIRED_PI_PACKAGES.iter().all(|required| {
             packages.iter().any(|package| {
@@ -2203,12 +2315,13 @@ async fn build_pi_packages_snapshot(
 }
 
 #[tauri::command]
-async fn get_pi_packages(
-    manager: State<'_, Arc<PiManager>>,
-) -> Result<PiPackagesSnapshot, String> {
+async fn get_pi_packages(manager: State<'_, Arc<PiManager>>) -> Result<PiPackagesSnapshot, String> {
     let (project, trusted) = {
         let registry = manager.inner().registry.lock().await;
-        (registry.active_project.clone(), registry.active_trusted.unwrap_or(false))
+        (
+            registry.active_project.clone(),
+            registry.active_trusted.unwrap_or(false),
+        )
     };
     let executable = find_pi()?;
     build_pi_packages_snapshot(&executable, project.as_deref(), trusted).await
@@ -2243,18 +2356,30 @@ async fn run_pi_package_action(
 
     let (project, trusted) = {
         let registry = manager.inner().registry.lock().await;
-        (registry.active_project.clone(), registry.active_trusted.unwrap_or(false))
+        (
+            registry.active_project.clone(),
+            registry.active_trusted.unwrap_or(false),
+        )
     };
     if scope == "project" && project.is_none() {
         return Err("Open a project before managing project packages.".to_string());
     }
     if scope == "project" && !trusted {
-        return Err("Trust this project before installing or changing project packages.".to_string());
+        return Err(
+            "Trust this project before installing or changing project packages.".to_string(),
+        );
     }
 
     let executable = find_pi()?;
-    let cwd = project.as_deref().map(Path::to_path_buf).unwrap_or(home_dir()?);
-    let trust_arg = if scope == "project" { "--approve" } else { "--no-approve" };
+    let cwd = project
+        .as_deref()
+        .map(Path::to_path_buf)
+        .unwrap_or(home_dir()?);
+    let trust_arg = if scope == "project" {
+        "--approve"
+    } else {
+        "--no-approve"
+    };
     if action == "update" && source.is_none() && scope == "project" {
         let project_path = project.as_deref().expect("validated project scope");
         let project_settings = read_settings_object(&project_settings_path(project_path))?;
@@ -2331,10 +2456,7 @@ fn read_subagent_prompts(async_dir: &Path) -> HashMap<usize, String> {
             continue;
         };
         if event.get("type").and_then(Value::as_str) != Some("message_start")
-            || event
-                .pointer("/message/role")
-                .and_then(Value::as_str)
-                != Some("user")
+            || event.pointer("/message/role").and_then(Value::as_str) != Some("user")
         {
             continue;
         }
@@ -2389,10 +2511,7 @@ async fn get_subagent_runs(session_file: String) -> Result<Vec<Value>, String> {
         if status.get("sessionId").and_then(Value::as_str) != Some(session_file.as_str()) {
             continue;
         }
-        let prompts = path
-            .parent()
-            .map(read_subagent_prompts)
-            .unwrap_or_default();
+        let prompts = path.parent().map(read_subagent_prompts).unwrap_or_default();
         if let Some(steps) = status.get_mut("steps").and_then(Value::as_array_mut) {
             for (index, step) in steps.iter_mut().enumerate() {
                 if let (Some(prompt), Some(fields)) = (prompts.get(&index), step.as_object_mut()) {
@@ -2533,14 +2652,58 @@ mod tests {
         assert!(required_pi_package("npm:@juicesharp/rpiv-todo").is_some());
         assert!(required_pi_package("npm:@juicesharp/rpiv-todo@2.3.1").is_some());
         assert!(required_pi_package("npm:pi-subagents-extra").is_none());
-        assert_eq!(npm_package_name("npm:@scope/tools@2.0.0"), Some("@scope/tools"));
+        assert_eq!(
+            npm_package_name("npm:@scope/tools@2.0.0"),
+            Some("@scope/tools")
+        );
+    }
+
+    #[test]
+    fn builtin_subagents_receive_todo_without_losing_existing_overrides() {
+        let root = env::temp_dir().join(format!(
+            "lemonpi-subagent-todo-access-{}",
+            std::process::id()
+        ));
+        let agents = root.join("npm/node_modules/pi-subagents/agents");
+        let todo = root.join("npm/node_modules/@juicesharp/rpiv-todo");
+        fs::create_dir_all(&agents).expect("create builtin fixture directory");
+        fs::create_dir_all(&todo).expect("create todo fixture directory");
+        fs::write(
+            agents.join("worker.md"),
+            "---\nname: worker\ndescription: Test worker\ntools: read, grep, write\n---\nWorker\n",
+        )
+        .expect("write builtin agent fixture");
+        fs::write(todo.join("index.ts"), "export default () => {};\n")
+            .expect("write todo extension fixture");
+        write_settings_object(
+            &root.join("settings.json"),
+            &serde_json::Map::from_iter([(
+                "subagents".to_string(),
+                json!({ "agentOverrides": { "worker": { "model": "example/model", "tools": ["read", "bash"] } } }),
+            )]),
+        )
+        .expect("write settings fixture");
+
+        ensure_builtin_subagent_todo_access(&root).expect("grant builtin todo access");
+        let settings = read_settings_object(&root.join("settings.json")).expect("read settings");
+        let worker = &settings["subagents"]["agentOverrides"]["worker"];
+        assert_eq!(worker["model"], json!("example/model"));
+        assert_eq!(worker["tools"], json!(["read", "bash", "todo"]));
+        assert_eq!(
+            worker["subagentOnlyExtensions"],
+            json!([path_for_frontend(&todo.join("index.ts"))])
+        );
+        fs::remove_dir_all(root).expect("remove todo access fixture");
     }
 
     #[test]
     fn nested_setting_updates_preserve_siblings_and_clean_empty_objects() {
         let mut settings = serde_json::Map::from_iter([
             ("theme".to_string(), json!("dark")),
-            ("retry".to_string(), json!({ "enabled": true, "maxRetries": 3 })),
+            (
+                "retry".to_string(),
+                json!({ "enabled": true, "maxRetries": 3 }),
+            ),
         ]);
         set_nested_setting(&mut settings, &["retry", "maxRetries"], Some(json!(5))).unwrap();
         assert_eq!(settings["retry"]["enabled"], json!(true));
