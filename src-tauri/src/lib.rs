@@ -2978,6 +2978,36 @@ fn strip_internal_child_prompt_blocks(value: &str) -> String {
         .to_string()
 }
 
+fn normalize_subagent_prompt(value: &str) -> String {
+    let mut prompt = value.replace("\r\n", "\n").trim().to_string();
+
+    if prompt.starts_with("<file ") {
+        if let Some(opening_end) = prompt.find("\n") {
+            let opening = &prompt[..opening_end];
+            if opening.to_ascii_lowercase().contains("task.md") {
+                prompt = prompt[opening_end + 1..].to_string();
+                if let Some(closing_start) = prompt.trim_end().rfind("</file>") {
+                    prompt.truncate(closing_start);
+                }
+            }
+        }
+    }
+
+    const DELEGATED_PREAMBLE: &str =
+        "Task: You are a delegated subagent running from a fork of the parent session.";
+    if prompt.trim_start().starts_with(DELEGATED_PREAMBLE) {
+        if let Some(task_start) = prompt.find("\n\nTask:\n") {
+            prompt = prompt[task_start + "\n\nTask:\n".len()..].to_string();
+        }
+    }
+
+    prompt = strip_internal_child_prompt_blocks(&prompt);
+    if let Some(output_start) = prompt.find("\n---\n**Output:**") {
+        prompt.truncate(output_start);
+    }
+    prompt.trim().to_string()
+}
+
 fn read_subagent_prompts(async_dir: &Path) -> HashMap<usize, String> {
     let Ok(file) = fs::File::open(async_dir.join("events.jsonl")) else {
         return HashMap::new();
@@ -3011,7 +3041,10 @@ fn read_subagent_prompts(async_dir: &Path) -> HashMap<usize, String> {
         let Some(prompt) = event.pointer("/message/content").and_then(message_text) else {
             continue;
         };
-        let prompt = strip_internal_child_prompt_blocks(&prompt);
+        let prompt = normalize_subagent_prompt(&prompt);
+        if prompt.is_empty() {
+            continue;
+        }
         let prompt = prompt.chars().take(SUBAGENT_PROMPT_MAX_CHARS).collect();
         prompts.insert(index, prompt);
     }
@@ -3474,6 +3507,29 @@ mod tests {
         assert_eq!(
             strip_internal_child_prompt_blocks(prompt),
             "Chunk outcome: inspect the parser.\nChild checklist:\n- Inspect parser :: Find the seam"
+        );
+    }
+
+    #[test]
+    fn delegated_prompt_unwraps_runner_transport_and_boilerplate() {
+        let prompt = concat!(
+            "<file name=\"/var/folders/example/pi-subagent/task.md\">\n",
+            "Task: You are a delegated subagent running from a fork of the parent session. ",
+            "Treat the inherited conversation as reference-only context, not a live thread to continue.\n\n",
+            "Task:\n",
+            "Execution mode: implementation\n\n",
+            "Chunk outcome:\n",
+            "Show the current branch name in the navigation bar.\n\n",
+            "<lemonpi-child-checklist>internal guidance</lemonpi-child-checklist>\n\n",
+            "---\n",
+            "**Output:**\n",
+            "Write your findings to the result file.\n",
+            "</file>",
+        );
+
+        assert_eq!(
+            normalize_subagent_prompt(prompt),
+            "Execution mode: implementation\n\nChunk outcome:\nShow the current branch name in the navigation bar."
         );
     }
 

@@ -19,6 +19,7 @@ import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import { describeToolActivity } from "../lib/activity-narration";
 import type { PiSessionState, SubagentLiveActivity, SubagentRunStatus, SubagentStepStatus } from "../lib/pi-types";
+import { subagentPromptSummary } from "../lib/subagent-prompt";
 import type { TranscriptItem } from "../lib/transcript";
 
 function isActive(status: string): boolean {
@@ -383,6 +384,7 @@ function AgentCard({
   const restoringTodos = active && visibleTodos.length > 0 && !todoSnapshotFresh;
   const finalizing = active && todoSnapshotFresh && visibleTodos.length > 0 && visibleTodos.every((task) => task.status === "completed");
   const promptText = step.prompt?.trim() || step.description?.trim();
+  const promptSummary = promptText ? subagentPromptSummary(promptText) : undefined;
   let showingPrompt = false;
   let currentActivity = activity?.headline ?? step.status;
 
@@ -397,15 +399,15 @@ function AgentCard({
   } else if (active) {
     if (latestEvent?.kind === "reasoning" && latestEvent.text) {
       currentActivity = `Reasoning · ${latestEvent.text}`;
-    } else if (promptText) {
-      currentActivity = promptText;
+    } else if (promptSummary) {
+      currentActivity = promptSummary;
       showingPrompt = true;
     } else {
       currentActivity = "Waiting for the model's next action";
     }
   }
   if (!active && promptText) showingPrompt = true;
-  const collapsedStatus = active ? compactLine(currentActivity, 110) : (promptText ? compactLine(promptText, 110) : `${run.mode} child ${index + 1}`);
+  const collapsedStatus = active ? compactLine(currentActivity, 110) : (promptSummary ? compactLine(promptSummary, 110) : `${run.mode} child ${index + 1}`);
 
   async function submitSteer() {
     const message = steerText.trim();
