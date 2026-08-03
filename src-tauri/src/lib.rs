@@ -28,6 +28,8 @@ use remote::{
 
 const MAX_RPC_RECORD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SESSION_FILES: usize = 250;
+const MAX_SESSION_SUMMARY_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_SESSION_SCAN_BYTES: u64 = 16 * 1024 * 1024;
 const STDERR_CHUNK_BYTES: usize = 8 * 1024;
 const SUBAGENT_TRANSCRIPT_TAIL_BYTES: u64 = 384 * 1024;
 const SUBAGENT_TODO_TAIL_BYTES: u64 = 4 * 1024 * 1024;
@@ -231,6 +233,8 @@ pub(crate) struct PiSessionSummary {
     pub(crate) message_count: usize,
     pub(crate) first_message: String,
     pub(crate) last_final_reply: Option<PiSessionFinalReply>,
+    #[serde(skip_serializing)]
+    pub(crate) redaction_secrets: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -738,8 +742,78 @@ fn is_subagent_delegation_message(value: &Value) -> bool {
         })
 }
 
+struct SessionScanBudget {
+    remaining: u64,
+}
+
+impl SessionScanBudget {
+    fn new() -> Self {
+        Self {
+            remaining: MAX_SESSION_SCAN_BYTES,
+        }
+    }
+
+    fn reserve(&mut self, bytes: u64) -> bool {
+        if bytes > self.remaining {
+            return false;
+        }
+        self.remaining -= bytes;
+        true
+    }
+}
+
+fn collect_session_identifier_values(value: &Value, secrets: &mut Vec<String>) {
+    match value {
+        Value::Object(fields) => {
+            for (key, value) in fields {
+                if key == "id" || key == "parentSession" || key.ends_with("Id") {
+                    if let Some(secret) = session_scalar_marker(Some(value)) {
+                        secrets.push(secret);
+                    }
+                }
+                collect_session_identifier_values(value, secrets);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_session_identifier_values(value, secrets);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(unix)]
+fn same_session_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_session_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    left.len() == right.len()
+        && left.modified().ok() == right.modified().ok()
+        && left.created().ok() == right.created().ok()
+}
+
+#[cfg(test)]
 fn read_session_summary(path: &Path, expected_cwd: &Path) -> Option<PiSessionSummary> {
+    read_session_summary_with_budget(path, expected_cwd, &mut SessionScanBudget::new())
+}
+
+fn read_session_summary_with_budget(
+    path: &Path,
+    expected_cwd: &Path,
+    budget: &mut SessionScanBudget,
+) -> Option<PiSessionSummary> {
+    let link_metadata = fs::symlink_metadata(path).ok()?;
+    if link_metadata.file_type().is_symlink() || !link_metadata.is_file() {
+        return None;
+    }
     let metadata = fs::metadata(path).ok()?;
+    if metadata.len() > MAX_SESSION_SUMMARY_FILE_BYTES || !budget.reserve(metadata.len()) {
+        return None;
+    }
     let modified = metadata
         .modified()
         .ok()?
@@ -747,6 +821,10 @@ fn read_session_summary(path: &Path, expected_cwd: &Path) -> Option<PiSessionSum
         .ok()?
         .as_millis() as u64;
     let mut file = fs::File::open(path).ok()?;
+    let opened_metadata = file.metadata().ok()?;
+    if !opened_metadata.is_file() || !same_session_file(&metadata, &opened_metadata) {
+        return None;
+    }
     let mut chunk = vec![0; 64 * 1024];
     let mut framer = JsonlFramer::new(MAX_RPC_RECORD_BYTES);
     let mut header_seen = false;
@@ -758,9 +836,12 @@ fn read_session_summary(path: &Path, expected_cwd: &Path) -> Option<PiSessionSum
     let mut first_message = String::new();
     let mut last_final_reply = None;
     let mut last_message_is_subagent_delegation = false;
+    let mut redaction_secrets = Vec::new();
+    let mut read_bytes = 0_u64;
 
     {
         let mut consume = |value: Value| {
+            collect_session_identifier_values(&value, &mut redaction_secrets);
             if !header_seen {
                 header_seen = true;
                 if value.get("type").and_then(Value::as_str) != Some("session") {
@@ -827,23 +908,36 @@ fn read_session_summary(path: &Path, expected_cwd: &Path) -> Option<PiSessionSum
         };
 
         loop {
-            let count = file.read(&mut chunk).ok()?;
-            if count == 0 {
-                if let Some(Ok(Some(value))) = framer.finish() {
-                    consume(value);
-                }
+            if read_bytes == metadata.len() {
                 break;
             }
+            let remaining = usize::try_from(metadata.len() - read_bytes).ok()?;
+            let read_limit = remaining.min(chunk.len());
+            let count = file.read(&mut chunk[..read_limit]).ok()?;
+            if count == 0 {
+                return None;
+            }
+            read_bytes = read_bytes.checked_add(u64::try_from(count).ok()?)?;
             for result in framer.push(&chunk[..count]) {
                 if let Ok(Some(value)) = result {
                     consume(value);
                 }
             }
         }
+        if let Some(Ok(Some(value))) = framer.finish() {
+            consume(value);
+        }
+    }
+    let current_metadata = fs::metadata(path).ok()?;
+    if current_metadata.len() != metadata.len() || !same_session_file(&metadata, &current_metadata)
+    {
+        return None;
     }
     if !valid {
         return None;
     }
+    redaction_secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    redaction_secrets.dedup();
     let anonymous_subagent_bootstrap =
         parent_session_path.is_some() && name.is_none() && last_message_is_subagent_delegation;
     Some(PiSessionSummary {
@@ -860,6 +954,7 @@ fn read_session_summary(path: &Path, expected_cwd: &Path) -> Option<PiSessionSum
             first_message
         },
         last_final_reply,
+        redaction_secrets,
     })
 }
 
@@ -885,9 +980,10 @@ pub(crate) fn list_pi_sessions_sync(cwd: &Path) -> Result<Vec<PiSessionSummary>,
     files.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     files.truncate(MAX_SESSION_FILES);
 
+    let mut scan_budget = SessionScanBudget::new();
     let mut sessions = files
         .into_iter()
-        .filter_map(|(path, _)| read_session_summary(&path, cwd))
+        .filter_map(|(path, _)| read_session_summary_with_budget(&path, cwd, &mut scan_budget))
         .filter(|session| {
             !session.anonymous_subagent_bootstrap
                 && !session
@@ -931,34 +1027,48 @@ async fn sync_known_projects(
     };
     let storage = remote_storage_directory(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let mut catalog =
-            ProjectCatalog::load_or_create(storage).map_err(|error| error.to_string())?;
-        let summaries = catalog
-            .sync_projects(&projects, active_project.as_deref())
-            .map_err(|error| error.to_string())?;
-        for binding in catalog.project_bindings() {
-            if !binding.trusted {
-                catalog
-                    .clear_sessions(&binding.id)
-                    .map_err(|error| error.to_string())?;
-                continue;
+        let (summaries, bindings) = ProjectCatalog::transaction(&storage, |catalog| {
+            let summaries = catalog.sync_projects(&projects, active_project.as_deref())?;
+            Ok((summaries, catalog.project_bindings()))
+        })
+        .map_err(|error| error.to_string())?;
+
+        // Discovery is bounded and intentionally outside the catalogue transaction. The merge
+        // transaction reloads and revalidates current identity/trust so stale scans cannot restore
+        // a removed project or overwrite a trust downgrade.
+        let discovered = bindings
+            .into_iter()
+            .filter(|binding| binding.trusted)
+            .filter_map(|binding| {
+                let directory = session_directory(&binding.path).ok()?;
+                let sessions = list_pi_sessions_sync(&binding.path).ok()?;
+                let inputs = sessions
+                    .into_iter()
+                    .map(|session| SessionSyncInput {
+                        path: PathBuf::from(session.path),
+                    })
+                    .collect::<Vec<_>>();
+                Some((binding, directory, inputs))
+            })
+            .collect::<Vec<_>>();
+
+        ProjectCatalog::transaction(&storage, |catalog| {
+            let current_bindings = catalog.project_bindings();
+            for binding in current_bindings.iter().filter(|binding| !binding.trusted) {
+                catalog.clear_sessions(&binding.id)?;
             }
-            let Ok(session_directory) = session_directory(&binding.path) else {
-                continue;
-            };
-            let Ok(sessions) = list_pi_sessions_sync(&binding.path) else {
-                continue;
-            };
-            let inputs = sessions
-                .into_iter()
-                .map(|session| SessionSyncInput {
-                    path: PathBuf::from(session.path),
-                })
-                .collect::<Vec<_>>();
-            catalog
-                .sync_sessions(&binding.id, &session_directory, &inputs)
-                .map_err(|error| error.to_string())?;
-        }
+            for (scanned_binding, directory, inputs) in &discovered {
+                let Some(current) = catalog.resolve_project_binding(&scanned_binding.id) else {
+                    continue;
+                };
+                if !current.trusted || current.path != scanned_binding.path {
+                    continue;
+                }
+                catalog.sync_sessions(&current.id, directory, inputs)?;
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
         Ok(summaries)
     })
     .await
@@ -3933,6 +4043,38 @@ mod tests {
             "high"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn session_summary_scans_have_per_file_and_aggregate_byte_budgets() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir(&project).unwrap();
+        let project = project.canonicalize().unwrap();
+        let first = root.path().join("first.jsonl");
+        let second = root.path().join("second.jsonl");
+        let record = format!(
+            "{{\"type\":\"session\",\"id\":\"session-1\",\"cwd\":{}}}\n",
+            serde_json::to_string(&project.to_string_lossy()).unwrap()
+        );
+        fs::write(&first, &record).unwrap();
+        fs::write(&second, &record).unwrap();
+
+        let mut budget = SessionScanBudget {
+            remaining: fs::metadata(&first).unwrap().len(),
+        };
+        assert!(read_session_summary_with_budget(&first, &project, &mut budget).is_some());
+        assert!(read_session_summary_with_budget(&second, &project, &mut budget).is_none());
+
+        let oversized = root.path().join("oversized.jsonl");
+        fs::write(&oversized, &record).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&oversized)
+            .unwrap()
+            .set_len(MAX_SESSION_SUMMARY_FILE_BYTES + 1)
+            .unwrap();
+        assert!(read_session_summary(&oversized, &project).is_none());
     }
 
     #[test]

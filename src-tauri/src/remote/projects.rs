@@ -14,11 +14,16 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 use uuid::Uuid;
 
 const PROJECT_STORE_FILE: &str = "projects.json";
 pub(crate) const MAX_KNOWN_PROJECTS: usize = 100;
+
+/// All in-process catalogue writers reload and mutate beneath this lock. Poisoning cannot leave
+/// the privacy boundary permanently unavailable; the next transaction recovers the inner guard.
+static PROJECT_CATALOG_TRANSACTION: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,11 +71,24 @@ impl Default for ProjectStoreDocument {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FilesystemIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    device: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inode: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fallback: Option<String>,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProjectRecord {
     id: String,
     path: PathBuf,
+    #[serde(default)]
+    identity: Option<FilesystemIdentity>,
     trusted: bool,
     last_opened: u64,
     pinned: bool,
@@ -84,6 +102,8 @@ struct ProjectRecord {
 struct SessionRecord {
     id: String,
     path: PathBuf,
+    #[serde(default)]
+    identity: Option<FilesystemIdentity>,
 }
 
 /// Owner-only persistence for the desktop's recently known projects.
@@ -109,6 +129,19 @@ impl ProjectCatalog {
         Ok(Self { path, document })
     }
 
+    /// Serializes a complete load-modify-persist transaction across all production writers. The
+    /// closure always sees the latest durable document; mutation methods persist before returning.
+    pub(crate) fn transaction<T>(
+        directory: impl AsRef<Path>,
+        operation: impl FnOnce(&mut Self) -> RemoteResult<T>,
+    ) -> RemoteResult<T> {
+        let _transaction = PROJECT_CATALOG_TRANSACTION
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut catalog = Self::load_or_create(directory)?;
+        operation(&mut catalog)
+    }
+
     /// Replaces the catalog with the valid canonical projects currently known by the desktop UI.
     /// Invalid or missing directories are ignored; entries beyond the first 100 valid distinct
     /// directories are ignored. Existing IDs stay associated with their canonical location.
@@ -123,14 +156,16 @@ impl ProjectCatalog {
             if accepted.len() == MAX_KNOWN_PROJECTS {
                 break;
             }
-            let Ok(path) = PathBuf::from(&input.path).canonicalize() else {
+            let Some((path, identity)) = canonical_directory_identity(Path::new(&input.path))
+            else {
                 continue;
             };
-            if !path.is_dir() || !seen.insert(path.clone()) {
+            if !seen.insert(path.clone()) {
                 continue;
             }
             accepted.push((
                 path,
+                identity,
                 input.trusted,
                 input.last_opened,
                 input.pinned.unwrap_or(false),
@@ -143,8 +178,12 @@ impl ProjectCatalog {
             .collect::<HashMap<_, _>>();
         self.document.projects = accepted
             .into_iter()
-            .map(|(path, trusted, last_opened, pinned)| {
-                if let Some(mut record) = existing.get(&path).cloned() {
+            .map(|(path, identity, trusted, last_opened, pinned)| {
+                if let Some(mut record) = existing
+                    .get(&path)
+                    .filter(|record| record.identity.as_ref() == Some(&identity))
+                    .cloned()
+                {
                     record.trusted = trusted;
                     record.last_opened = last_opened;
                     record.pinned = pinned;
@@ -153,6 +192,7 @@ impl ProjectCatalog {
                     ProjectRecord {
                         id: opaque_id("project"),
                         path,
+                        identity: Some(identity),
                         trusted,
                         last_opened,
                         pinned,
@@ -170,11 +210,7 @@ impl ProjectCatalog {
         self.document
             .projects
             .iter()
-            .map(|project| InternalProjectBinding {
-                id: project.id.clone(),
-                path: project.path.clone(),
-                trusted: project.trusted,
-            })
+            .filter_map(|project| self.resolve_project_binding(&project.id))
             .collect()
     }
 
@@ -192,7 +228,7 @@ impl ProjectCatalog {
             .find(|project| project.id == project_id)?;
         Some(InternalProjectBinding {
             id: project.id.clone(),
-            path: revalidate_directory(&project.path)?,
+            path: revalidate_directory(&project.path, project.identity.as_ref()?)?,
             trusted: project.trusted,
         })
     }
@@ -208,6 +244,21 @@ impl ProjectCatalog {
         session_directory: &Path,
         inputs: &[SessionSyncInput],
     ) -> RemoteResult<()> {
+        let canonical_directory = canonical_directory(session_directory);
+        let mut accepted = Vec::new();
+        if let Some(directory) = canonical_directory.as_ref() {
+            let mut seen = HashSet::new();
+            for input in inputs {
+                let Some((path, identity)) = canonical_file_identity(&input.path) else {
+                    continue;
+                };
+                if !path.starts_with(directory) || !seen.insert(path.clone()) {
+                    continue;
+                }
+                accepted.push((path, identity));
+            }
+        }
+
         let Some(project) = self
             .document
             .projects
@@ -218,32 +269,12 @@ impl ProjectCatalog {
                 "unknown project ID".into(),
             ));
         };
-        let canonical_directory = match session_directory.canonicalize() {
-            Ok(directory) if directory.is_dir() => directory,
-            _ => {
-                project.session_directory = None;
-                project.sessions.clear();
-                self.persist()?;
-                return Ok(());
-            }
+        let Some(canonical_directory) = canonical_directory else {
+            project.session_directory = None;
+            project.sessions.clear();
+            self.persist()?;
+            return Ok(());
         };
-        let mut accepted = Vec::new();
-        let mut seen = HashSet::new();
-        for input in inputs {
-            let Ok(path) = input.path.canonicalize() else {
-                continue;
-            };
-            let Ok(metadata) = fs::metadata(&path) else {
-                continue;
-            };
-            if !metadata.is_file()
-                || !path.starts_with(&canonical_directory)
-                || !seen.insert(path.clone())
-            {
-                continue;
-            }
-            accepted.push(path);
-        }
         project.session_directory = Some(canonical_directory);
         let existing = std::mem::take(&mut project.sessions)
             .into_iter()
@@ -251,17 +282,84 @@ impl ProjectCatalog {
             .collect::<HashMap<_, _>>();
         project.sessions = accepted
             .into_iter()
-            .map(|path| {
+            .map(|(path, identity)| {
                 existing
                     .get(&path)
+                    .filter(|record| record.identity.as_ref() == Some(&identity))
                     .cloned()
                     .unwrap_or_else(|| SessionRecord {
                         id: opaque_id("session"),
                         path,
+                        identity: Some(identity),
                     })
             })
             .collect();
         self.persist()
+    }
+
+    /// Merges one already validated active session without scanning or parsing the full catalogue.
+    /// Other mappings in the same current session directory are preserved.
+    pub(crate) fn merge_active_session(
+        &mut self,
+        project_id: &str,
+        expected_project: &Path,
+        session_directory: &Path,
+        session_path: &Path,
+    ) -> RemoteResult<Option<String>> {
+        let Some(binding) = self.resolve_project_binding(project_id) else {
+            return Ok(None);
+        };
+        if !binding.trusted || binding.path != expected_project {
+            return Ok(None);
+        }
+        let Some(directory) = canonical_directory(session_directory) else {
+            return Ok(None);
+        };
+        let Some((path, identity)) = canonical_file_identity(session_path) else {
+            return Ok(None);
+        };
+        if !path.starts_with(&directory) {
+            return Ok(None);
+        }
+        let project = self
+            .document
+            .projects
+            .iter_mut()
+            .find(|project| project.id == project_id)
+            .expect("resolved project remains present");
+        if project.session_directory.as_ref() != Some(&directory) {
+            project.sessions.clear();
+            project.session_directory = Some(directory.clone());
+        }
+        let session_id = if let Some(existing) = project
+            .sessions
+            .iter_mut()
+            .find(|session| session.path == path)
+        {
+            if existing.identity.as_ref() != Some(&identity) {
+                *existing = SessionRecord {
+                    id: opaque_id("session"),
+                    path: path.clone(),
+                    identity: Some(identity),
+                };
+            }
+            existing.id.clone()
+        } else {
+            let session = SessionRecord {
+                id: opaque_id("session"),
+                path: path.clone(),
+                identity: Some(identity),
+            };
+            let id = session.id.clone();
+            project.sessions.push(session);
+            id
+        };
+        self.persist()?;
+        Ok((self
+            .session_id_for_path(project_id, &directory, &path)
+            .as_deref()
+            == Some(&session_id))
+        .then_some(session_id))
     }
 
     pub(crate) fn clear_sessions(&mut self, project_id: &str) -> RemoteResult<()> {
@@ -298,7 +396,7 @@ impl ProjectCatalog {
             .projects
             .iter()
             .find(|project| project.id == project_id)?;
-        revalidate_directory(&project.path)?;
+        revalidate_directory(&project.path, project.identity.as_ref()?)?;
         let current_directory =
             self.revalidated_session_directory(project, current_session_directory)?;
         let session = project
@@ -323,7 +421,7 @@ impl ProjectCatalog {
             .projects
             .iter()
             .find(|project| project.id == project_id)?;
-        revalidate_directory(&project.path)?;
+        revalidate_directory(&project.path, project.identity.as_ref()?)?;
         let current_directory =
             self.revalidated_session_directory(project, current_session_directory)?;
         let canonical_path = current_session_path.canonicalize().ok()?;
@@ -370,15 +468,18 @@ impl ProjectCatalog {
         self.document
             .projects
             .iter()
-            .map(|project| RemoteProjectSummary {
-                project_id: project.id.clone(),
-                display_name: project_display_name(&project.path),
-                trust_state: if project.trusted {
-                    "trusted"
-                } else {
-                    "untrusted"
-                },
-                is_active: active.is_some_and(|path| path == project.path),
+            .filter_map(|project| {
+                let binding = self.resolve_project_binding(&project.id)?;
+                Some(RemoteProjectSummary {
+                    project_id: binding.id,
+                    display_name: project_display_name(&binding.path),
+                    trust_state: if binding.trusted {
+                        "trusted"
+                    } else {
+                        "untrusted"
+                    },
+                    is_active: active.is_some_and(|path| path == binding.path),
+                })
             })
             .collect()
     }
@@ -413,23 +514,87 @@ fn project_display_name(path: &Path) -> String {
 }
 
 fn canonical_directory(path: &Path) -> Option<PathBuf> {
-    let canonical_directory = path.canonicalize().ok()?;
-    canonical_directory.is_dir().then_some(canonical_directory)
+    canonical_directory_identity(path).map(|(path, _)| path)
 }
 
-/// Canonicalize at resolution time and require the same previously synchronized location.
-fn revalidate_directory(stored_directory: &Path) -> Option<PathBuf> {
-    let current_directory = canonical_directory(stored_directory)?;
-    (current_directory == stored_directory).then_some(current_directory)
+fn canonical_directory_identity(path: &Path) -> Option<(PathBuf, FilesystemIdentity)> {
+    let link_metadata = fs::symlink_metadata(path).ok()?;
+    if link_metadata.file_type().is_symlink() || !link_metadata.is_dir() {
+        return None;
+    }
+    let canonical = path.canonicalize().ok()?;
+    let metadata = fs::symlink_metadata(&canonical).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return None;
+    }
+    Some((canonical, filesystem_identity(&metadata)?))
+}
+
+fn canonical_file_identity(path: &Path) -> Option<(PathBuf, FilesystemIdentity)> {
+    let link_metadata = fs::symlink_metadata(path).ok()?;
+    if link_metadata.file_type().is_symlink() || !link_metadata.is_file() {
+        return None;
+    }
+    let canonical = path.canonicalize().ok()?;
+    let metadata = fs::symlink_metadata(&canonical).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    Some((canonical, filesystem_identity(&metadata)?))
+}
+
+#[cfg(unix)]
+fn filesystem_identity(metadata: &fs::Metadata) -> Option<FilesystemIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    Some(FilesystemIdentity {
+        device: Some(metadata.dev()),
+        inode: Some(metadata.ino()),
+        fallback: None,
+    })
+}
+
+#[cfg(not(unix))]
+fn filesystem_identity(metadata: &fs::Metadata) -> Option<FilesystemIdentity> {
+    // Best-effort fallback: unlike Unix device/inode this cannot prove identity across every
+    // replacement. Remote resolution still fails closed when any sampled property changes.
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    let created = metadata
+        .created()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some(FilesystemIdentity {
+        device: None,
+        inode: None,
+        fallback: Some(format!(
+            "{}:{}:{}:{}:{}",
+            metadata.len(),
+            modified.as_secs(),
+            modified.subsec_nanos(),
+            created.as_secs(),
+            created.subsec_nanos()
+        )),
+    })
+}
+
+/// Canonicalize at resolution time and require both the synchronized path and stable identity.
+fn revalidate_directory(
+    stored_directory: &Path,
+    stored_identity: &FilesystemIdentity,
+) -> Option<PathBuf> {
+    let (current_directory, identity) = canonical_directory_identity(stored_directory)?;
+    (current_directory == stored_directory && &identity == stored_identity)
+        .then_some(current_directory)
 }
 
 fn revalidated_session_file(session: &SessionRecord, current_directory: &Path) -> Option<PathBuf> {
-    let current_session = session.path.canonicalize().ok()?;
-    let metadata = fs::metadata(&current_session).ok()?;
-    (metadata.is_file()
-        && current_session == session.path
-        && current_session.starts_with(current_directory))
-    .then_some(current_session)
+    let (current_session, identity) = canonical_file_identity(&session.path)?;
+    (current_session.starts_with(current_directory) && session.identity.as_ref() == Some(&identity))
+        .then_some(current_session)
 }
 
 fn validate_document(document: &ProjectStoreDocument) -> RemoteResult<()> {
@@ -595,6 +760,219 @@ mod tests {
         assert!(catalog
             .resolve_session_path(&project_id, &session_id, &sessions)
             .is_none());
+    }
+
+    #[test]
+    fn catalogue_transactions_do_not_restore_revoked_trust_after_a_stale_scan() {
+        use std::sync::{Arc, Barrier};
+
+        let root = tempdir().unwrap();
+        let storage = tempdir().unwrap();
+        let project = root.path().join("project");
+        let sessions = root.path().join("sessions");
+        let session = sessions.join("one.jsonl");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&sessions).unwrap();
+        fs::write(&session, "{}\n").unwrap();
+        let project_id = ProjectCatalog::transaction(storage.path(), |catalog| {
+            let summaries = catalog.sync_projects(&[input(&project, true)], None)?;
+            Ok(serde_json::to_value(&summaries[0]).unwrap()["projectId"]
+                .as_str()
+                .unwrap()
+                .to_string())
+        })
+        .unwrap();
+        ProjectCatalog::transaction(storage.path(), |catalog| {
+            catalog.sync_sessions(
+                &project_id,
+                &sessions,
+                &[SessionSyncInput {
+                    path: session.clone(),
+                }],
+            )
+        })
+        .unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let remote_barrier = Arc::clone(&barrier);
+        let remote_storage = storage.path().to_path_buf();
+        let remote_project_id = project_id.clone();
+        let remote_sessions = sessions.clone();
+        let remote_session = session.clone();
+        let remote = std::thread::spawn(move || {
+            // This is the intentionally stale catalogue observation made before an expensive
+            // discovery scan. The merge itself must reload beneath `transaction`.
+            let stale = ProjectCatalog::load_or_create(&remote_storage).unwrap();
+            assert!(
+                stale
+                    .resolve_project_binding(&remote_project_id)
+                    .unwrap()
+                    .trusted
+            );
+            remote_barrier.wait();
+            remote_barrier.wait();
+            ProjectCatalog::transaction(&remote_storage, |catalog| {
+                let binding = catalog.resolve_project_binding(&remote_project_id).unwrap();
+                if !binding.trusted {
+                    catalog.clear_sessions(&remote_project_id)?;
+                    return Ok(false);
+                }
+                catalog.sync_sessions(
+                    &remote_project_id,
+                    &remote_sessions,
+                    &[SessionSyncInput {
+                        path: remote_session.clone(),
+                    }],
+                )?;
+                Ok(true)
+            })
+            .unwrap()
+        });
+        barrier.wait();
+        ProjectCatalog::transaction(storage.path(), |catalog| {
+            catalog.sync_projects(&[input(&project, false)], None)?;
+            catalog.clear_sessions(&project_id)
+        })
+        .unwrap();
+        barrier.wait();
+        assert!(!remote.join().unwrap());
+
+        let catalog = ProjectCatalog::load_or_create(storage.path()).unwrap();
+        assert!(
+            !catalog
+                .resolve_project_binding(&project_id)
+                .expect("trusted project remains mapped")
+                .trusted
+        );
+        assert!(catalog
+            .resolve_session_path(&project_id, "session_stale", &sessions)
+            .is_none());
+    }
+
+    #[test]
+    fn concurrent_initial_session_merges_issue_one_stable_opaque_id() {
+        use std::sync::{Arc, Barrier};
+
+        let root = tempdir().unwrap();
+        let storage = tempdir().unwrap();
+        let project = root.path().join("project");
+        let sessions = root.path().join("sessions");
+        let session = sessions.join("one.jsonl");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&sessions).unwrap();
+        fs::write(&session, "{}\n").unwrap();
+        let project_id = ProjectCatalog::transaction(storage.path(), |catalog| {
+            let summaries = catalog.sync_projects(&[input(&project, true)], None)?;
+            Ok(serde_json::to_value(&summaries[0]).unwrap()["projectId"]
+                .as_str()
+                .unwrap()
+                .to_string())
+        })
+        .unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let merge = |barrier: Arc<Barrier>| {
+            let storage = storage.path().to_path_buf();
+            let project_id = project_id.clone();
+            let sessions = sessions.clone();
+            let session = session.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                ProjectCatalog::transaction(&storage, |catalog| {
+                    catalog.sync_sessions(
+                        &project_id,
+                        &sessions,
+                        &[SessionSyncInput {
+                            path: session.clone(),
+                        }],
+                    )?;
+                    catalog
+                        .session_id_for_path(&project_id, &sessions, &session)
+                        .ok_or_else(|| {
+                            RemoteError::InvalidConfiguration("session was not merged".into())
+                        })
+                })
+                .unwrap()
+            })
+        };
+        let first = merge(Arc::clone(&barrier));
+        let second = merge(barrier);
+        let first_id = first.join().unwrap();
+        let second_id = second.join().unwrap();
+        assert_eq!(first_id, second_id);
+        assert!(first_id.starts_with("session_"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_same_path_replacements_revoke_old_ids_and_trust_bindings() {
+        let root = tempdir().unwrap();
+        let storage = tempdir().unwrap();
+        let project = root.path().join("project");
+        let sessions = root.path().join("sessions");
+        let session = sessions.join("one.jsonl");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&sessions).unwrap();
+        fs::write(&session, "original\n").unwrap();
+        let mut catalog = ProjectCatalog::load_or_create(storage.path()).unwrap();
+        let first_project_id = serde_json::to_value(
+            &catalog
+                .sync_projects(&[input(&project, true)], None)
+                .unwrap()[0],
+        )
+        .unwrap()["projectId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        catalog
+            .sync_sessions(
+                &first_project_id,
+                &sessions,
+                &[SessionSyncInput {
+                    path: session.clone(),
+                }],
+            )
+            .unwrap();
+        let first_session_id = catalog
+            .session_id_for_path(&first_project_id, &sessions, &session)
+            .unwrap();
+
+        let moved_session = root.path().join("moved-session.jsonl");
+        fs::rename(&session, &moved_session).unwrap();
+        fs::write(&session, "replacement\n").unwrap();
+        assert!(catalog
+            .resolve_session_path(&first_project_id, &first_session_id, &sessions)
+            .is_none());
+        catalog
+            .sync_sessions(
+                &first_project_id,
+                &sessions,
+                &[SessionSyncInput {
+                    path: session.clone(),
+                }],
+            )
+            .unwrap();
+        assert_ne!(
+            catalog
+                .session_id_for_path(&first_project_id, &sessions, &session)
+                .unwrap(),
+            first_session_id
+        );
+
+        let moved_project = root.path().join("moved-project");
+        fs::rename(&project, &moved_project).unwrap();
+        fs::create_dir(&project).unwrap();
+        assert!(catalog.resolve_project_binding(&first_project_id).is_none());
+        let replacement_project_id = serde_json::to_value(
+            &catalog
+                .sync_projects(&[input(&project, true)], None)
+                .unwrap()[0],
+        )
+        .unwrap()["projectId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(replacement_project_id, first_project_id);
     }
 
     #[cfg(unix)]

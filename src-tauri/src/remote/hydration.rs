@@ -100,9 +100,8 @@ impl SafeLiveStateCache {
         self.observe_generation(project, 0, event);
     }
 
-    /// Associates process output with its exact manager generation. Late output from an exited
-    /// process can at worst make the new generation temporarily unavailable; it can never be
-    /// mistaken for the new process's state.
+    /// Associates process output with its exact manager generation. A late response can never
+    /// replace a snapshot already observed from a newer generation.
     pub(crate) fn observe_generation(&self, project: &Path, generation: u64, event: &Value) {
         let Some(project) = canonical_project(project) else {
             return;
@@ -115,7 +114,14 @@ impl SafeLiveStateCache {
                 let Some(candidate) = state_candidate(&project, event) else {
                     return;
                 };
-                self.lock().insert(
+                let mut snapshots = self.lock();
+                if snapshots
+                    .get(&project)
+                    .is_some_and(|existing| existing.generation > generation)
+                {
+                    return;
+                }
+                snapshots.insert(
                     project,
                     GenerationState {
                         generation,
@@ -271,15 +277,22 @@ pub(crate) fn project_transcript(
         return Err(HydrationError::FileTooLarge);
     }
 
+    let mut secrets = context.secrets.clone();
+    secrets.push(session_id.to_string());
+    // A transcript can quote an identifier emitted by a different record. Collect every
+    // identifier in the bounded file before projecting any text so the projection never depends
+    // on record order.
+    secrets.extend(collect_transcript_id_secrets(
+        &context.path,
+        &initial_metadata,
+    )?);
+    let base_sanitizer = TextSanitizer::new(secrets);
+
     let mut file = File::open(&context.path).map_err(|_| HydrationError::Io)?;
     let opened_metadata = file.metadata().map_err(|_| HydrationError::Io)?;
     if !opened_metadata.is_file() || !same_file(&initial_metadata, &opened_metadata) {
         return Err(HydrationError::FileChanged);
     }
-
-    let mut secrets = context.secrets.clone();
-    secrets.push(session_id.to_string());
-    let base_sanitizer = TextSanitizer::new(secrets);
     let mut projected = VecDeque::<PendingMessage>::new();
     let mut pending_tools = HashMap::<String, String>::new();
     let mut record = Vec::new();
@@ -441,7 +454,7 @@ fn consume_transcript_record(
                         role: "user".to_string(),
                         text,
                         thinking: None,
-                        is_error: None,
+                        is_error: Some(false),
                         timestamp,
                         tool_name: None,
                         tool_status: None,
@@ -686,15 +699,8 @@ impl TextSanitizer {
                 }
             })
             .collect::<String>();
-        let compact = printable
+        let compact = redact_embedded_sensitive_text(&printable)
             .split_whitespace()
-            .map(|word| {
-                if looks_like_absolute_path(word) {
-                    "[redacted]"
-                } else {
-                    word
-                }
-            })
             .collect::<Vec<_>>()
             .join(" ");
         if compact.is_empty() {
@@ -704,23 +710,224 @@ impl TextSanitizer {
     }
 }
 
-fn looks_like_absolute_path(word: &str) -> bool {
-    let candidate = word.trim_matches(|character: char| {
-        matches!(
-            character,
-            '\'' | '"' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';'
+/// Applies the transcript boundary's fail-closed text projection to bounded catalogue labels and
+/// previews as well as hydrated messages.
+pub(crate) fn sanitize_wire_text(value: &str, secrets: &[String], limit: usize) -> Option<String> {
+    TextSanitizer::new(secrets.to_vec()).sanitize(value, limit)
+}
+
+fn redact_embedded_sensitive_text(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = String::with_capacity(value.len());
+    let mut copied = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        let span = sensitive_text_span(bytes, index);
+        if let Some((start, end)) = span {
+            output.push_str(&value[copied..start]);
+            output.push_str("[redacted]");
+            copied = end;
+            index = end;
+        } else {
+            index += 1;
+        }
+    }
+    output.push_str(&value[copied..]);
+    output
+}
+
+fn sensitive_text_span(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
+    if starts_ascii_case_insensitive(bytes, index, b"file://") {
+        return Some((index, sensitive_path_end(bytes, index)));
+    }
+    if bytes[index] == b'/' && path_boundary(bytes, index) {
+        return Some((index, sensitive_path_end(bytes, index)));
+    }
+    if bytes[index] == b'~'
+        && path_boundary(bytes, index)
+        && matches!(bytes.get(index + 1), Some(b'/' | b'\\'))
+    {
+        return Some((index, sensitive_path_end(bytes, index)));
+    }
+    if bytes[index] == b'\\' && bytes.get(index + 1) == Some(&b'\\') && path_boundary(bytes, index)
+    {
+        return Some((index, sensitive_path_end(bytes, index)));
+    }
+    if bytes[index].is_ascii_alphabetic()
+        && bytes.get(index + 1) == Some(&b':')
+        && matches!(bytes.get(index + 2), Some(b'/' | b'\\'))
+        && path_boundary(bytes, index)
+    {
+        return Some((index, sensitive_path_end(bytes, index)));
+    }
+    if starts_ascii_case_insensitive(bytes, index, b"bearer")
+        && path_boundary(bytes, index)
+        && bytes
+            .get(index + b"bearer".len())
+            .is_some_and(u8::is_ascii_whitespace)
+    {
+        let mut token = index + b"bearer".len();
+        while bytes.get(token).is_some_and(u8::is_ascii_whitespace) {
+            token += 1;
+        }
+        if token < bytes.len() {
+            return Some((token, bearer_value_end(bytes, token)));
+        }
+    }
+    if is_token_byte(bytes[index]) && (index == 0 || !is_token_byte(bytes[index - 1])) {
+        let end = sensitive_token_end(bytes, index);
+        if looks_like_issued_token(&bytes[index..end]) {
+            return Some((index, end));
+        }
+    }
+    None
+}
+
+fn starts_ascii_case_insensitive(bytes: &[u8], index: usize, expected: &[u8]) -> bool {
+    bytes
+        .get(index..index.saturating_add(expected.len()))
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(expected))
+}
+
+fn path_boundary(bytes: &[u8], index: usize) -> bool {
+    index == 0
+        || !matches!(
+            bytes[index - 1],
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b'.'
         )
-    });
-    candidate.starts_with('/')
-        || candidate.starts_with('~')
-        || candidate.starts_with("\\\\")
-        || candidate.starts_with("file://")
-        || candidate.as_bytes().get(1) == Some(&b':')
-            && candidate
-                .as_bytes()
-                .first()
-                .is_some_and(u8::is_ascii_alphabetic)
-            && matches!(candidate.as_bytes().get(2), Some(b'/' | b'\\'))
+}
+
+fn sensitive_path_end(bytes: &[u8], mut index: usize) -> usize {
+    while bytes.get(index).is_some_and(|byte| {
+        !byte.is_ascii_whitespace()
+            && !matches!(
+                byte,
+                b'\''
+                    | b'"'
+                    | b'`'
+                    | b'('
+                    | b')'
+                    | b'['
+                    | b']'
+                    | b'{'
+                    | b'}'
+                    | b'<'
+                    | b'>'
+                    | b','
+                    | b';'
+            )
+    }) {
+        index += 1;
+    }
+    index
+}
+
+fn is_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+}
+
+fn sensitive_token_end(bytes: &[u8], mut index: usize) -> usize {
+    while bytes.get(index).is_some_and(|byte| is_token_byte(*byte)) {
+        index += 1;
+    }
+    index
+}
+
+fn bearer_value_end(bytes: &[u8], mut index: usize) -> usize {
+    while bytes.get(index).is_some_and(|byte| {
+        !byte.is_ascii_whitespace()
+            && !matches!(
+                byte,
+                b'\'' | b'"' | b'`' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'<' | b'>'
+            )
+    }) {
+        index += 1;
+    }
+    index
+}
+
+fn looks_like_issued_token(value: &[u8]) -> bool {
+    // The issued device token is unpadded base64url and 43 bytes long, but accept any long
+    // base64url-shaped run so an unrecognized bearer-shaped secret fails closed.
+    value.len() >= 32
+}
+
+fn collect_transcript_id_secrets(
+    path: &Path,
+    initial_metadata: &Metadata,
+) -> Result<Vec<String>, HydrationError> {
+    let mut file = File::open(path).map_err(|_| HydrationError::Io)?;
+    let opened = file.metadata().map_err(|_| HydrationError::Io)?;
+    if !opened.is_file() || !same_file(initial_metadata, &opened) {
+        return Err(HydrationError::FileChanged);
+    }
+
+    let mut secrets = Vec::new();
+    let mut record = Vec::new();
+    let mut chunk = vec![0_u8; READ_CHUNK_BYTES];
+    let mut total_bytes = 0_u64;
+    loop {
+        let count = file.read(&mut chunk).map_err(|_| HydrationError::Io)?;
+        if count == 0 {
+            break;
+        }
+        total_bytes = total_bytes
+            .checked_add(count as u64)
+            .ok_or(HydrationError::FileTooLarge)?;
+        if total_bytes > MAX_TRANSCRIPT_FILE_BYTES {
+            return Err(HydrationError::FileTooLarge);
+        }
+        for &byte in &chunk[..count] {
+            if byte == b'\n' {
+                collect_record_id_secrets(&record, &mut secrets)?;
+                record.clear();
+            } else {
+                if record.len() == MAX_TRANSCRIPT_RECORD_BYTES {
+                    return Err(HydrationError::RecordTooLarge);
+                }
+                record.push(byte);
+            }
+        }
+    }
+    if !record.is_empty() {
+        collect_record_id_secrets(&record, &mut secrets)?;
+    }
+    revalidate_session_file(path, initial_metadata)?;
+    Ok(secrets)
+}
+
+fn collect_record_id_secrets(
+    bytes: &[u8],
+    secrets: &mut Vec<String>,
+) -> Result<(), HydrationError> {
+    let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let value: Value =
+        serde_json::from_slice(bytes).map_err(|_| HydrationError::MalformedRecord)?;
+    value.as_object().ok_or(HydrationError::MalformedRecord)?;
+    collect_identifier_values(&value, secrets);
+    Ok(())
+}
+
+fn collect_identifier_values(value: &Value, secrets: &mut Vec<String>) {
+    match value {
+        Value::Object(fields) => {
+            for (key, value) in fields {
+                if key == "id" || key == "parentSession" || key.ends_with("Id") {
+                    collect_scalar_secret(Some(value), secrets);
+                }
+                collect_identifier_values(value, secrets);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_identifier_values(value, secrets);
+            }
+        }
+        _ => {}
+    }
 }
 
 struct SessionContext {
@@ -1246,10 +1453,10 @@ mod tests {
         cache.observe_generation(&fixture.project, 1, &event);
         assert!(cache
             .snapshot_generation_canonical(&fixture.project, 2)
-            .is_none());
+            .is_some());
         assert!(cache
             .snapshot_generation_canonical(&fixture.project, 1)
-            .is_some());
+            .is_none());
     }
 
     #[test]
@@ -1393,7 +1600,7 @@ mod tests {
             vec!["user", "assistant", "tool", "tool", "assistant"]
         );
         assert_eq!(first[0].text, "Hello [redacted] [redacted]");
-        assert_eq!(first[0].is_error, None);
+        assert_eq!(first[0].is_error, Some(false));
         assert_eq!(first[0].timestamp, "2026-08-03T01:20:00.123Z");
         assert_eq!(first[1].text, "Done at [redacted] [redacted]");
         assert_eq!(
@@ -1445,6 +1652,59 @@ mod tests {
                     .as_deref()
                     .is_some_and(|thinking| thinking.chars().any(char::is_control))
         }));
+    }
+
+    #[test]
+    fn transcript_redacts_embedded_paths_tokens_and_cross_record_identifiers() {
+        let fixture = Fixture::new();
+        let token = "0LihExfkXNrXC_i04AvBeOx_Iyo9RsmXKQ66wPQPzcw";
+        let quoted_record_id = "pi-record-issued-later";
+        let quoted_tool_id = "pi-tool-issued-later";
+        fixture.write(&[
+            fixture.header(),
+            json!({
+                "type": "message",
+                "timestamp": "2026-08-03T01:20:00Z",
+                "message": {
+                    "role": "user",
+                    "content": format!(
+                        "path=/Users/maya/.ssh/id_ed25519 markdown](/Users/maya/private) windows=C:\\Users\\maya\\secret uri=file:///Users/maya/token Bearer {token} token={token} quoted={quoted_record_id} tool={quoted_tool_id}"
+                    ),
+                },
+            }),
+            json!({
+                "type": "message",
+                "id": quoted_record_id,
+                "timestamp": "2026-08-03T01:20:01Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "thinking", "thinking": format!("thinking=[C:\\Users\\maya\\notes] token={token} quoted={quoted_tool_id}") },
+                        { "type": "text", "text": "safe" },
+                        { "type": "toolCall", "id": quoted_tool_id, "name": "tool" },
+                    ],
+                },
+            }),
+        ]);
+
+        let messages =
+            project_transcript(&fixture.project, &fixture.session, "session_opaque", 10).unwrap();
+        let serialized = serde_json::to_string(&messages).unwrap();
+        for secret in [
+            "/Users/maya/.ssh/id_ed25519",
+            "/Users/maya/private",
+            r"C:\Users\maya\secret",
+            "file:///Users/maya/token",
+            token,
+            quoted_record_id,
+            quoted_tool_id,
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "leaked {secret}: {serialized}"
+            );
+        }
+        assert!(messages.iter().all(|message| message.is_error.is_some()));
     }
 
     #[test]
@@ -1614,7 +1874,7 @@ mod tests {
             HydrationError::FileTooLarge,
         );
 
-        let large_text = "x".repeat(MAX_MESSAGE_TEXT_SCALARS);
+        let large_text = "x ".repeat(MAX_MESSAGE_TEXT_SCALARS / 2);
         let mut records = vec![fixture.header()];
         for index in 0..140_u64 {
             records.push(json!({

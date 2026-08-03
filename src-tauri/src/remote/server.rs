@@ -104,6 +104,18 @@ enum SessionCatalogError {
     HostUnavailable,
 }
 
+enum SessionTransactionResult {
+    Sessions(Vec<SessionSummary>),
+    ProjectNotFound,
+    HostUnavailable,
+}
+
+enum StateSessionTransactionResult {
+    Session(String),
+    ProjectNotFound,
+    HostUnavailable,
+}
+
 struct StateProjectResource {
     binding: InternalProjectBinding,
 }
@@ -126,6 +138,46 @@ struct MessagesQuery {
     session_id: String,
     limit: usize,
 }
+
+#[cfg(test)]
+#[derive(Clone)]
+struct TranscriptResolutionBarrier {
+    session_id: String,
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+static TEST_TRANSCRIPT_RESOLUTION_BARRIER: std::sync::Mutex<Option<TranscriptResolutionBarrier>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+struct TranscriptResolutionBarrierGuard;
+
+#[cfg(test)]
+impl Drop for TranscriptResolutionBarrierGuard {
+    fn drop(&mut self) {
+        *TEST_TRANSCRIPT_RESOLUTION_BARRIER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+#[cfg(test)]
+fn pause_after_session_resolution(session_id: &str) {
+    let barrier = TEST_TRANSCRIPT_RESOLUTION_BARRIER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .filter(|barrier| barrier.session_id == session_id);
+    if let Some(barrier) = barrier {
+        barrier.entered.wait();
+        barrier.release.wait();
+    }
+}
+
+#[cfg(not(test))]
+fn pause_after_session_resolution(_: &str) {}
 
 /// Builds the v1 router. The actual TCP listener also checks peers before TLS negotiation; this
 /// route-level check keeps the rule true for every request and permits deterministic router tests.
@@ -402,6 +454,9 @@ async fn projects(
             )
         }
     };
+    let Some(_authentication_lease) = authentication_lease(&headers, &state).await else {
+        return unauthenticated(&context.request_id);
+    };
     success(
         StatusCode::OK,
         &context.request_id,
@@ -477,6 +532,9 @@ async fn sessions(
         }
     };
 
+    let Some(_authentication_lease) = authentication_lease(&headers, &state).await else {
+        return unauthenticated(&context.request_id);
+    };
     success(
         StatusCode::OK,
         &context.request_id,
@@ -604,6 +662,9 @@ async fn state_snapshot(
         .as_ref()
         .and_then(|_| live.state.session_name.clone());
     let session_id = active_session.map(|(session_id, _)| session_id);
+    let Some(_authentication_lease) = authentication_lease(&headers, &state).await else {
+        return unauthenticated(&context.request_id);
+    };
     success(
         StatusCode::OK,
         &context.request_id,
@@ -681,6 +742,9 @@ async fn messages(
         }
     };
 
+    let Some(_authentication_lease) = authentication_lease(&headers, &state).await else {
+        return unauthenticated(&context.request_id);
+    };
     success(
         StatusCode::OK,
         &context.request_id,
@@ -717,23 +781,34 @@ fn state_session_id(
     project_path: &Path,
     session_path: &Path,
 ) -> Result<String, StateResourceError> {
-    session_catalogue(storage, project_id).map_err(|error| match error {
-        SessionCatalogError::ProjectNotFound => StateResourceError::ProjectNotFound,
-        SessionCatalogError::HostUnavailable => StateResourceError::HostUnavailable,
-    })?;
-    let catalog =
-        ProjectCatalog::load_or_create(storage).map_err(|_| StateResourceError::HostUnavailable)?;
-    let binding = catalog
-        .resolve_project_binding(project_id)
-        .ok_or(StateResourceError::ProjectNotFound)?;
-    if !binding.trusted || binding.path != project_path {
-        return Err(StateResourceError::HostUnavailable);
+    let result = ProjectCatalog::transaction(storage, |catalog| {
+        let Some(binding) = catalog.resolve_project_binding(project_id) else {
+            return Ok(StateSessionTransactionResult::ProjectNotFound);
+        };
+        if !binding.trusted || binding.path != project_path {
+            return Ok(StateSessionTransactionResult::HostUnavailable);
+        }
+        let Ok(directory) = session_directory(&binding.path) else {
+            return Ok(StateSessionTransactionResult::HostUnavailable);
+        };
+        Ok(
+            match catalog.merge_active_session(
+                project_id,
+                project_path,
+                &directory,
+                session_path,
+            )? {
+                Some(session_id) => StateSessionTransactionResult::Session(session_id),
+                None => StateSessionTransactionResult::HostUnavailable,
+            },
+        )
+    })
+    .map_err(|_| StateResourceError::HostUnavailable)?;
+    match result {
+        StateSessionTransactionResult::Session(session_id) => Ok(session_id),
+        StateSessionTransactionResult::ProjectNotFound => Err(StateResourceError::ProjectNotFound),
+        StateSessionTransactionResult::HostUnavailable => Err(StateResourceError::HostUnavailable),
     }
-    let directory =
-        session_directory(&binding.path).map_err(|_| StateResourceError::HostUnavailable)?;
-    catalog
-        .session_id_for_path(project_id, &directory, session_path)
-        .ok_or(StateResourceError::HostUnavailable)
 }
 
 fn revalidate_state_project(
@@ -793,6 +868,9 @@ fn hydrated_messages(
             Err(MessagesResourceError::ProjectNotFound)
         };
     };
+    // Test-only barrier coverage proves the final catalogue validation rejects an ordinary
+    // replacement completed after resolution but before the transcript file is opened.
+    pause_after_session_resolution(session_id);
     let messages = hydration::project_transcript(&binding.path, &session_path, session_id, limit)
         .map_err(|error| match error {
         HydrationError::InvalidProject => MessagesResourceError::ProjectNotFound,
@@ -891,41 +969,59 @@ fn session_catalogue(
     storage: &std::path::Path,
     project_id: &str,
 ) -> Result<Vec<SessionSummary>, SessionCatalogError> {
-    let mut catalog = ProjectCatalog::load_or_create(storage)
+    let initial = ProjectCatalog::load_or_create(storage)
         .map_err(|_| SessionCatalogError::HostUnavailable)?;
-    let binding = catalog
+    let initial_binding = initial
         .resolve_project_binding(project_id)
         .ok_or(SessionCatalogError::ProjectNotFound)?;
-    if !binding.trusted {
-        catalog
-            .clear_sessions(project_id)
+    let discovered = if initial_binding.trusted {
+        let directory = session_directory(&initial_binding.path)
             .map_err(|_| SessionCatalogError::HostUnavailable)?;
-        return Ok(Vec::new());
-    }
+        let sessions = list_pi_sessions_sync(&initial_binding.path)
+            .map_err(|_| SessionCatalogError::HostUnavailable)?;
+        Some((directory, sessions))
+    } else {
+        None
+    };
 
-    let directory =
-        session_directory(&binding.path).map_err(|_| SessionCatalogError::HostUnavailable)?;
-    let discovered =
-        list_pi_sessions_sync(&binding.path).map_err(|_| SessionCatalogError::HostUnavailable)?;
-    if catalog.resolve_project_binding(project_id).is_none() {
-        return Err(SessionCatalogError::ProjectNotFound);
+    // The scan above is bounded and occurs outside the transaction. Reloading here prevents a
+    // stale trusted scan from restoring trust, a removed project, or losing a concurrent ID.
+    let result = ProjectCatalog::transaction(storage, |catalog| {
+        let Some(binding) = catalog.resolve_project_binding(project_id) else {
+            return Ok(SessionTransactionResult::ProjectNotFound);
+        };
+        if !binding.trusted {
+            catalog.clear_sessions(project_id)?;
+            return Ok(SessionTransactionResult::Sessions(Vec::new()));
+        }
+        if binding.path != initial_binding.path {
+            return Ok(SessionTransactionResult::ProjectNotFound);
+        }
+        let Some((directory, discovered)) = discovered.as_ref() else {
+            return Ok(SessionTransactionResult::HostUnavailable);
+        };
+        let inputs = discovered
+            .iter()
+            .map(|session| SessionSyncInput {
+                path: PathBuf::from(&session.path),
+            })
+            .collect::<Vec<_>>();
+        catalog.sync_sessions(project_id, directory, &inputs)?;
+        let sessions = discovered
+            .iter()
+            .cloned()
+            .filter_map(|session| {
+                project_session(catalog, &binding.path, directory, project_id, session)
+            })
+            .collect();
+        Ok(SessionTransactionResult::Sessions(sessions))
+    })
+    .map_err(|_| SessionCatalogError::HostUnavailable)?;
+    match result {
+        SessionTransactionResult::Sessions(sessions) => Ok(sessions),
+        SessionTransactionResult::ProjectNotFound => Err(SessionCatalogError::ProjectNotFound),
+        SessionTransactionResult::HostUnavailable => Err(SessionCatalogError::HostUnavailable),
     }
-    let inputs = discovered
-        .iter()
-        .map(|session| SessionSyncInput {
-            path: PathBuf::from(&session.path),
-        })
-        .collect::<Vec<_>>();
-    catalog
-        .sync_sessions(project_id, &directory, &inputs)
-        .map_err(|_| SessionCatalogError::HostUnavailable)?;
-
-    Ok(discovered
-        .into_iter()
-        .filter_map(|session| {
-            project_session(&catalog, &binding.path, &directory, project_id, session)
-        })
-        .collect())
 }
 
 fn project_session(
@@ -939,13 +1035,16 @@ fn project_session(
     let session_id = catalog.session_id_for_path(project_id, directory, &session_path)?;
     let modified_at = rfc3339_millis(session.modified)?;
     let message_count = u64::try_from(session.message_count).ok()?;
-    let secrets = [
-        Some(project_path.to_string_lossy().into_owned()),
-        Some(directory.to_string_lossy().into_owned()),
-        Some(session.path.clone()),
-        Some(session.id.clone()),
-        session.parent_session_path.clone(),
+    let mut secrets = vec![
+        project_path.to_string_lossy().into_owned(),
+        directory.to_string_lossy().into_owned(),
+        session.path.clone(),
+        session.id.clone(),
     ];
+    if let Some(parent) = &session.parent_session_path {
+        secrets.push(parent.clone());
+    }
+    secrets.extend(session.redaction_secrets.iter().cloned());
     let name = session
         .name
         .as_deref()
@@ -967,54 +1066,8 @@ fn project_session(
     })
 }
 
-fn safe_session_text(value: &str, secrets: &[Option<String>], limit: usize) -> Option<String> {
-    let mut redacted = value.to_string();
-    for secret in secrets.iter().flatten().filter(|secret| !secret.is_empty()) {
-        redacted = redacted.replace(secret, "[redacted]");
-    }
-    let printable = redacted
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect::<String>();
-    let compact = printable
-        .split_whitespace()
-        .map(|word| {
-            if looks_like_internal_path(word) {
-                "[redacted]"
-            } else {
-                word
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    if compact.is_empty() {
-        return None;
-    }
-    Some(compact.chars().take(limit).collect())
-}
-
-fn looks_like_internal_path(word: &str) -> bool {
-    let candidate = word.trim_matches(|character: char| {
-        matches!(
-            character,
-            '\'' | '"' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
-        )
-    });
-    candidate.starts_with('/')
-        || candidate.starts_with('~')
-        || candidate.starts_with("\\\\")
-        || candidate.as_bytes().get(1) == Some(&b':')
-            && candidate
-                .as_bytes()
-                .first()
-                .is_some_and(u8::is_ascii_alphabetic)
-            && matches!(candidate.as_bytes().get(2), Some(b'/' | b'\\'))
+fn safe_session_text(value: &str, secrets: &[String], limit: usize) -> Option<String> {
+    hydration::sanitize_wire_text(value, secrets, limit)
 }
 
 fn rfc3339_millis(milliseconds: u64) -> Option<String> {
@@ -1227,22 +1280,34 @@ fn has_exact_header(headers: &HeaderMap, name: &str, expected: &str) -> bool {
 
 fn accepted_capabilities(headers: &HeaderMap) -> Vec<Capability> {
     let values = headers.get_all(CAPABILITIES_HEADER);
-    if values.iter().count() != 1 {
-        return AVAILABLE_CAPABILITIES.to_vec();
+    match values.iter().count() {
+        0 => return AVAILABLE_CAPABILITIES.to_vec(),
+        1 => {}
+        _ => return Vec::new(),
     }
     let Some(value) = values.iter().next().and_then(|value| value.to_str().ok()) else {
-        return AVAILABLE_CAPABILITIES.to_vec();
+        return Vec::new();
     };
-    let requested = value
-        .split(',')
-        .filter_map(|token| match token.trim() {
-            "projects" => Some(Capability::Projects),
-            "state" => Some(Capability::State),
-            "rpc" => Some(Capability::Rpc),
-            "events" => Some(Capability::Events),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let mut requested = Vec::new();
+    for token in value.split(',') {
+        // A present header is exact and case-sensitive. Whitespace, empty tokens, duplicate
+        // tokens, and non-UTF-8 values are malformed rather than silently broadened.
+        if token.is_empty() || token.trim() != token {
+            return Vec::new();
+        }
+        let capability = match token {
+            "projects" => Capability::Projects,
+            "state" => Capability::State,
+            "rpc" => Capability::Rpc,
+            "events" => Capability::Events,
+            // Unknown future capabilities do not broaden the currently available intersection.
+            _ => continue,
+        };
+        if requested.contains(&capability) {
+            return Vec::new();
+        }
+        requested.push(capability);
+    }
     AVAILABLE_CAPABILITIES
         .iter()
         .copied()
@@ -1259,19 +1324,26 @@ fn is_json_content_type(headers: &HeaderMap) -> bool {
 }
 
 async fn is_authenticated(headers: &HeaderMap, state: &BridgeState) -> bool {
+    authentication_lease(headers, state).await.is_some()
+}
+
+/// Rechecks the bearer immediately before materializing a successful body. Keeping this lease
+/// through `success` serializes a local revocation with that final authorization decision.
+async fn authentication_lease<'a>(
+    headers: &HeaderMap,
+    state: &'a BridgeState,
+) -> Option<tokio::sync::MutexGuard<'a, DeviceStore>> {
     let values = headers.get_all(header::AUTHORIZATION);
     if values.iter().count() != 1 {
-        return false;
+        return None;
     }
-    let Some(value) = values.iter().next().and_then(|value| value.to_str().ok()) else {
-        return false;
-    };
-    let Some(token) = value.strip_prefix("Bearer ") else {
-        return false;
-    };
-    !token.is_empty()
-        && !token.contains(char::is_whitespace)
-        && state.devices.lock().await.verifies(token)
+    let value = values.iter().next()?.to_str().ok()?;
+    let token = value.strip_prefix("Bearer ")?;
+    if token.is_empty() || token.contains(char::is_whitespace) {
+        return None;
+    }
+    let devices = state.devices.lock().await;
+    devices.verifies(token).then_some(devices)
 }
 
 fn validated_display_name(value: &str) -> Option<String> {
@@ -1637,6 +1709,61 @@ mod tests {
         assert!(value.to_string().contains("hostId"));
     }
 
+    #[test]
+    fn capability_headers_require_an_exact_single_case_sensitive_request() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(accepted_capabilities(&headers), AVAILABLE_CAPABILITIES);
+
+        headers.insert(CAPABILITIES_HEADER, "projects,state".parse().unwrap());
+        assert_eq!(
+            accepted_capabilities(&headers),
+            vec![Capability::Projects, Capability::State]
+        );
+        headers.append(CAPABILITIES_HEADER, "projects".parse().unwrap());
+        assert!(accepted_capabilities(&headers).is_empty());
+
+        let mut malformed = HeaderMap::new();
+        for value in ["projects, state", "projects,projects", "Projects", ""] {
+            malformed.insert(CAPABILITIES_HEADER, value.parse().unwrap());
+            assert!(accepted_capabilities(&malformed).is_empty(), "{value}");
+        }
+        malformed.insert(
+            CAPABILITIES_HEADER,
+            header::HeaderValue::from_bytes(b"\xff").unwrap(),
+        );
+        assert!(accepted_capabilities(&malformed).is_empty());
+    }
+
+    #[tokio::test]
+    async fn final_authentication_lease_serializes_revocation_with_success_materialization() {
+        let root = tempdir().unwrap();
+        let state = state(root.path().to_path_buf()).await;
+        authorize(&state).await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {TEST_TOKEN}").parse().unwrap(),
+        );
+        let lease = authentication_lease(&headers, &state)
+            .await
+            .expect("authorized device receives a lease");
+        let devices = Arc::clone(&state.devices);
+        let revoke = tokio::spawn(async move {
+            devices
+                .lock()
+                .await
+                .revoke("82c6fbb6-fa93-4672-8b48-b7755a947e7d")
+        });
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        assert!(
+            !revoke.is_finished(),
+            "revocation must wait for the final lease"
+        );
+        drop(lease);
+        assert!(revoke.await.unwrap().unwrap());
+    }
+
     #[tokio::test]
     async fn pairing_validates_body_and_persists_only_digest() {
         let root = tempdir().unwrap();
@@ -1927,6 +2054,78 @@ mod tests {
         assert_eq!(second_response.status(), StatusCode::OK);
         let second = response_json(second_response).await;
         assert_eq!(second["data"]["sessions"][0]["sessionId"], session_id);
+    }
+
+    #[tokio::test]
+    async fn sessions_sanitize_embedded_paths_tokens_and_later_raw_ids() {
+        let _environment_lock = SESSION_DIRECTORY_ENV.lock().unwrap();
+        let root = tempdir().unwrap();
+        let project = root.path().join("private-project");
+        let sessions = root.path().join("private-sessions");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&sessions).unwrap();
+        let project = project.canonicalize().unwrap();
+        let _override = SessionDirectoryOverride::set(&sessions);
+        let state = state(root.path().to_path_buf()).await;
+        let project_id = sync_project(root.path(), &project, true);
+        let path = sessions.join("one.jsonl");
+        let later_id = "pi-id-recorded-later";
+        write_records(
+            &path,
+            &[
+                serde_json::json!({
+                    "type": "session",
+                    "id": "pi-header-id",
+                    "cwd": project,
+                }),
+                serde_json::json!({
+                    "type": "session_info",
+                    "name": format!("file:///Users/maya/name C:\\Users\\maya\\name Bearer {TEST_TOKEN}"),
+                }),
+                serde_json::json!({
+                    "type": "message",
+                    "message": {
+                        "role": "user",
+                        "content": format!("preview=/Users/maya/secret token={TEST_TOKEN} later={later_id}"),
+                    },
+                }),
+                serde_json::json!({
+                    "type": "message",
+                    "id": later_id,
+                    "message": { "role": "assistant", "content": "done", "stopReason": "stop" },
+                }),
+            ],
+        );
+        authorize(&state).await;
+        let response = router(state)
+            .oneshot(authorized_request(
+                Method::GET,
+                &format!("/v1/sessions?projectId={project_id}"),
+                "7c9b9c14-e910-4be7-8878-5d3ed02b2f02",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let serialized = String::from_utf8(
+            to_bytes(response.into_body(), MAX_HTTP_BODY_BYTES)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        for secret in [
+            "file:///Users/maya/name",
+            r"C:\Users\maya\name",
+            "/Users/maya/secret",
+            TEST_TOKEN,
+            later_id,
+            "pi-header-id",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "leaked {secret}: {serialized}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2346,6 +2545,10 @@ mod tests {
         assert_eq!(messages[1]["toolStatus"], "complete");
         assert_eq!(messages[2]["text"], "safe final summary");
         assert_eq!(messages[2]["isError"], true);
+        assert!(messages.iter().all(|message| message
+            .get("isError")
+            .and_then(serde_json::Value::as_bool)
+            .is_some()));
     }
 
     #[tokio::test]
@@ -2458,6 +2661,154 @@ mod tests {
             response_json(response).await["error"]["code"],
             "host_unavailable"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replacement_between_session_resolution_and_open_is_rejected_before_output() {
+        let _environment_lock = SESSION_DIRECTORY_ENV.lock().unwrap();
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        let sessions = root.path().join("sessions");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&sessions).unwrap();
+        let project = project.canonicalize().unwrap();
+        let sessions = sessions.canonicalize().unwrap();
+        let _override = SessionDirectoryOverride::set(&sessions);
+        let state = state(root.path().to_path_buf()).await;
+        let project_id = sync_project(root.path(), &project, true);
+        let session = sessions.join("active.jsonl");
+        write_session(&session, &project, "old-pi-id", None, None, "old contents");
+        let session_id = sync_session(root.path(), &project_id, &sessions, &session);
+        authorize(&state).await;
+        let app = router(state);
+        let barrier = TranscriptResolutionBarrier {
+            session_id: session_id.clone(),
+            entered: Arc::new(std::sync::Barrier::new(2)),
+            release: Arc::new(std::sync::Barrier::new(2)),
+        };
+        *TEST_TRANSCRIPT_RESOLUTION_BARRIER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(barrier.clone());
+        let _barrier_guard = TranscriptResolutionBarrierGuard;
+        let request_id = "7c9b9c14-e910-4be7-8878-5d3ed02b2f02";
+        let uri = format!("/v1/messages?projectId={project_id}&sessionId={session_id}&limit=10");
+        let request = tokio::spawn({
+            let app = app.clone();
+            async move {
+                app.oneshot(authorized_request(Method::GET, &uri, request_id))
+                    .await
+                    .unwrap()
+            }
+        });
+        let entered = Arc::clone(&barrier.entered);
+        tokio::task::spawn_blocking(move || entered.wait())
+            .await
+            .unwrap();
+
+        let moved = root.path().join("moved.jsonl");
+        std::fs::rename(&session, &moved).unwrap();
+        write_session(
+            &session,
+            &project,
+            "replacement-pi-id",
+            None,
+            None,
+            "REPLACEMENT_DURING_READ_SECRET",
+        );
+        let release = Arc::clone(&barrier.release);
+        tokio::task::spawn_blocking(move || release.wait())
+            .await
+            .unwrap();
+        let response = request.await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = String::from_utf8_lossy(
+            &to_bytes(response.into_body(), MAX_HTTP_BODY_BYTES)
+                .await
+                .unwrap(),
+        )
+        .into_owned();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["error"]["code"],
+            "session_not_found"
+        );
+        assert!(!body.contains("REPLACEMENT_DURING_READ_SECRET"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ordinary_same_path_session_replacement_gets_a_new_opaque_id() {
+        let _environment_lock = SESSION_DIRECTORY_ENV.lock().unwrap();
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        let sessions = root.path().join("sessions");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&sessions).unwrap();
+        let project = project.canonicalize().unwrap();
+        let sessions = sessions.canonicalize().unwrap();
+        let _override = SessionDirectoryOverride::set(&sessions);
+        let state = state(root.path().to_path_buf()).await;
+        let project_id = sync_project(root.path(), &project, true);
+        let session = sessions.join("active.jsonl");
+        write_session(
+            &session,
+            &project,
+            "old-pi-session-id",
+            None,
+            Some("Old session"),
+            "old contents",
+        );
+        let old_session_id = sync_session(root.path(), &project_id, &sessions, &session);
+        state.manager.remote_test_activate(&project, true).await;
+        state
+            .manager
+            .remote_test_observe(
+                &project,
+                &live_state_event(Some(&session), Some("Old session")),
+            )
+            .await;
+        authorize(&state).await;
+        let app = router(state);
+        let moved = root.path().join("moved.jsonl");
+        std::fs::rename(&session, &moved).unwrap();
+        write_session(
+            &session,
+            &project,
+            "replacement-pi-session-id",
+            None,
+            Some("Replacement session"),
+            "REPLACEMENT_SECRET",
+        );
+        let request_id = "7c9b9c14-e910-4be7-8878-5d3ed02b2f02";
+        let messages = app
+            .clone()
+            .oneshot(authorized_request(
+                Method::GET,
+                &format!("/v1/messages?projectId={project_id}&sessionId={old_session_id}&limit=10"),
+                request_id,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(messages.status(), StatusCode::NOT_FOUND);
+        assert!(!String::from_utf8_lossy(
+            &to_bytes(messages.into_body(), MAX_HTTP_BODY_BYTES)
+                .await
+                .unwrap()
+        )
+        .contains("REPLACEMENT_SECRET"));
+
+        let state_response = app
+            .oneshot(authorized_request(
+                Method::GET,
+                &format!("/v1/state?projectId={project_id}"),
+                request_id,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(state_response.status(), StatusCode::OK);
+        let value = response_json(state_response).await;
+        assert_ne!(value["data"]["state"]["sessionId"], old_session_id);
+        assert!(!value.to_string().contains("replacement-pi-session-id"));
     }
 
     #[cfg(unix)]
