@@ -28,7 +28,8 @@ use remote::{
 
 const MAX_RPC_RECORD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SESSION_FILES: usize = 250;
-const MAX_SESSION_SUMMARY_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_SESSION_SUMMARY_SCAN_BYTES: u64 = 2 * 1024 * 1024;
+const SESSION_SUMMARY_HEAD_BYTES: u64 = 512 * 1024;
 const MAX_SESSION_SCAN_BYTES: u64 = 16 * 1024 * 1024;
 const STDERR_CHUNK_BYTES: usize = 8 * 1024;
 const SUBAGENT_TRANSCRIPT_TAIL_BYTES: u64 = 384 * 1024;
@@ -811,7 +812,8 @@ fn read_session_summary_with_budget(
         return None;
     }
     let metadata = fs::metadata(path).ok()?;
-    if metadata.len() > MAX_SESSION_SUMMARY_FILE_BYTES || !budget.reserve(metadata.len()) {
+    let scan_bytes = metadata.len().min(MAX_SESSION_SUMMARY_SCAN_BYTES);
+    if !budget.reserve(scan_bytes) {
         return None;
     }
     let modified = metadata
@@ -826,7 +828,6 @@ fn read_session_summary_with_budget(
         return None;
     }
     let mut chunk = vec![0; 64 * 1024];
-    let mut framer = JsonlFramer::new(MAX_RPC_RECORD_BYTES);
     let mut header_seen = false;
     let mut valid = true;
     let mut id = None;
@@ -837,7 +838,6 @@ fn read_session_summary_with_budget(
     let mut last_final_reply = None;
     let mut last_message_is_subagent_delegation = false;
     let mut redaction_secrets = Vec::new();
-    let mut read_bytes = 0_u64;
 
     {
         let mut consume = |value: Value| {
@@ -907,25 +907,37 @@ fn read_session_summary_with_budget(
             }
         };
 
-        loop {
-            if read_bytes == metadata.len() {
-                break;
-            }
-            let remaining = usize::try_from(metadata.len() - read_bytes).ok()?;
-            let read_limit = remaining.min(chunk.len());
-            let count = file.read(&mut chunk[..read_limit]).ok()?;
-            if count == 0 {
-                return None;
-            }
-            read_bytes = read_bytes.checked_add(u64::try_from(count).ok()?)?;
-            for result in framer.push(&chunk[..count]) {
-                if let Ok(Some(value)) = result {
-                    consume(value);
+        let mut read_segment = |offset: u64, length: u64| -> Option<()> {
+            file.seek(SeekFrom::Start(offset)).ok()?;
+            let mut framer = JsonlFramer::new(MAX_RPC_RECORD_BYTES);
+            let mut read_bytes = 0_u64;
+            while read_bytes < length {
+                let remaining = usize::try_from(length - read_bytes).ok()?;
+                let read_limit = remaining.min(chunk.len());
+                let count = file.read(&mut chunk[..read_limit]).ok()?;
+                if count == 0 {
+                    return None;
+                }
+                read_bytes = read_bytes.checked_add(u64::try_from(count).ok()?)?;
+                for result in framer.push(&chunk[..count]) {
+                    if let Ok(Some(value)) = result {
+                        consume(value);
+                    }
                 }
             }
-        }
-        if let Some(Ok(Some(value))) = framer.finish() {
-            consume(value);
+            if let Some(Ok(Some(value))) = framer.finish() {
+                consume(value);
+            }
+            Some(())
+        };
+
+        if metadata.len() <= MAX_SESSION_SUMMARY_SCAN_BYTES {
+            read_segment(0, metadata.len())?;
+        } else {
+            let head_bytes = SESSION_SUMMARY_HEAD_BYTES.min(scan_bytes);
+            let tail_bytes = scan_bytes.saturating_sub(head_bytes);
+            read_segment(0, head_bytes)?;
+            read_segment(metadata.len().saturating_sub(tail_bytes), tail_bytes)?;
         }
     }
     let current_metadata = fs::metadata(path).ok()?;
@@ -3404,8 +3416,14 @@ async fn get_subagent_runs(session_file: String) -> Result<Vec<Value>, String> {
                 .unwrap_or_default()
         };
         started_at(right).cmp(&started_at(left)).then_with(|| {
-            let left_id = left.get("runId").and_then(Value::as_str).unwrap_or_default();
-            let right_id = right.get("runId").and_then(Value::as_str).unwrap_or_default();
+            let left_id = left
+                .get("runId")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let right_id = right
+                .get("runId")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             left_id.cmp(right_id)
         })
     });
@@ -3819,7 +3837,8 @@ mod tests {
 
     #[test]
     fn delegated_prompt_exposes_an_eight_word_worker_summary() {
-        let prompt = "Worker summary: Repair remote settings layout and validation behavior today now";
+        let prompt =
+            "Worker summary: Repair remote settings layout and validation behavior today now";
         assert_eq!(
             subagent_worker_summary(prompt).as_deref(),
             Some("Repair remote settings layout and validation behavior today")
@@ -4095,14 +4114,24 @@ mod tests {
         assert!(read_session_summary_with_budget(&second, &project, &mut budget).is_none());
 
         let oversized = root.path().join("oversized.jsonl");
-        fs::write(&oversized, &record).unwrap();
-        fs::OpenOptions::new()
-            .write(true)
-            .open(&oversized)
-            .unwrap()
-            .set_len(MAX_SESSION_SUMMARY_FILE_BYTES + 1)
-            .unwrap();
-        assert!(read_session_summary(&oversized, &project).is_none());
+        let large_middle = "x".repeat(2 * 1024 * 1024);
+        fs::write(
+            &oversized,
+            format!(
+                "{record}{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"Restore this session\"}}}}\n\
+                 {{\"type\":\"custom\",\"content\":{}}}\n\
+                 {{\"type\":\"session_info\",\"name\":\"Large readable session\"}}\n\
+                 {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"content\":\"Recovered\",\"stopReason\":\"stop\"}}}}\n",
+                serde_json::to_string(&large_middle).unwrap()
+            ),
+        )
+        .unwrap();
+        assert!(fs::metadata(&oversized).unwrap().len() > MAX_SESSION_SUMMARY_SCAN_BYTES);
+        let summary =
+            read_session_summary(&oversized, &project).expect("summarize a large session");
+        assert_eq!(summary.first_message, "Restore this session");
+        assert_eq!(summary.name.as_deref(), Some("Large readable session"));
+        assert!(summary.last_final_reply.is_some());
     }
 
     #[test]
