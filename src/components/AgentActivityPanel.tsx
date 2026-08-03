@@ -626,8 +626,10 @@ export function AgentActivityPanel({
         ) : (
           visibleRuns.map((run) => {
             const needsAttention = runNeedsAttention(run);
-            const activeSteps = (run.steps ?? [])
+            const orderedSteps = (run.steps ?? [])
               .map((step, index) => ({ step, index: step.index ?? index }))
+              .sort((left, right) => left.index - right.index);
+            const activeSteps = orderedSteps
               .filter(({ step }) => isActive(step.status));
             const finalizing = activeSteps.length > 0 && activeSteps.every(({ step, index }) => {
               const snapshot = activity[`${run.runId}:${index}`];
@@ -647,10 +649,12 @@ export function AgentActivityPanel({
                 <code>{run.runId.slice(0, 8)}</code>
                 <span className={`run-state run-state--${stateClass}`}>{stateLabel}</span>
               </div>
-              {(run.steps?.length ? run.steps : [{ agent: "subagent", status: run.state, startedAt: run.startedAt, error: run.error } as SubagentStepStatus]).map((step, index) => {
-                const childIndex = step.index ?? index;
-                return <AgentCard key={`${run.runId}-${childIndex}`} run={run} step={step} index={childIndex} now={now} activity={activity[`${run.runId}:${childIndex}`]} onSteer={onSteerSubagent} onStop={onStopSubagent} />;
-              })}
+              {(orderedSteps.length > 0
+                ? orderedSteps
+                : [{ step: { agent: "subagent", status: run.state, startedAt: run.startedAt, error: run.error } as SubagentStepStatus, index: 0 }]
+              ).map(({ step, index }) => (
+                <AgentCard key={`${run.runId}-${index}`} run={run} step={step} index={index} now={now} activity={activity[`${run.runId}:${index}`]} onSteer={onSteerSubagent} onStop={onStopSubagent} />
+              ))}
             </section>;
           })
         )}

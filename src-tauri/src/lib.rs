@@ -3375,20 +3375,19 @@ async fn get_subagent_runs(session_file: String) -> Result<Vec<Value>, String> {
         runs.push(status);
     }
 
+    // A run's slot is determined only by immutable identity data. Sorting by
+    // lastUpdate or lifecycle state made active cards trade places on every poll.
     runs.sort_by(|left, right| {
-        let active_rank = |value: &Value| match value.get("state").and_then(Value::as_str) {
-            Some("running" | "queued") => 0,
-            _ => 1,
+        let started_at = |value: &Value| {
+            value
+                .get("startedAt")
+                .and_then(Value::as_u64)
+                .unwrap_or_default()
         };
-        active_rank(left).cmp(&active_rank(right)).then_with(|| {
-            let timestamp = |value: &Value| {
-                value
-                    .get("lastUpdate")
-                    .and_then(Value::as_u64)
-                    .or_else(|| value.get("startedAt").and_then(Value::as_u64))
-                    .unwrap_or_default()
-            };
-            timestamp(right).cmp(&timestamp(left))
+        started_at(right).cmp(&started_at(left)).then_with(|| {
+            let left_id = left.get("runId").and_then(Value::as_str).unwrap_or_default();
+            let right_id = right.get("runId").and_then(Value::as_str).unwrap_or_default();
+            left_id.cmp(right_id)
         })
     });
     runs.truncate(24);

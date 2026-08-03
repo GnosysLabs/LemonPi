@@ -393,7 +393,13 @@ export default function App() {
       const result = asRecord(event.type === "tool_execution_update" ? event.partialResult : event.result);
       const run = foregroundRunFromDetails(result?.details, event.type === "tool_execution_end");
       if (run) {
-        setForegroundRuns((current) => [run, ...current.filter((candidate) => candidate.runId !== run.runId)].slice(0, 8));
+        setForegroundRuns((current) => {
+          const existingIndex = current.findIndex((candidate) => candidate.runId === run.runId);
+          if (existingIndex < 0) return [...current, run].slice(0, 8);
+          const next = [...current];
+          next[existingIndex] = run;
+          return next;
+        });
       }
     }
 
