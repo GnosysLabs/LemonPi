@@ -21,6 +21,7 @@ const MAX_SESSION_FILES: usize = 250;
 const STDERR_CHUNK_BYTES: usize = 8 * 1024;
 const SUBAGENT_TRANSCRIPT_TAIL_BYTES: u64 = 384 * 1024;
 const SUBAGENT_TODO_TAIL_BYTES: u64 = 4 * 1024 * 1024;
+const SUBAGENT_STATUS_EVENT_TAIL_BYTES: u64 = 2 * 1024 * 1024;
 const SUBAGENT_PROMPT_SCAN_BYTES: u64 = 4 * 1024 * 1024;
 const SUBAGENT_PROMPT_MAX_CHARS: usize = 256 * 1024;
 const SUBAGENT_ACTIVITY_EVENTS: usize = 12;
@@ -1408,6 +1409,176 @@ fn read_subagent_activity(path: &Path, key: String) -> SubagentLiveActivity {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct SubagentAttentionEpisode {
+    attention_at: u64,
+    recovered_at: Option<u64>,
+}
+
+fn subagent_event_step(record: &Value) -> Option<usize> {
+    record
+        .get("subagentStepIndex")
+        .and_then(Value::as_u64)
+        .or_else(|| record.pointer("/event/index").and_then(Value::as_u64))
+        .map(|index| index as usize)
+}
+
+fn subagent_event_at(record: &Value) -> Option<u64> {
+    record
+        .get("observedAt")
+        .and_then(Value::as_u64)
+        .or_else(|| record.get("ts").and_then(Value::as_u64))
+        .or_else(|| record.pointer("/event/ts").and_then(Value::as_u64))
+}
+
+fn is_subagent_recovery_event(record: &Value) -> bool {
+    match record.get("type").and_then(Value::as_str) {
+        Some("message_end") => {
+            record.pointer("/message/role").and_then(Value::as_str) == Some("assistant")
+        }
+        Some("tool_execution_start") => !matches!(
+            record.get("toolName").and_then(Value::as_str),
+            Some("contact_supervisor" | "subagent_supervisor" | "intercom")
+        ),
+        _ => false,
+    }
+}
+
+fn subagent_attention_episodes(contents: &str) -> HashMap<usize, SubagentAttentionEpisode> {
+    let mut episodes = HashMap::new();
+    for line in contents.lines() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(index) = subagent_event_step(&record) else {
+            continue;
+        };
+        let Some(at) = subagent_event_at(&record) else {
+            continue;
+        };
+        let needs_attention = record.get("type").and_then(Value::as_str)
+            == Some("subagent.control")
+            && record.pointer("/event/to").and_then(Value::as_str) == Some("needs_attention");
+        if needs_attention {
+            episodes.insert(
+                index,
+                SubagentAttentionEpisode {
+                    attention_at: at,
+                    recovered_at: None,
+                },
+            );
+        } else if is_subagent_recovery_event(&record) {
+            if let Some(episode) = episodes.get_mut(&index) {
+                if at > episode.attention_at {
+                    episode.recovered_at = Some(at);
+                }
+            }
+        }
+    }
+    episodes
+}
+
+fn read_subagent_attention_episodes(path: &Path) -> HashMap<usize, SubagentAttentionEpisode> {
+    let Ok(mut file) = fs::File::open(path) else {
+        return HashMap::new();
+    };
+    let Ok(length) = file.metadata().map(|metadata| metadata.len()) else {
+        return HashMap::new();
+    };
+    let offset = length.saturating_sub(SUBAGENT_STATUS_EVENT_TAIL_BYTES);
+    if file.seek(SeekFrom::Start(offset)).is_err() {
+        return HashMap::new();
+    }
+    let mut contents = String::new();
+    if file.read_to_string(&mut contents).is_err() {
+        return HashMap::new();
+    }
+    let contents = if offset > 0 {
+        contents
+            .split_once('\n')
+            .map(|(_, rest)| rest)
+            .unwrap_or("")
+    } else {
+        contents.as_str()
+    };
+    subagent_attention_episodes(contents)
+}
+
+fn tool_shows_subagent_recovery(tool: Option<&str>) -> bool {
+    tool.is_some_and(|tool| {
+        !matches!(
+            tool,
+            "contact_supervisor" | "subagent_supervisor" | "intercom"
+        )
+    })
+}
+
+fn reconcile_subagent_attention(status: &mut Value, status_path: &Path) {
+    if !matches!(
+        status.get("state").and_then(Value::as_str),
+        Some("running" | "queued")
+    ) {
+        return;
+    }
+    let run_flagged =
+        status.get("activityState").and_then(Value::as_str) == Some("needs_attention");
+    let step_flagged = status
+        .get("steps")
+        .and_then(Value::as_array)
+        .is_some_and(|steps| {
+            steps.iter().any(|step| {
+                step.get("activityState").and_then(Value::as_str) == Some("needs_attention")
+            })
+        });
+    if !run_flagged && !step_flagged {
+        return;
+    }
+
+    let episodes = status_path
+        .parent()
+        .map(|directory| read_subagent_attention_episodes(&directory.join("events.jsonl")))
+        .unwrap_or_default();
+    let mut any_recovered = false;
+    let mut unresolved_step = false;
+    if let Some(steps) = status.get_mut("steps").and_then(Value::as_array_mut) {
+        for (position, step) in steps.iter_mut().enumerate() {
+            if step.get("activityState").and_then(Value::as_str) != Some("needs_attention") {
+                continue;
+            }
+            let index = step
+                .get("index")
+                .and_then(Value::as_u64)
+                .map(|index| index as usize)
+                .unwrap_or(position);
+            let recovered = episodes
+                .get(&index)
+                .is_some_and(|episode| episode.recovered_at.is_some())
+                || tool_shows_subagent_recovery(step.get("currentTool").and_then(Value::as_str));
+            if recovered {
+                if let Some(fields) = step.as_object_mut() {
+                    fields.remove("activityState");
+                }
+                any_recovered = true;
+            } else {
+                unresolved_step = true;
+            }
+        }
+    }
+
+    if run_flagged {
+        let run_tool_recovered =
+            tool_shows_subagent_recovery(status.get("currentTool").and_then(Value::as_str));
+        let episode_recovered = episodes
+            .values()
+            .any(|episode| episode.recovered_at.is_some());
+        if !unresolved_step && (any_recovered || episode_recovered || run_tool_recovered) {
+            if let Some(fields) = status.as_object_mut() {
+                fields.remove("activityState");
+            }
+        }
+    }
+}
+
 #[tauri::command]
 async fn get_subagent_activity(
     project: String,
@@ -2662,6 +2833,11 @@ async fn get_subagent_runs(session_file: String) -> Result<Vec<Value>, String> {
         if status.get("sessionId").and_then(Value::as_str) != Some(session_file.as_str()) {
             continue;
         }
+        // pi-subagents 0.40 can leave activityState latched at
+        // `needs_attention` after the child has resumed. Reconcile the public
+        // status with its append-only lifecycle stream so Command Center shows
+        // an incident only until that same child produces new work.
+        reconcile_subagent_attention(&mut status, &path);
         let prompts = path.parent().map(read_subagent_prompts).unwrap_or_default();
         if let Some(steps) = status.get_mut("steps").and_then(Value::as_array_mut) {
             for (index, step) in steps.iter_mut().enumerate() {
@@ -2807,6 +2983,67 @@ mod tests {
             npm_package_name("npm:@scope/tools@2.0.0"),
             Some("@scope/tools")
         );
+    }
+
+    #[test]
+    fn attention_episode_recovers_only_after_new_child_work() {
+        let waiting = r#"{"type":"subagent.control","event":{"to":"needs_attention","ts":100,"index":0}}
+{"type":"message_end","observedAt":101,"subagentStepIndex":0,"message":{"role":"toolResult"}}
+{"type":"tool_execution_start","observedAt":102,"subagentStepIndex":0,"toolName":"contact_supervisor"}"#;
+        let waiting_episode = subagent_attention_episodes(waiting)
+            .get(&0)
+            .copied()
+            .expect("attention episode");
+        assert_eq!(waiting_episode.attention_at, 100);
+        assert_eq!(waiting_episode.recovered_at, None);
+
+        let recovered = format!(
+            "{waiting}\n{{\"type\":\"message_end\",\"observedAt\":103,\"subagentStepIndex\":0,\"message\":{{\"role\":\"assistant\"}}}}"
+        );
+        assert_eq!(
+            subagent_attention_episodes(&recovered)
+                .get(&0)
+                .and_then(|episode| episode.recovered_at),
+            Some(103)
+        );
+
+        let needs_attention_again = format!(
+            "{recovered}\n{{\"type\":\"subagent.control\",\"event\":{{\"to\":\"needs_attention\",\"ts\":104,\"index\":0}}}}"
+        );
+        assert_eq!(
+            subagent_attention_episodes(&needs_attention_again)
+                .get(&0)
+                .and_then(|episode| episode.recovered_at),
+            None
+        );
+    }
+
+    #[test]
+    fn reconciles_latched_attention_after_recovery() {
+        let root =
+            env::temp_dir().join(format!("lemonpi-attention-recovery-{}", std::process::id()));
+        fs::create_dir_all(&root).expect("create attention fixture");
+        fs::write(
+            root.join("events.jsonl"),
+            "{\"type\":\"subagent.control\",\"event\":{\"to\":\"needs_attention\",\"ts\":100,\"index\":0}}\n{\"type\":\"tool_execution_start\",\"observedAt\":110,\"subagentStepIndex\":0,\"toolName\":\"bash\"}\n",
+        )
+        .expect("write attention events");
+        let status_path = root.join("status.json");
+        let mut status = json!({
+            "state": "running",
+            "activityState": "needs_attention",
+            "steps": [{
+                "agent": "worker",
+                "status": "running",
+                "activityState": "needs_attention"
+            }]
+        });
+
+        reconcile_subagent_attention(&mut status, &status_path);
+
+        assert!(status.get("activityState").is_none());
+        assert!(status["steps"][0].get("activityState").is_none());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
