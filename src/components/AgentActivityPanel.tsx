@@ -46,6 +46,16 @@ function formatElapsed(start?: number, end?: number, now = Date.now()): string {
   return `${minutes}m ${remainder}s`;
 }
 
+const clockTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+function formatClockTime(timestamp: number): string {
+  return clockTimeFormatter.format(new Date(timestamp));
+}
+
 function shortModel(model?: string): string | undefined {
   if (!model) return undefined;
   return model.split("/").at(-1)?.replace(/:([a-z]+)$/i, "");
@@ -542,7 +552,9 @@ function AgentCard({
                       <div className="agent-activity-event__body">
                         <div className="agent-activity-event__meta">
                           <span>{label}</span>
-                          <time>{formatElapsed(event.at, undefined, now)} ago</time>
+                          <time dateTime={new Date(event.at).toISOString()} title={new Date(event.at).toLocaleString()}>
+                            {formatClockTime(event.at)}
+                          </time>
                         </div>
                         <div className="agent-activity-event__text">
                           <ReactMarkdown>{event.text}</ReactMarkdown>
