@@ -868,6 +868,16 @@ export function missionHasActiveOwnership(input: {
     || input.recordedWriterActive;
 }
 
+export type AuthoritativeRuntimeWorkerState = "active" | "idle" | "unknown";
+
+export function authoritativeRuntimeWorkerState(value: unknown): AuthoritativeRuntimeWorkerState {
+  const root = asRecord(value);
+  const fleet = asRecord(root?.fleet);
+  const totalActive = fleet?.totalActive;
+  if (typeof totalActive !== "number" || !Number.isSafeInteger(totalActive) || totalActive < 0) return "unknown";
+  return totalActive > 0 ? "active" : "idle";
+}
+
 function delegationRunId(value: unknown): string | undefined {
   const result = asRecord(value);
   const details = asRecord(result?.details);
@@ -1090,6 +1100,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   let mission: MissionState | undefined;
   let mainAgentRunning = false;
   let lastMissionWakeAt = 0;
+  let missionWakeCheck: Promise<boolean> | undefined;
+  let missionWakeGeneration = 0;
   let restoreWakeTimer: ReturnType<typeof setTimeout> | undefined;
   let restoreReconcileGeneration = 0;
   const activeDelegationRuns = new Set<string>();
@@ -1147,29 +1159,55 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     recordedWriterActive: mission?.writerActive ?? false,
   });
 
-  const requestMissionWake = (reason: "plan" | "integration"): boolean => {
-    if (!mission || mainAgentRunning) return false;
-    if (missionHasOwnedWork() || !missionNeedsMain()) return false;
-    if (lastAssistantStopReason === "aborted" || lastAssistantStopReason === "error") return false;
-    if (mission.wakeAttempts >= 3) {
-      mission.phase = "paused";
+  const requestMissionWake = (reason: "plan" | "integration"): Promise<boolean> => {
+    if (missionWakeCheck) return Promise.resolve(false);
+    if (!mission || mainAgentRunning) return Promise.resolve(false);
+    if (missionHasOwnedWork() || !missionNeedsMain()) return Promise.resolve(false);
+    if (lastAssistantStopReason === "aborted" || lastAssistantStopReason === "error") return Promise.resolve(false);
+
+    const missionId = mission.id;
+    const generation = missionWakeGeneration;
+    const pending = (async () => {
+      let runtimeStatus: unknown;
+      try {
+        runtimeStatus = await requestSubagentStatus(pi);
+      } catch {
+        // Synthetic wakes are optional recovery. If the authoritative runtime
+        // cannot be queried, fail closed instead of waking Main Pi from stale
+        // mission or checklist state.
+        return false;
+      }
+
+      if (authoritativeRuntimeWorkerState(runtimeStatus) !== "idle") return false;
+      if (generation !== missionWakeGeneration || !mission || mission.id !== missionId || mainAgentRunning) return false;
+      if (missionHasOwnedWork() || !missionNeedsMain()) return false;
+      if (lastAssistantStopReason === "aborted" || lastAssistantStopReason === "error") return false;
+      if (mission.wakeAttempts >= 3) {
+        mission.phase = "paused";
+        persistMission();
+        return false;
+      }
+      const now = Date.now();
+      if (now - lastMissionWakeAt < 4_000) return false;
+      mission.wakeAttempts += 1;
       persistMission();
-      return false;
-    }
-    const now = Date.now();
-    if (now - lastMissionWakeAt < 4_000) return false;
-    mission.wakeAttempts += 1;
-    persistMission();
-    lastMissionWakeAt = now;
-    const task = mission.remainingTask;
-    const content = reason === "integration"
-      ? MISSION_INTEGRATION
-      : `${PLAN_CONTINUATION}${task ? `\n\nStranded task #${task.id}: ${task.subject} (${task.status})` : ""}`;
-    pi.sendMessage(
-      { customType: `lemonpi-mission-${reason}`, content, display: false },
-      { deliverAs: "followUp", triggerTurn: true },
-    );
-    return true;
+      lastMissionWakeAt = now;
+      const resolvedReason = mission.phase === "integration" ? "integration" : reason;
+      const task = mission.remainingTask;
+      const content = resolvedReason === "integration"
+        ? MISSION_INTEGRATION
+        : `${PLAN_CONTINUATION}${task ? `\n\nStranded task #${task.id}: ${task.subject} (${task.status})` : ""}`;
+      pi.sendMessage(
+        { customType: `lemonpi-mission-${resolvedReason}`, content, display: false },
+        { deliverAs: "followUp", triggerTurn: true },
+      );
+      return true;
+    })();
+    missionWakeCheck = pending;
+    void pending.finally(() => {
+      if (missionWakeCheck === pending) missionWakeCheck = undefined;
+    });
+    return pending;
   };
 
   const sendRestoreIntervention = (missionId: string, runId: string | undefined, reason: string) => {
@@ -1207,7 +1245,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       mission.writerActive = false;
       writerOccupied = false;
       persistMission();
-      requestMissionWake(mission.phase === "integration" ? "integration" : "plan");
+      await requestMissionWake(mission.phase === "integration" ? "integration" : "plan");
       return;
     }
 
@@ -1270,11 +1308,13 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     } else if (intervention) {
       sendRestoreIntervention(missionId, intervention.runId, intervention.reason);
     } else if (terminal.length === 0 && mission.activeRunIds.length === 0) {
-      requestMissionWake("integration");
+      await requestMissionWake("integration");
     }
   };
 
   const restoreMission = (ctx: { sessionManager: { getBranch(): Iterable<unknown> } }) => {
+    missionWakeGeneration += 1;
+    missionWakeCheck = undefined;
     const restored = replayMissionState(ctx.sessionManager.getBranch());
     restoreReconcileGeneration += 1;
     const generation = restoreReconcileGeneration;
@@ -1310,10 +1350,12 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
 
   const missionScheduler = setInterval(() => {
     if (!missionNeedsMain() || mainAgentRunning || missionHasOwnedWork()) return;
-    requestMissionWake(mission?.phase === "integration" ? "integration" : "plan");
+    void requestMissionWake(mission?.phase === "integration" ? "integration" : "plan");
   }, 5_000);
 
   pi.on("session_shutdown", async () => {
+    missionWakeGeneration += 1;
+    missionWakeCheck = undefined;
     if (restoreWakeTimer) clearTimeout(restoreWakeTimer);
     clearInterval(missionScheduler);
   });
@@ -1929,7 +1971,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     }) && strandedPlanTask) {
       const currentMission = ensureMission("planning");
       currentMission.remainingTask = { ...strandedPlanTask };
-      if (requestMissionWake("plan")) {
+      if (await requestMissionWake("plan")) {
         planContinuationAttempts += 1;
         return;
       }
@@ -1939,7 +1981,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         mission.phase = "complete";
         mission.wakeAttempts = 0;
         persistMission();
-      } else if (requestMissionWake("integration")) {
+      } else if (await requestMissionWake("integration")) {
         return;
       }
     }

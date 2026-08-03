@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  authoritativeRuntimeWorkerState,
   asyncWriterLaunchFailure,
   appendCheckoutSnapshot,
   applyDelegationSafetyContracts,
@@ -136,6 +137,10 @@ assert.equal(shouldSuppressStatusPoll(false, "status"), false);
 assert.equal(missionHasActiveOwnership({ activeDelegationCount: 0, recordedRunCount: 1, writerOccupied: false, recordedWriterActive: false }), true);
 assert.equal(missionHasActiveOwnership({ activeDelegationCount: 0, recordedRunCount: 0, writerOccupied: false, recordedWriterActive: true }), true);
 assert.equal(missionHasActiveOwnership({ activeDelegationCount: 0, recordedRunCount: 0, writerOccupied: false, recordedWriterActive: false }), false);
+assert.equal(authoritativeRuntimeWorkerState({ fleet: { version: 1, entries: [{}], totalActive: 1, omitted: 0 } }), "active");
+assert.equal(authoritativeRuntimeWorkerState({ fleet: { version: 1, entries: [], totalActive: 0, omitted: 0 } }), "idle");
+assert.equal(authoritativeRuntimeWorkerState({ fleet: { version: 1, entries: [], totalActive: -1, omitted: 0 } }), "unknown");
+assert.equal(authoritativeRuntimeWorkerState({ text: "No active async runs." }), "unknown");
 
 const lane = (outcome, paths) => ({
   agent: "worker",
