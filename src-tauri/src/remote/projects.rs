@@ -44,6 +44,7 @@ pub(crate) struct SessionSyncInput {
 pub(crate) struct RemoteProjectSummary {
     project_id: String,
     display_name: String,
+    display_path: String,
     trust_state: &'static str,
     is_active: bool,
 }
@@ -443,8 +444,8 @@ impl ProjectCatalog {
         (current_directory == stored_directory).then_some(current_directory)
     }
 
-    /// Resolves one revalidated project to the frozen protocol projection without exposing its
-    /// internal binding or filesystem path.
+    /// Resolves one revalidated project to the frozen protocol projection. Its display path is
+    /// presentation-only metadata and never becomes a resolution input.
     pub(crate) fn safe_project(
         &self,
         project_id: &str,
@@ -454,6 +455,7 @@ impl ProjectCatalog {
         Some(ProjectSummary {
             project_id: binding.id,
             display_name: project_display_name(&binding.path),
+            display_path: project_display_path(&binding.path),
             trust_state: if binding.trusted {
                 TrustState::Trusted
             } else {
@@ -463,7 +465,8 @@ impl ProjectCatalog {
         })
     }
 
-    /// Safe wire-ready summaries; no filesystem locations are exposed.
+    /// Safe wire-ready summaries. `display_path` is explicit display-only metadata; opaque IDs
+    /// remain the only inputs accepted for project resolution.
     pub(crate) fn safe_projects(&self, active: Option<&Path>) -> Vec<RemoteProjectSummary> {
         self.document
             .projects
@@ -473,6 +476,7 @@ impl ProjectCatalog {
                 Some(RemoteProjectSummary {
                     project_id: binding.id,
                     display_name: project_display_name(&binding.path),
+                    display_path: project_display_path(&binding.path),
                     trust_state: if binding.trusted {
                         "trusted"
                     } else {
@@ -511,6 +515,36 @@ fn project_display_name(path: &Path) -> String {
         .filter(|name| !name.trim().is_empty())
         .unwrap_or("Project")
         .to_string()
+}
+
+/// Mirrors the desktop web rail's project-path presentation without changing the canonical path
+/// retained for revalidation. This string is display-only and is never used for lookup.
+fn project_display_path(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let display_path = if normalized
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("//?/UNC/"))
+    {
+        format!("//{}", &normalized[8..])
+    } else {
+        normalized
+            .strip_prefix("//?/")
+            .unwrap_or(&normalized)
+            .to_string()
+    };
+
+    for home in ["/Users/", "/home/"] {
+        if let Some(rest) = display_path.strip_prefix(home) {
+            if let Some(separator) = rest.find('/') {
+                if separator > 0 {
+                    return format!("~{}", &rest[separator..]);
+                }
+            } else if !rest.is_empty() {
+                return "~".to_string();
+            }
+        }
+    }
+    display_path
 }
 
 fn canonical_directory(path: &Path) -> Option<PathBuf> {
@@ -705,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn project_sync_has_a_hard_one_hundred_project_limit_and_safe_serialization() {
+    fn project_sync_has_a_hard_one_hundred_project_limit_and_display_only_paths() {
         let root = tempdir().unwrap();
         let storage = tempdir().unwrap();
         let mut inputs = Vec::new();
@@ -717,9 +751,39 @@ mod tests {
         let mut catalog = ProjectCatalog::load_or_create(storage.path()).unwrap();
         let summaries = catalog.sync_projects(&inputs, None).unwrap();
         assert_eq!(summaries.len(), MAX_KNOWN_PROJECTS);
-        let serialized = serde_json::to_string(&summaries).unwrap();
-        assert!(!serialized.contains(&root.path().to_string_lossy().to_string()));
-        assert!(!serialized.contains("path"));
+        let summary = serde_json::to_value(&summaries[0]).unwrap();
+        let project_id = summary["projectId"].as_str().unwrap();
+        let display_path = summary["displayPath"].as_str().unwrap();
+        assert_eq!(
+            display_path,
+            project_display_path(&root.path().join("project-0").canonicalize().unwrap())
+        );
+        assert!(summary.get("path").is_none());
+        assert!(catalog.resolve_project_path(display_path).is_none());
+        assert_eq!(
+            catalog.resolve_project_path(project_id),
+            Some(root.path().join("project-0").canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn display_paths_match_desktop_rail_normalization_and_home_abbreviation() {
+        assert_eq!(
+            project_display_path(Path::new("/Users/christopher/Dev/LemonPi")),
+            "~/Dev/LemonPi"
+        );
+        assert_eq!(
+            project_display_path(Path::new("/home/maya/work/LemonPi")),
+            "~/work/LemonPi"
+        );
+        assert_eq!(
+            project_display_path(Path::new(r"\\?\C:\Users\Christopher\Finches")),
+            "C:/Users/Christopher/Finches"
+        );
+        assert_eq!(
+            project_display_path(Path::new(r"\\?\UNC\server\share\Finches")),
+            "//server/share/Finches"
+        );
     }
 
     #[test]

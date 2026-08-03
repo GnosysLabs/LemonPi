@@ -6,9 +6,9 @@ This document is the normative wire contract for LemonPi Go and the opt-in Lemon
 
 - Protocol version is the JSON integer `1`. It is carried in every HTTP response envelope, every `X-LemonPi-Protocol` response header, and the first WebSocket `hello` message.
 - The bridge exposes one configured TLS port, defaulting to **8787**. All paths below are relative to `https://HOST:PORT`; the event stream is `wss://HOST:PORT/v1/events`.
-- The host is authoritative for projects, project labels, project trust state, running-process state, sessions, timestamps, and Pi correlation IDs.
-- `projectId` and `sessionId` are opaque host-issued identifiers. Clients must treat them as uninterpreted strings matching `[A-Za-z0-9_-]{1,128}`. They are never filesystem paths or encodings of paths.
-- The API never accepts or returns filesystem paths, session-file paths, transcript paths, private keys, certificate private-key data, token digests, raw configuration paths, shell commands, package/settings mutation, or trust-escalation fields.
+- The host is authoritative for projects, project labels and display paths, project trust state, running-process state, sessions, timestamps, and Pi correlation IDs.
+- `projectId` and `sessionId` are opaque host-issued identifiers. Clients must treat them as uninterpreted strings matching `[A-Za-z0-9_-]{1,128}`. They are never filesystem paths or encodings of paths, and only these opaque IDs are accepted for project/session resolution.
+- The API never accepts filesystem paths, session-file paths, transcript paths, private keys, certificate private-key data, token digests, raw configuration paths, shell commands, package/settings mutation, or trust-escalation fields. Project summaries explicitly return `displayPath` as display-only host metadata; it is never accepted back as authority or used for resolution.
 - JSON is UTF-8. JSON request bodies have `Content-Type: application/json`; a POST without that media type is rejected with `415 unsupported_content_type`. Successful JSON responses have `Content-Type: application/json; charset=utf-8`.
 - Every HTTP request and WebSocket upgrade request must include `X-LemonPi-Protocol: 1` and `X-LemonPi-Request-Id: UUID`. UUIDs use the canonical RFC 4122 string form. Validation is ordered: the protocol header is checked first, then the request-ID header, then endpoint processing. A missing, malformed, or non-`1` protocol header is rejected with `426 unsupported_protocol_version`. When the protocol header is accepted, a missing or malformed request-ID header is rejected with `400 malformed_request`.
 - Unknown JSON fields are ignored. Known fields with an invalid type, invalid value, or invalid required-field absence produce `400 malformed_request`.
@@ -173,6 +173,7 @@ On success (`201 Created`), `data` contains:
     {
       "projectId": "project_aJ8nQ2",
       "displayName": "LemonPi",
+      "displayPath": "~/Dev/LemonPi",
       "trustState": "trusted",
       "isActive": true
     }
@@ -181,7 +182,9 @@ On success (`201 Created`), `data` contains:
 }
 ```
 
-`trustState` is one of `trusted` or `untrusted`; it is display-only host state and is not mutable through this protocol.
+`displayPath` is required human-readable presentation metadata derived only from the host's revalidated canonical project binding. The host normalizes backslashes to slashes, strips Windows extended path prefixes, and abbreviates `/Users/<user>` and `/home/<user>` as `~`. It is never a resolution input: clients must not submit it back to the host or treat it as authority; `projectId` remains the only project-resolution input. Clients must decode `displayPath` as optional to remain compatible with hosts running an older build that predates this field.
+
+`trustState` is one of `trusted` or `untrusted`; it is display-only host state and is not mutable through this protocol. `trustState` and `isActive` remain on the wire for compatibility.
 
 ### `GET /v1/sessions?projectId=OPAQUE_ID` — authenticated session catalogue
 
@@ -217,6 +220,7 @@ Clients obtain the opaque `sessionId` values used by `switch_session` and `GET /
   "project": {
     "projectId": "project_aJ8nQ2",
     "displayName": "LemonPi",
+    "displayPath": "~/Dev/LemonPi",
     "trustState": "trusted",
     "isActive": true
   },
@@ -246,7 +250,7 @@ Clients obtain the opaque `sessionId` values used by `switch_session` and `GET /
 }
 ```
 
-`role` is exactly `user`, `assistant`, or `tool`. `thinking`, `toolName`, and `toolStatus` are omitted when inapplicable; `toolStatus`, when present, is exactly `queued`, `running`, `complete`, or `error`. `text` is always present and may be empty. Attachments, tool arguments, raw tool output, message details, and all paths are excluded from this v1 projection. This endpoint is intended for rehydration after a stream gap and never includes a transcript path.
+`role` is exactly `user`, `assistant`, or `tool`. `thinking`, `toolName`, and `toolStatus` are omitted when inapplicable; `toolStatus`, when present, is exactly `queued`, `running`, `complete`, or `error`. `text` is always present and may be empty. For tool results, only bounded, sanitized display text may be included; raw tool output, details, and arguments remain excluded. Attachments, arbitrary message fields, and all paths are excluded from this v1 projection. This endpoint is intended for rehydration after a stream gap and never includes a transcript path.
 
 ### `POST /v1/rpc` — authenticated asynchronous Pi command
 

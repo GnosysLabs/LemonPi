@@ -550,6 +550,10 @@ fn consume_transcript_record(
                 .iter_mut()
                 .find(|candidate| candidate.safe.message_id == message_id)
             {
+                let text = display_content(message.get("content"));
+                tool.safe.text = sanitizer
+                    .sanitize(&strip_attachment_wrappers(&text), MAX_MESSAGE_TEXT_SCALARS)
+                    .unwrap_or_default();
                 let is_error = message.get("isError").and_then(Value::as_bool) == Some(true);
                 tool.safe.is_error = Some(is_error);
                 tool.safe.tool_status =
@@ -1562,7 +1566,12 @@ mod tests {
                 "message": {
                     "role": "toolResult",
                     "toolCallId": "raw-tool-call-id",
-                    "content": [{ "type": "text", "text": "raw-tool-result-output" }],
+                    "content": [
+                        { "type": "text", "text": format!("Safe tool result\u{0007} at {} for raw-pi-session-id raw-tool-call-id <lemonpi-attachment name=\"private.txt\">hidden-tool-attachment</lemonpi-attachment>", session_text) },
+                        { "type": "image", "data": "raw-tool-result-image" },
+                    ],
+                    "output": "raw-tool-result-output",
+                    "arguments": { "secret": "raw-tool-result-arguments" },
                     "details": { "secret": "raw-tool-result-details" },
                     "isError": false,
                 },
@@ -1610,7 +1619,10 @@ mod tests {
         assert_eq!(first[1].is_error, Some(false));
         assert_eq!(first[2].tool_name.as_deref(), Some("safe_tool"));
         assert_eq!(first[2].tool_status.as_deref(), Some("complete"));
-        assert_eq!(first[2].text, "");
+        assert_eq!(
+            first[2].text,
+            "Safe tool result at [redacted] for [redacted] [redacted]"
+        );
         assert_eq!(first[2].is_error, Some(false));
         assert_eq!(first[3].tool_status.as_deref(), Some("queued"));
         assert_eq!(first[4].is_error, Some(true));
@@ -1634,7 +1646,10 @@ mod tests {
             "raw-tool-arguments",
             "queued-tool-arguments",
             "raw-tool-result-output",
+            "raw-tool-result-arguments",
             "raw-tool-result-details",
+            "hidden-tool-attachment",
+            "raw-tool-result-image",
             "attachment-secret",
             "attachment-image-bytes",
             "assistant-image-bytes",

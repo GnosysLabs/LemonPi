@@ -1,28 +1,37 @@
 //! The deliberately small, pinned-TLS HTTP surface for LemonPi Go v1.
 //!
-//! This module owns only `/health`, `/pair`, `/projects`, and authenticated read-only hydration
-//! routes. It deliberately has no generic Pi command, filesystem, settings, or WebSocket route.
-//! Internal paths remain confined to crate-private code; handlers serialize only safe projections.
+//! This module owns the small HTTP catalogue/hydration surface, one authenticated allowlisted Pi
+//! command route, and the authenticated server-only event WebSocket. It deliberately has no generic
+//! Pi command, filesystem, or settings route. Internal paths remain confined to crate-private code;
+//! handlers serialize only strict safe projections.
 
 use super::{
     auth::{DeviceStore, PairingAttempt, PairingWindow},
     config::{AccessMode, RemoteConfig},
+    events::{
+        EventEnvelope as InternalEventEnvelope, EventHub, EventKind as InternalEventKind,
+        EVENT_SOCKET_CAPACITY,
+    },
     hydration::{self, HydrationError},
     identity::HostIdentity,
     policy::allows_peer,
     projects::{InternalProjectBinding, ProjectCatalog, RemoteProjectSummary, SessionSyncInput},
     protocol::{
-        Capability, Envelope, Health, Limits, MessagesResponse, PairRequest, PairResponse,
-        PairedDevice, ProjectSummary, ProtocolError, SafeMessage, SessionState, SessionSummary,
-        SessionsResponse, StateResponse,
+        Capability, Envelope, EventEnvelope as WireEventEnvelope, EventKind as WireEventKind,
+        EventPayload, Health, Hello, Limits, MessagesResponse, PairRequest, PairResponse,
+        PairedDevice, ProjectSummary, ProjectedPiEvent, ProtocolError, RpcAccepted, RpcRequest,
+        SafeMessage, SessionState, SessionSummary, SessionsResponse, StateResponse,
     },
     RemoteError, RemoteResult,
 };
 use crate::{list_pi_sessions_sync, session_directory, PiManager, PiSessionSummary};
 use axum::{
     body::{to_bytes, Body},
-    extract::{ConnectInfo, State},
-    http::{header, HeaderMap, Method, StatusCode, Uri},
+    extract::{
+        ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade},
+        ConnectInfo, State,
+    },
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri},
     response::Response,
     routing::{get, post},
     Router,
@@ -49,21 +58,22 @@ use time::{
 };
 use tokio::{
     net::TcpStream,
-    sync::{watch, Mutex},
+    sync::{broadcast, watch, Mutex, OwnedSemaphorePermit},
 };
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
 use uuid::Uuid;
 
 pub(crate) const MAX_HTTP_BODY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PROMPT_BYTES: usize = 256 * 1024;
 /// Slow allowed peers must complete TLS before consuming a server task indefinitely.
 pub(crate) const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-/// This current slice has only short request/response routes. A future WebSocket stream must
-/// explicitly replace this policy rather than silently inheriting a 60-second HTTP deadline.
+/// Slow HTTP connections must finish request/response service within this deadline. Hyper hands
+/// upgraded WebSocket tasks off after the 101 response, so event sockets are not bounded by it.
 pub(crate) const HTTP_CONNECTION_LIFETIME: Duration = Duration::from_secs(60);
 pub(crate) const EVENT_ENVELOPE_BYTES: u64 = 1024 * 1024;
 pub(crate) const DEVICE_LIMIT: u64 = 16;
-pub(crate) const SOCKET_LIMIT: u64 = 8;
+pub(crate) const SOCKET_LIMIT: u64 = EVENT_SOCKET_CAPACITY as u64;
 pub(crate) const REPLAY_EVENT_LIMIT: u64 = 4096;
 pub(crate) const BROADCAST_QUEUE_LIMIT: u64 = 1024;
 
@@ -73,7 +83,12 @@ const CAPABILITIES_HEADER: &str = "x-lemonpi-capabilities";
 
 /// Only capabilities backed by this listener slice are advertised. The frozen model accepts the
 /// complete v1 token vocabulary, but an unfinished capability is never advertised as available.
-const AVAILABLE_CAPABILITIES: &[Capability] = &[Capability::Projects, Capability::State];
+const AVAILABLE_CAPABILITIES: &[Capability] = &[
+    Capability::Projects,
+    Capability::State,
+    Capability::Rpc,
+    Capability::Events,
+];
 
 #[derive(Clone)]
 pub(crate) struct BridgeState {
@@ -139,6 +154,24 @@ struct MessagesQuery {
     limit: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RpcResourceError {
+    ProjectNotFound,
+    SessionNotFound,
+    HostUnavailable,
+}
+
+struct RpcResource {
+    project: InternalProjectBinding,
+    session_path: PathBuf,
+}
+
+enum ValidatedRpcCommand {
+    Prompt(String),
+    Abort,
+    SwitchSession,
+}
+
 #[cfg(test)]
 #[derive(Clone)]
 struct TranscriptResolutionBarrier {
@@ -189,6 +222,8 @@ pub(crate) fn router(state: BridgeState) -> Router {
         .route("/v1/sessions", get(sessions))
         .route("/v1/state", get(state_snapshot))
         .route("/v1/messages", get(messages))
+        .route("/v1/rpc", post(rpc))
+        .route("/v1/events", get(events))
         .with_state(state)
 }
 
@@ -755,6 +790,972 @@ async fn messages(
             accepted_capabilities: context.accepted_capabilities,
         },
     )
+}
+
+async fn events(
+    State(state): State<BridgeState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    uri: Uri,
+    websocket: Result<
+        WebSocketUpgrade,
+        axum::extract::ws::rejection::WebSocketUpgradeRejection,
+    >,
+) -> Response {
+    let context = match validate_request(&headers, peer, state.config.access_mode) {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    let Some(authentication) = authentication_lease(&headers, &state).await else {
+        return unauthenticated(&context.request_id);
+    };
+    let since = match event_since_query(&uri) {
+        Some(since) => since,
+        None => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                &context.request_id,
+                "malformed_request",
+                "The event stream request is invalid.",
+                false,
+            )
+        }
+    };
+    let websocket = match websocket {
+        Ok(websocket) => websocket,
+        Err(_) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                &context.request_id,
+                "malformed_request",
+                "The event stream request is invalid.",
+                false,
+            )
+        }
+    };
+
+    let hub = state.manager.remote_event_hub();
+    let Some(socket_permit) = hub.try_acquire_socket() else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &context.request_id,
+            "socket_limit_reached",
+            "The host cannot accept another event stream right now.",
+            true,
+        );
+    };
+    // Subscribe before selecting the hello cutoff so publication cannot race between replay and
+    // the live receiver. Authorization remains leased through all pre-upgrade validation.
+    let receiver = hub.subscribe();
+    let cutoff = hub.high_water_seq();
+    if since.is_some_and(|since| since > cutoff) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            &context.request_id,
+            "malformed_request",
+            "The event stream request is invalid.",
+            false,
+        );
+    }
+    drop(authentication);
+
+    let storage = state.storage.clone();
+    let host_id = state.identity.host_id().to_string();
+    let capabilities = context.accepted_capabilities;
+    let request_id = context.request_id;
+    let mut response = websocket
+        .max_message_size(1024)
+        .max_frame_size(1024)
+        .on_upgrade(move |socket| {
+            serve_event_socket(
+                socket,
+                socket_permit,
+                hub,
+                receiver,
+                storage,
+                host_id,
+                capabilities,
+                since,
+                cutoff,
+            )
+        });
+    response
+        .headers_mut()
+        .insert(PROTOCOL_HEADER, HeaderValue::from_static("1"));
+    if let Ok(value) = request_id.parse::<HeaderValue>() {
+        response.headers_mut().insert(REQUEST_ID_HEADER, value);
+    }
+    response
+}
+
+/// `Some(None)` is the valid query-less form, `Some(Some(_))` is one exact decimal UInt64, and
+/// `None` rejects duplicate, encoded, signed, overflowing, or otherwise malformed values.
+fn event_since_query(uri: &Uri) -> Option<Option<u64>> {
+    let Some(query) = uri.query() else {
+        return Some(None);
+    };
+    let value = query.strip_prefix("since=")?;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse::<u64>().ok().map(Some)
+}
+
+fn event_socket_limits() -> Limits {
+    Limits {
+        http_body_bytes: None,
+        event_envelope_bytes: EVENT_ENVELOPE_BYTES,
+        devices: None,
+        sockets: None,
+        replay_events: REPLAY_EVENT_LIMIT,
+        broadcast_queue: BROADCAST_QUEUE_LIMIT,
+    }
+}
+
+async fn serve_event_socket(
+    mut socket: WebSocket,
+    _socket_permit: OwnedSemaphorePermit,
+    hub: EventHub,
+    mut receiver: broadcast::Receiver<InternalEventEnvelope>,
+    storage: PathBuf,
+    host_id: String,
+    capabilities: Vec<Capability>,
+    since: Option<u64>,
+    cutoff: u64,
+) {
+    let hello = Hello {
+        message_type: "hello".to_string(),
+        protocol: super::protocol::PROTOCOL_VERSION,
+        host_id,
+        high_water_seq: cutoff,
+        accepted_capabilities: capabilities,
+        limits: event_socket_limits(),
+    };
+    let Ok(hello) = serde_json::to_string(&hello) else {
+        close_event_socket(&mut socket, close_code::ERROR).await;
+        return;
+    };
+    if socket.send(Message::Text(hello.into())).await.is_err() {
+        return;
+    }
+
+    let replay_since = since.unwrap_or(cutoff);
+    let replay = hub.replay_through(replay_since, cutoff);
+    let mut cursor = replay_since;
+    let mut skip_through = cutoff;
+    for event in replay {
+        cursor = cursor.max(event.seq);
+        if event.kind == InternalEventKind::Gap {
+            skip_through = skip_through.max(event.seq);
+        }
+        if !send_internal_event(&mut socket, &storage, event).await {
+            return;
+        }
+    }
+
+    loop {
+        enum SocketAction {
+            Incoming(Option<Result<Message, axum::Error>>),
+            Event(Result<InternalEventEnvelope, broadcast::error::RecvError>),
+        }
+        let action = tokio::select! {
+            incoming = socket.recv() => SocketAction::Incoming(incoming),
+            event = receiver.recv() => SocketAction::Event(event),
+        };
+        match action {
+            SocketAction::Incoming(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => {}
+            SocketAction::Incoming(Some(Ok(Message::Close(frame)))) => {
+                let _ = socket.send(Message::Close(frame)).await;
+                return;
+            }
+            SocketAction::Incoming(Some(Ok(Message::Text(_) | Message::Binary(_)))) => {
+                close_event_socket(&mut socket, close_code::POLICY).await;
+                return;
+            }
+            SocketAction::Incoming(Some(Err(_)) | None) => return,
+            SocketAction::Event(Ok(event)) => {
+                if event.seq <= skip_through {
+                    cursor = cursor.max(event.seq);
+                    continue;
+                }
+                cursor = cursor.max(event.seq);
+                if !send_internal_event(&mut socket, &storage, event).await {
+                    return;
+                }
+            }
+            SocketAction::Event(Err(broadcast::error::RecvError::Lagged(_))) => {
+                let gap = hub.allocate_client_lag_gap(cursor.saturating_add(1));
+                skip_through = gap.seq;
+                cursor = gap.seq;
+                if !send_internal_event(&mut socket, &storage, gap).await {
+                    return;
+                }
+            }
+            SocketAction::Event(Err(broadcast::error::RecvError::Closed)) => {
+                close_event_socket(&mut socket, close_code::NORMAL).await;
+                return;
+            }
+        }
+    }
+}
+
+async fn close_event_socket(socket: &mut WebSocket, code: u16) {
+    let _ = socket
+        .send(Message::Close(Some(CloseFrame {
+            code,
+            reason: "Event stream closed.".into(),
+        })))
+        .await;
+}
+
+async fn send_internal_event(
+    socket: &mut WebSocket,
+    storage: &Path,
+    event: InternalEventEnvelope,
+) -> bool {
+    let storage = storage.to_path_buf();
+    let projected = tokio::task::spawn_blocking(move || project_wire_event(&storage, &event)).await;
+    let bytes = match projected {
+        Ok(Ok(Some(bytes))) => bytes,
+        Ok(Ok(None)) => return true,
+        Ok(Err(())) | Err(_) => {
+            close_event_socket(socket, close_code::ERROR).await;
+            return false;
+        }
+    };
+    let Ok(text) = String::from_utf8(bytes) else {
+        close_event_socket(socket, close_code::ERROR).await;
+        return false;
+    };
+    if socket.send(Message::Text(text.into())).await.is_err() {
+        return false;
+    }
+    true
+}
+
+fn project_wire_event(
+    storage: &Path,
+    event: &InternalEventEnvelope,
+) -> Result<Option<Vec<u8>>, ()> {
+    let projected = (|| {
+        let (project_id, session_id, secrets) = match event.kind {
+            InternalEventKind::Gap => (None, None, Vec::new()),
+            InternalEventKind::PiEvent | InternalEventKind::ProcessEvent => {
+                let (project_id, session_id, secrets) = map_event_scope(storage, event)?;
+                (Some(project_id), session_id, secrets)
+            }
+            InternalEventKind::Truncated if event.project.is_some() => {
+                let (project_id, session_id, secrets) = map_event_scope(storage, event)?;
+                (Some(project_id), session_id, secrets)
+            }
+            InternalEventKind::Truncated => (None, None, Vec::new()),
+        };
+        let timestamp = rfc3339_millis(event.published_at_millis)
+            .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
+        let (kind, payload) = match event.kind {
+            InternalEventKind::PiEvent => (
+                WireEventKind::PiEvent,
+                EventPayload {
+                    operation_id: None,
+                    event: Some(project_pi_event(event, &secrets)?),
+                    state: None,
+                    exit_code: None,
+                    message: None,
+                    from_seq: None,
+                    to_seq: None,
+                    reason: None,
+                    original_kind: None,
+                    original_bytes: None,
+                },
+            ),
+            InternalEventKind::ProcessEvent => (
+                WireEventKind::ProcessEvent,
+                project_process_payload(&event.payload)?,
+            ),
+            InternalEventKind::Gap => {
+                (WireEventKind::Gap, project_gap_payload(&event.payload)?)
+            }
+            InternalEventKind::Truncated => (
+                WireEventKind::Truncated,
+                project_truncated_payload(&event.payload)?,
+            ),
+        };
+        Some(WireEventEnvelope {
+            seq: event.seq,
+            timestamp,
+            kind,
+            project_id,
+            session_id,
+            payload,
+        })
+    })();
+    let Some(projected) = projected else {
+        return Ok(None);
+    };
+    let bytes = serde_json::to_vec(&projected).map_err(|_| ())?;
+    if bytes.len() <= EVENT_ENVELOPE_BYTES as usize {
+        return Ok(Some(bytes));
+    }
+    if !matches!(projected.kind, WireEventKind::PiEvent | WireEventKind::ProcessEvent) {
+        return Ok(None);
+    }
+    let original_kind = match projected.kind {
+        WireEventKind::PiEvent => "piEvent",
+        WireEventKind::ProcessEvent => "processEvent",
+        _ => return Ok(None),
+    };
+    let truncated = WireEventEnvelope {
+        seq: projected.seq,
+        timestamp: projected.timestamp,
+        kind: WireEventKind::Truncated,
+        project_id: projected.project_id,
+        session_id: projected.session_id,
+        payload: EventPayload {
+            operation_id: None,
+            event: None,
+            state: None,
+            exit_code: None,
+            message: None,
+            from_seq: None,
+            to_seq: None,
+            reason: None,
+            original_kind: Some(original_kind.to_string()),
+            original_bytes: Some(u64::try_from(bytes.len()).map_err(|_| ())?),
+        },
+    };
+    let truncated = serde_json::to_vec(&truncated).map_err(|_| ())?;
+    if truncated.len() <= EVENT_ENVELOPE_BYTES as usize {
+        Ok(Some(truncated))
+    } else {
+        Err(())
+    }
+}
+
+fn map_event_scope(
+    storage: &Path,
+    event: &InternalEventEnvelope,
+) -> Option<(String, Option<String>, Vec<String>)> {
+    let project_path = event.project.as_deref()?;
+    let catalog = ProjectCatalog::load_or_create(storage).ok()?;
+    let binding = catalog
+        .project_bindings()
+        .into_iter()
+        .find(|binding| binding.trusted && binding.path == project_path)?;
+    let mut secrets = vec![
+        project_path.to_string_lossy().into_owned(),
+        binding.id.clone(),
+    ];
+    let session_id = if let Some(session_path) = event.session.as_deref() {
+        let directory = session_directory(&binding.path).ok()?;
+        secrets.push(directory.to_string_lossy().into_owned());
+        secrets.push(session_path.to_string_lossy().into_owned());
+        let id = catalog.session_id_for_path(&binding.id, &directory, session_path)?;
+        secrets.push(id.clone());
+        Some(id)
+    } else {
+        None
+    };
+    collect_pi_id_secrets(&event.payload, &mut secrets);
+    Some((binding.id, session_id, secrets))
+}
+
+fn collect_pi_id_secrets(payload: &serde_json::Value, secrets: &mut Vec<String>) {
+    for pointer in [
+        "/id",
+        "/sessionId",
+        "/message/id",
+        "/message/sessionId",
+        "/message/toolCallId",
+        "/assistantMessageEvent/id",
+        "/assistantMessageEvent/toolCall/id",
+    ] {
+        if let Some(value) = payload.pointer(pointer) {
+            match value {
+                serde_json::Value::String(value) if !value.is_empty() => secrets.push(value.clone()),
+                serde_json::Value::Number(value) => secrets.push(value.to_string()),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn empty_projected_pi_event(event_type: &str) -> ProjectedPiEvent {
+    ProjectedPiEvent {
+        event_type: event_type.to_string(),
+        message: None,
+        target: None,
+        text: None,
+        steering_count: None,
+        follow_up_count: None,
+        command: None,
+        success: None,
+        data: None,
+        error: None,
+    }
+}
+
+fn project_pi_event(
+    envelope: &InternalEventEnvelope,
+    secrets: &[String],
+) -> Option<ProjectedPiEvent> {
+    let raw = envelope.payload.as_object()?;
+    match raw.get("type")?.as_str()? {
+        event_type @ ("agent_start" | "agent_settled") => {
+            Some(empty_projected_pi_event(event_type))
+        }
+        "message_update" => {
+            let update = raw
+                .get("assistantMessageEvent")
+                .and_then(serde_json::Value::as_object)?;
+            let target = match update.get("type")?.as_str()? {
+                "text_delta" => "text",
+                "thinking_delta" => "thinking",
+                _ => return None,
+            };
+            let text = safe_delta_text(update.get("delta")?.as_str()?, secrets, 16 * 1024)?;
+            let mut projected = empty_projected_pi_event("message_delta");
+            projected.target = Some(target.to_string());
+            projected.text = Some(text);
+            Some(projected)
+        }
+        event_type @ ("message_start" | "message_end") => {
+            let message = raw.get("message")?.as_object()?;
+            let mut projected = empty_projected_pi_event(event_type);
+            projected.message = Some(project_safe_message(
+                envelope.seq,
+                envelope.published_at_millis,
+                message,
+                secrets,
+            )?);
+            Some(projected)
+        }
+        "queue_update" => {
+            let steering = raw.get("steering")?.as_array()?;
+            let follow_up = raw.get("followUp")?.as_array()?;
+            let mut projected = empty_projected_pi_event("queue_update");
+            projected.steering_count = u64::try_from(steering.len()).ok();
+            projected.follow_up_count = u64::try_from(follow_up.len()).ok();
+            Some(projected)
+        }
+        "response" => {
+            let command = match raw.get("command")?.as_str()? {
+                command @ ("prompt" | "abort" | "switch_session") => command,
+                _ => return None,
+            };
+            let success = raw.get("success")?.as_bool()?;
+            let mut projected = empty_projected_pi_event("response");
+            projected.command = Some(command.to_string());
+            projected.success = Some(success);
+            if success {
+                projected.data = Some(serde_json::json!({}));
+            } else {
+                projected.error = Some("The command could not be completed.".to_string());
+            }
+            Some(projected)
+        }
+        _ => None,
+    }
+}
+
+fn project_safe_message(
+    seq: u64,
+    published_at_millis: u64,
+    message: &serde_json::Map<String, serde_json::Value>,
+    secrets: &[String],
+) -> Option<SafeMessage> {
+    let raw_role = message.get("role")?.as_str()?;
+    let role = match raw_role {
+        "user" => "user",
+        "assistant" => "assistant",
+        "tool" | "toolResult" => "tool",
+        _ => return None,
+    };
+    let (text, thinking) = safe_message_content(message.get("content"), secrets);
+    let thinking = (role == "assistant").then_some(thinking).flatten();
+    let timestamp = message
+        .get("timestamp")
+        .and_then(normalized_event_timestamp)
+        .unwrap_or_else(|| {
+            rfc3339_millis(published_at_millis)
+                .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
+        });
+    let is_error = message
+        .get("isError")
+        .and_then(serde_json::Value::as_bool)
+        .or_else(|| {
+            (message.get("stopReason").and_then(serde_json::Value::as_str) == Some("error"))
+                .then_some(true)
+        });
+    let (tool_name, tool_status) = if role == "tool" {
+        let name = message
+            .get("toolName")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|name| hydration::sanitize_wire_text(name, secrets, 160));
+        let status = is_error.map(|is_error| {
+            if is_error {
+                "error".to_string()
+            } else {
+                "complete".to_string()
+            }
+        });
+        (name, status)
+    } else {
+        (None, None)
+    };
+    Some(SafeMessage {
+        message_id: format!("message_{seq}"),
+        role: role.to_string(),
+        text,
+        thinking,
+        is_error,
+        timestamp,
+        tool_name,
+        tool_status,
+    })
+}
+
+fn safe_message_content(
+    content: Option<&serde_json::Value>,
+    secrets: &[String],
+) -> (String, Option<String>) {
+    let mut text = Vec::new();
+    let mut thinking = Vec::new();
+    match content {
+        Some(serde_json::Value::String(value)) => text.push(value.as_str()),
+        Some(serde_json::Value::Array(parts)) => {
+            for part in parts {
+                let Some(part) = part.as_object() else {
+                    continue;
+                };
+                match part.get("type").and_then(serde_json::Value::as_str) {
+                    Some("text") => {
+                        if let Some(value) = part.get("text").and_then(serde_json::Value::as_str) {
+                            text.push(value);
+                        }
+                    }
+                    Some("thinking") => {
+                        if let Some(value) = part
+                            .get("thinking")
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            thinking.push(value);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    let text = strip_attachment_markup(&text.join("\n"));
+    let text = hydration::sanitize_wire_text(&text, secrets, 16 * 1024).unwrap_or_default();
+    let thinking = strip_attachment_markup(&thinking.join("\n"));
+    let thinking = hydration::sanitize_wire_text(&thinking, secrets, 16 * 1024);
+    (text, thinking)
+}
+
+fn strip_attachment_markup(value: &str) -> String {
+    const OPEN: &str = "<lemonpi-attachment";
+    const CLOSE: &str = "</lemonpi-attachment>";
+    let mut remaining = value;
+    let mut output = String::with_capacity(value.len().min(16 * 1024));
+    while let Some(start) = remaining.find(OPEN) {
+        output.push_str(&remaining[..start]);
+        let wrapper = &remaining[start..];
+        let Some(tag_end) = wrapper.find('>') else {
+            remaining = "";
+            break;
+        };
+        if wrapper[..=tag_end].trim_end().ends_with("/>") {
+            remaining = &wrapper[tag_end + 1..];
+            continue;
+        }
+        let after_open = &wrapper[tag_end + 1..];
+        let Some(close) = after_open.find(CLOSE) else {
+            remaining = "";
+            break;
+        };
+        remaining = &after_open[close + CLOSE.len()..];
+    }
+    output.push_str(remaining);
+    output
+}
+
+fn safe_delta_text(value: &str, secrets: &[String], limit: usize) -> Option<String> {
+    if value.is_empty() {
+        return None;
+    }
+    if value.chars().all(char::is_whitespace) {
+        return Some(" ".to_string());
+    }
+    let leading_space = value.chars().next().is_some_and(char::is_whitespace);
+    let trailing_space = value.chars().last().is_some_and(char::is_whitespace);
+    let value = strip_attachment_markup(value);
+    let compact = hydration::sanitize_wire_text(&value, secrets, limit)?;
+    let mut projected = String::with_capacity(compact.len().saturating_add(2));
+    if leading_space {
+        projected.push(' ');
+    }
+    projected.push_str(&compact);
+    if trailing_space && !projected.ends_with(' ') {
+        projected.push(' ');
+    }
+    Some(projected.chars().take(limit).collect())
+}
+
+fn normalized_event_timestamp(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => normalized_utc_timestamp(value),
+        serde_json::Value::Number(value) => {
+            const MAX_UNIX_SECONDS: u64 = 253_402_300_799;
+            const MAX_UNIX_MILLIS: u64 = 253_402_300_799_999;
+            let value = value.as_u64()?;
+            let millis = if value <= MAX_UNIX_SECONDS {
+                value.checked_mul(1000)?
+            } else if value <= MAX_UNIX_MILLIS {
+                value
+            } else {
+                return None;
+            };
+            rfc3339_millis(millis)
+        }
+        _ => None,
+    }
+}
+
+fn empty_event_payload() -> EventPayload {
+    EventPayload {
+        operation_id: None,
+        event: None,
+        state: None,
+        exit_code: None,
+        message: None,
+        from_seq: None,
+        to_seq: None,
+        reason: None,
+        original_kind: None,
+        original_bytes: None,
+    }
+}
+
+fn project_process_payload(payload: &serde_json::Value) -> Option<EventPayload> {
+    let payload = payload.as_object()?;
+    let state = match payload.get("state")?.as_str()? {
+        state @ ("started" | "exited" | "stopped" | "error") => state,
+        _ => return None,
+    };
+    let exit_code = match payload.get("code") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => i32::try_from(value.as_i64()?).ok(),
+    };
+    let mut projected = empty_event_payload();
+    projected.state = Some(state.to_string());
+    projected.exit_code = exit_code;
+    if state == "error" && payload.get("message").is_some_and(|message| !message.is_null()) {
+        projected.message = Some("The Pi process encountered an error.".to_string());
+    }
+    Some(projected)
+}
+
+fn project_gap_payload(payload: &serde_json::Value) -> Option<EventPayload> {
+    let payload = payload.as_object()?;
+    let from_seq = payload.get("fromSeq")?.as_u64()?;
+    let to_seq = payload.get("toSeq")?.as_u64()?;
+    if from_seq > to_seq {
+        return None;
+    }
+    let reason = match payload.get("reason")?.as_str()? {
+        reason @ ("replay_evicted" | "client_lagged") => reason,
+        _ => return None,
+    };
+    let mut projected = empty_event_payload();
+    projected.from_seq = Some(from_seq);
+    projected.to_seq = Some(to_seq);
+    projected.reason = Some(reason.to_string());
+    Some(projected)
+}
+
+fn project_truncated_payload(payload: &serde_json::Value) -> Option<EventPayload> {
+    let payload = payload.as_object()?;
+    let original_kind = match payload.get("originalKind")?.as_str()? {
+        kind @ ("piEvent" | "processEvent") => kind,
+        _ => return None,
+    };
+    let original_bytes = payload.get("originalBytes")?.as_u64()?;
+    let mut projected = empty_event_payload();
+    projected.original_kind = Some(original_kind.to_string());
+    projected.original_bytes = Some(original_bytes);
+    Some(projected)
+}
+
+async fn rpc(
+    State(state): State<BridgeState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let context = match validate_request(&headers, peer, state.config.access_mode) {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    if !is_authenticated(&headers, &state).await {
+        return unauthenticated(&context.request_id);
+    }
+    if !is_json_content_type(&headers) {
+        return error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            &context.request_id,
+            "unsupported_content_type",
+            "This endpoint requires a JSON request body.",
+            false,
+        );
+    }
+    let body = match to_bytes(body, MAX_HTTP_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(_) => {
+            return error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &context.request_id,
+                "payload_too_large",
+                "The request body is too large.",
+                false,
+            )
+        }
+    };
+    // Serde ignores unknown top-level members for protocol forward compatibility. Every supported
+    // command still validates its payload object exactly before constructing a Pi command.
+    let request: RpcRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return malformed_rpc_request(&context.request_id),
+    };
+    let Some(session_id) = request.session_id.as_deref() else {
+        return malformed_rpc_request(&context.request_id);
+    };
+    if !valid_opaque_id(&request.project_id) || !valid_opaque_id(session_id) {
+        return malformed_rpc_request(&context.request_id);
+    }
+
+    let validated_command = match request.command_type.as_str() {
+        "prompt" => match exact_prompt_text(&request.payload) {
+            Some(text) => ValidatedRpcCommand::Prompt(text),
+            None => return malformed_rpc_request(&context.request_id),
+        },
+        "abort" if request.payload.is_empty() => ValidatedRpcCommand::Abort,
+        "abort" => return malformed_rpc_request(&context.request_id),
+        "switch_session" => {
+            if !exact_switch_session_payload(&request.payload, session_id) {
+                return malformed_rpc_request(&context.request_id);
+            }
+            ValidatedRpcCommand::SwitchSession
+        }
+        _ => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                &context.request_id,
+                "unsupported_rpc_type",
+                "This RPC command type is not supported.",
+                false,
+            )
+        }
+    };
+
+    let storage = state.storage.clone();
+    let project_id = request.project_id.clone();
+    let requested_session_id = session_id.to_string();
+    let resource = match tokio::task::spawn_blocking(move || {
+        rpc_resource(&storage, &project_id, &requested_session_id)
+    })
+    .await
+    {
+        Ok(Ok(resource)) => resource,
+        Ok(Err(error_kind)) => return rpc_resource_error(&context.request_id, error_kind),
+        Err(_) => {
+            return rpc_resource_error(&context.request_id, RpcResourceError::HostUnavailable)
+        }
+    };
+
+    let private_id = Uuid::new_v4().to_string();
+    let command = match validated_command {
+        ValidatedRpcCommand::Prompt(text) => serde_json::json!({
+            "type": "prompt",
+            "id": private_id,
+            "message": text,
+        }),
+        ValidatedRpcCommand::Abort => serde_json::json!({
+            "type": "abort",
+            "id": private_id,
+        }),
+        ValidatedRpcCommand::SwitchSession => {
+            let Some(session_path) = resource.session_path.to_str() else {
+                return rpc_resource_error(
+                    &context.request_id,
+                    RpcResourceError::HostUnavailable,
+                );
+            };
+            serde_json::json!({
+                "type": "switch_session",
+                "id": private_id,
+                "sessionPath": session_path,
+            })
+        }
+    };
+
+    // Resolve again immediately before the final authorization and write. No catalogue lock lives
+    // across the asynchronous stdin write, and a replaced project/session cannot receive a command.
+    let storage = state.storage.clone();
+    let project_id = request.project_id.clone();
+    let requested_session_id = session_id.to_string();
+    let expected_project = resource.project.path.clone();
+    let expected_session = resource.session_path.clone();
+    match tokio::task::spawn_blocking(move || {
+        revalidate_rpc_resource(
+            &storage,
+            &project_id,
+            &requested_session_id,
+            &expected_project,
+            &expected_session,
+        )
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error_kind)) => return rpc_resource_error(&context.request_id, error_kind),
+        Err(_) => {
+            return rpc_resource_error(&context.request_id, RpcResourceError::HostUnavailable)
+        }
+    }
+
+    // Hold the bearer lease through the generation check, write, flush, and successful response.
+    // A local token revocation therefore cannot race a command accepted under stale authority.
+    let Some(_authentication_lease) = authentication_lease(&headers, &state).await else {
+        return unauthenticated(&context.request_id);
+    };
+    if state
+        .manager
+        .remote_submit(&resource.project.path, &command)
+        .await
+        .is_err()
+    {
+        return rpc_resource_error(&context.request_id, RpcResourceError::HostUnavailable);
+    }
+
+    success(
+        StatusCode::ACCEPTED,
+        &context.request_id,
+        RpcAccepted {
+            operation_id: Uuid::new_v4().to_string(),
+            project_id: request.project_id,
+            session_id: request.session_id,
+            accepted_at: rfc3339(unix_seconds()),
+            accepted_capabilities: context.accepted_capabilities,
+        },
+    )
+}
+
+fn exact_prompt_text(payload: &super::protocol::SafeObject) -> Option<String> {
+    if payload.len() != 1 {
+        return None;
+    }
+    let text = payload.get("text")?.as_str()?;
+    (!text.trim().is_empty() && text.len() <= MAX_PROMPT_BYTES).then(|| text.to_string())
+}
+
+fn exact_switch_session_payload(
+    payload: &super::protocol::SafeObject,
+    expected_session_id: &str,
+) -> bool {
+    payload.len() == 1
+        && payload.get("sessionId").and_then(serde_json::Value::as_str)
+            == Some(expected_session_id)
+}
+
+fn malformed_rpc_request(request_id: &str) -> Response {
+    error(
+        StatusCode::BAD_REQUEST,
+        request_id,
+        "malformed_request",
+        "The RPC request is invalid.",
+        false,
+    )
+}
+
+fn rpc_resource(
+    storage: &Path,
+    project_id: &str,
+    session_id: &str,
+) -> Result<RpcResource, RpcResourceError> {
+    let catalog = ProjectCatalog::load_or_create(storage)
+        .map_err(|_| RpcResourceError::HostUnavailable)?;
+    let project = catalog
+        .resolve_project_binding(project_id)
+        .ok_or(RpcResourceError::ProjectNotFound)?;
+    if !project.trusted {
+        return Err(RpcResourceError::HostUnavailable);
+    }
+    let directory =
+        session_directory(&project.path).map_err(|_| RpcResourceError::HostUnavailable)?;
+    let session_path = catalog
+        .resolve_session_path(project_id, session_id, &directory)
+        .ok_or(RpcResourceError::SessionNotFound)?;
+    Ok(RpcResource {
+        project,
+        session_path,
+    })
+}
+
+fn revalidate_rpc_resource(
+    storage: &Path,
+    project_id: &str,
+    session_id: &str,
+    expected_project: &Path,
+    expected_session: &Path,
+) -> Result<(), RpcResourceError> {
+    let catalog = ProjectCatalog::load_or_create(storage)
+        .map_err(|_| RpcResourceError::HostUnavailable)?;
+    let project = catalog
+        .resolve_project_binding(project_id)
+        .ok_or(RpcResourceError::ProjectNotFound)?;
+    if !project.trusted {
+        return Err(RpcResourceError::HostUnavailable);
+    }
+    if project.path != expected_project {
+        return Err(RpcResourceError::ProjectNotFound);
+    }
+    let directory =
+        session_directory(&project.path).map_err(|_| RpcResourceError::HostUnavailable)?;
+    let session_path = catalog
+        .resolve_session_path(project_id, session_id, &directory)
+        .ok_or(RpcResourceError::SessionNotFound)?;
+    if session_path != expected_session {
+        return Err(RpcResourceError::SessionNotFound);
+    }
+    Ok(())
+}
+
+fn rpc_resource_error(request_id: &str, kind: RpcResourceError) -> Response {
+    match kind {
+        RpcResourceError::ProjectNotFound => error(
+            StatusCode::NOT_FOUND,
+            request_id,
+            "project_not_found",
+            "The requested project is not available.",
+            false,
+        ),
+        RpcResourceError::SessionNotFound => error(
+            StatusCode::NOT_FOUND,
+            request_id,
+            "session_not_found",
+            "The requested session is not available.",
+            false,
+        ),
+        RpcResourceError::HostUnavailable => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            request_id,
+            "host_unavailable",
+            "The host cannot accept commands right now.",
+            true,
+        ),
+    }
 }
 
 fn state_project_resource(
@@ -1886,7 +2887,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn projects_requires_a_valid_unrevoked_bearer_and_never_leaks_paths() {
+    async fn projects_requires_a_valid_unrevoked_bearer_and_returns_display_only_path_metadata() {
         let root = tempdir().unwrap();
         let project = root.path().join("private-project");
         std::fs::create_dir(&project).unwrap();
@@ -1939,7 +2940,18 @@ mod tests {
         let bytes = to_bytes(response.into_body(), MAX_HTTP_BODY_BYTES)
             .await
             .unwrap();
-        assert!(!String::from_utf8_lossy(&bytes).contains(project.to_string_lossy().as_ref()));
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let summary = &value["data"]["projects"][0];
+        assert!(summary["projectId"]
+            .as_str()
+            .unwrap()
+            .starts_with("project_"));
+        assert_eq!(
+            summary["displayPath"],
+            project.canonicalize().unwrap().to_string_lossy().as_ref()
+        );
+        assert!(summary.get("path").is_none());
+        assert!(!String::from_utf8_lossy(&bytes).contains(token));
         state
             .devices
             .lock()
@@ -2217,7 +3229,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn state_returns_fixture_compatible_safe_snapshot_and_omits_absent_session() {
+    async fn state_returns_fixture_compatible_snapshot_with_display_only_path_and_omits_absent_session(
+    ) {
         let _environment_lock = SESSION_DIRECTORY_ENV.lock().unwrap();
         let root = tempdir().unwrap();
         let project = root.path().join("private-project-location");
@@ -2262,7 +3275,6 @@ mod tests {
             .unwrap();
         let serialized = String::from_utf8(bytes.to_vec()).unwrap();
         for secret in [
-            project.to_string_lossy().as_ref(),
             sessions.to_string_lossy().as_ref(),
             session.to_string_lossy().as_ref(),
             "raw-pi-session-id-never-serialize",
@@ -2292,6 +3304,7 @@ mod tests {
                     "project": {
                         "projectId": project_id,
                         "displayName": "private-project-location",
+                        "displayPath": project.to_string_lossy(),
                         "trustState": "trusted",
                         "isActive": true,
                     },
@@ -2474,7 +3487,11 @@ mod tests {
                     "message": {
                         "role": "toolResult",
                         "toolCallId": "raw-tool-id",
-                        "content": "raw-tool-output",
+                        "content": format!(
+                            "safe tool text at {} for raw-pi-session-id raw-tool-id",
+                            session.display()
+                        ),
+                        "output": "raw-tool-output",
                         "details": "raw-tool-details",
                         "isError": false,
                     },
@@ -2541,6 +3558,10 @@ mod tests {
         assert_eq!(messages[0]["text"], "safe assistant text [redacted]");
         assert_eq!(messages[0]["thinking"], "thinking in [redacted]");
         assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(
+            messages[1]["text"],
+            "safe tool text at [redacted] for [redacted] [redacted]"
+        );
         assert_eq!(messages[1]["toolName"], "safe_tool");
         assert_eq!(messages[1]["toolStatus"], "complete");
         assert_eq!(messages[2]["text"], "safe final summary");

@@ -72,6 +72,11 @@ impl PiManager {
         self.registry.lock().await.active_project.clone()
     }
 
+    /// Cloneable, publication-only event hub handle used by the authenticated event transport.
+    pub(crate) fn remote_event_hub(&self) -> EventHub {
+        self.events.clone()
+    }
+
     /// Returns safe live state only when the exact canonical project is the trusted active Pi
     /// generation. Holding the registry lock through the cache clone gives the route one coherent
     /// observation without sending a Pi command or exposing process identity.
@@ -110,6 +115,35 @@ impl PiManager {
                 .snapshot_generation_canonical(&candidate.project, candidate.generation)
                 .as_ref()
                 == Some(&candidate.state)
+    }
+
+    /// Submits one server-constructed command only to the exact trusted active Pi generation.
+    /// The registry check cannot start or select a process, and the opaque error intentionally
+    /// carries no project path, process identity, or private Pi command ID.
+    pub(crate) async fn remote_submit(
+        &self,
+        project: &Path,
+        command: &Value,
+    ) -> Result<(), ()> {
+        let payload = encode_validated_pi_command(command).map_err(|_| ())?;
+        let stdin = {
+            let registry = self.registry.lock().await;
+            let generation = registry.active_generation.ok_or(())?;
+            if registry.active_project.as_deref() != Some(project)
+                || registry.active_trusted != Some(true)
+            {
+                return Err(());
+            }
+            let process = registry.processes.get(project).ok_or(())?;
+            if !process.trusted || process.generation != generation {
+                return Err(());
+            }
+            Arc::clone(&process.stdin)
+        };
+
+        let mut stdin = stdin.lock().await;
+        stdin.write_all(&payload).await.map_err(|_| ())?;
+        stdin.flush().await.map_err(|_| ())
     }
 
     #[cfg(test)]
@@ -1099,14 +1133,18 @@ fn forward_framed_result(
     match result {
         Ok(Some(mut event)) => {
             hydration.observe_generation(project, generation, &event);
-            if let Value::Object(fields) = &mut event {
-                fields.insert("__piPid".to_string(), Value::from(pid));
-            }
-            events.publish(
+            let session = hydration
+                .snapshot_generation_canonical(project, generation)
+                .and_then(|snapshot| snapshot.session_file);
+            events.publish_scoped(
                 Some(project.to_path_buf()),
+                session,
                 EventKind::PiEvent,
                 event.clone(),
             );
+            if let Value::Object(fields) = &mut event {
+                fields.insert("__piPid".to_string(), Value::from(pid));
+            }
             let _ = app.emit("pi-event", event);
         }
         Ok(None) => {}

@@ -1,7 +1,7 @@
-//! Transport-neutral event collection for a future LemonPi remote bridge.
+//! Transport-neutral event collection for the LemonPi remote bridge.
 //!
 //! This module owns no network listener. It retains process-local events and exposes Tokio's
-//! bounded broadcast primitive; a later transport layer can subscribe and project these internal
+//! bounded broadcast primitive; the authenticated transport separately projects these internal
 //! envelopes into the safe wire protocol.
 
 use serde_json::{json, Value};
@@ -9,11 +9,13 @@ use std::{
     collections::VecDeque,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, OwnedSemaphorePermit, Semaphore};
 
 pub(crate) const EVENT_BROADCAST_CAPACITY: usize = 1024;
 pub(crate) const EVENT_REPLAY_CAPACITY: usize = 4096;
+pub(crate) const EVENT_SOCKET_CAPACITY: usize = 8;
 pub(crate) const MAX_INTERNAL_EVENT_PAYLOAD_BYTES: usize = 1024 * 1024;
 
 /// Internal event kinds. These are deliberately not wire types or serializers.
@@ -44,7 +46,9 @@ impl EventKind {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EventEnvelope {
     pub(crate) seq: u64,
+    pub(crate) published_at_millis: u64,
     pub(crate) project: Option<PathBuf>,
+    pub(crate) session: Option<PathBuf>,
     pub(crate) kind: EventKind,
     pub(crate) payload: Value,
 }
@@ -55,7 +59,7 @@ struct EventHubState {
     replay: VecDeque<EventEnvelope>,
 }
 
-/// Bounded event publication, replay, and fan-out for an eventual opt-in remote bridge.
+/// Bounded event publication, replay, socket admission, and fan-out for the opt-in remote bridge.
 ///
 /// Publication never waits for receivers. Slow subscribers receive Tokio's normal `Lagged`
 /// result and cannot block Pi's stdout/process supervision path.
@@ -63,6 +67,7 @@ struct EventHubState {
 pub(crate) struct EventHub {
     state: Arc<Mutex<EventHubState>>,
     sender: broadcast::Sender<EventEnvelope>,
+    sockets: Arc<Semaphore>,
 }
 
 impl Default for EventHub {
@@ -77,6 +82,7 @@ impl EventHub {
         Self {
             state: Arc::new(Mutex::new(EventHubState::default())),
             sender,
+            sockets: Arc::new(Semaphore::new(EVENT_SOCKET_CAPACITY)),
         }
     }
 
@@ -87,8 +93,26 @@ impl EventHub {
         kind: EventKind,
         payload: Value,
     ) -> EventEnvelope {
+        self.publish_scoped(project, None, kind, payload)
+    }
+
+    /// Publishes with the session file observed from the same Pi generation as the event. Paths
+    /// remain internal routing metadata and are never serialized by this type.
+    pub(crate) fn publish_scoped(
+        &self,
+        project: Option<PathBuf>,
+        session: Option<PathBuf>,
+        kind: EventKind,
+        payload: Value,
+    ) -> EventEnvelope {
         let (kind, payload) = bounded_payload(kind, payload);
-        self.append(project, kind, payload)
+        self.append(project, session, kind, payload)
+    }
+
+    /// Reserves one of the process-wide event socket slots. The returned permit must be retained
+    /// for the complete upgraded socket lifetime.
+    pub(crate) fn try_acquire_socket(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.sockets).try_acquire_owned().ok()
     }
 
     /// Starts receiving future events. Replay is requested separately so a transport can send its
@@ -100,20 +124,35 @@ impl EventHub {
     /// Returns retained events after `since` in sequence order. If the requested point was evicted,
     /// returns one fresh recipient-local gap barrier instead of a misleading partial replay.
     pub(crate) fn replay_since(&self, since: u64) -> Vec<EventEnvelope> {
-        let mut state = self.state.lock().expect("event hub state lock poisoned");
-        let high_water = state.next_seq;
-        let Some(oldest) = state.replay.front().map(|event| event.seq) else {
-            return Vec::new();
-        };
+        let cutoff = self.high_water_seq();
+        self.replay_through(since, cutoff)
+    }
 
-        if since < oldest.saturating_sub(1) {
+    /// Replays only events at or below the hello cutoff. The subscription is created by the caller
+    /// before choosing `cutoff`, so anything newer remains queued on that recipient's receiver.
+    pub(crate) fn replay_through(&self, since: u64, cutoff: u64) -> Vec<EventEnvelope> {
+        let mut state = self.state.lock().expect("event hub state lock poisoned");
+        if since >= cutoff {
+            return Vec::new();
+        }
+        let oldest_through_cutoff = state
+            .replay
+            .iter()
+            .find(|event| event.seq <= cutoff)
+            .map(|event| event.seq);
+        let replay_was_evicted = oldest_through_cutoff
+            .map(|oldest| since < oldest.saturating_sub(1))
+            .unwrap_or(true);
+        if replay_was_evicted {
+            let to_seq = state.next_seq;
             return vec![allocate_locked(
                 &mut state,
+                None,
                 None,
                 EventKind::Gap,
                 json!({
                     "fromSeq": since.saturating_add(1),
-                    "toSeq": high_water,
+                    "toSeq": to_seq,
                     "reason": "replay_evicted",
                 }),
             )];
@@ -122,9 +161,27 @@ impl EventHub {
         state
             .replay
             .iter()
-            .filter(|event| event.seq > since)
+            .filter(|event| event.seq > since && event.seq <= cutoff)
             .cloned()
             .collect()
+    }
+
+    /// Allocates an unicast recovery barrier after a broadcast receiver reports lag. Allocation
+    /// and the covered high-water observation are atomic with publication sequence assignment.
+    pub(crate) fn allocate_client_lag_gap(&self, from_seq: u64) -> EventEnvelope {
+        let mut state = self.state.lock().expect("event hub state lock poisoned");
+        let to_seq = state.next_seq;
+        allocate_locked(
+            &mut state,
+            None,
+            None,
+            EventKind::Gap,
+            json!({
+                "fromSeq": from_seq.min(to_seq),
+                "toSeq": to_seq,
+                "reason": "client_lagged",
+            }),
+        )
     }
 
     pub(crate) fn high_water_seq(&self) -> u64 {
@@ -134,10 +191,16 @@ impl EventHub {
             .next_seq
     }
 
-    fn append(&self, project: Option<PathBuf>, kind: EventKind, payload: Value) -> EventEnvelope {
+    fn append(
+        &self,
+        project: Option<PathBuf>,
+        session: Option<PathBuf>,
+        kind: EventKind,
+        payload: Value,
+    ) -> EventEnvelope {
         let event = {
             let mut state = self.state.lock().expect("event hub state lock poisoned");
-            append_locked(&mut state, project, kind, payload)
+            append_locked(&mut state, project, session, kind, payload)
         };
         let _ = self.sender.send(event.clone());
         event
@@ -161,9 +224,19 @@ fn bounded_payload(kind: EventKind, payload: Value) -> (EventKind, Value) {
     }
 }
 
+fn publication_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 fn allocate_locked(
     state: &mut EventHubState,
     project: Option<PathBuf>,
+    session: Option<PathBuf>,
     kind: EventKind,
     payload: Value,
 ) -> EventEnvelope {
@@ -173,7 +246,9 @@ fn allocate_locked(
         .expect("event hub sequence exhausted");
     EventEnvelope {
         seq: state.next_seq,
+        published_at_millis: publication_millis(),
         project,
+        session,
         kind,
         payload,
     }
@@ -182,10 +257,11 @@ fn allocate_locked(
 fn append_locked(
     state: &mut EventHubState,
     project: Option<PathBuf>,
+    session: Option<PathBuf>,
     kind: EventKind,
     payload: Value,
 ) -> EventEnvelope {
-    let event = allocate_locked(state, project, kind, payload);
+    let event = allocate_locked(state, project, session, kind, payload);
     state.replay.push_back(event.clone());
     if state.replay.len() > EVENT_REPLAY_CAPACITY {
         state.replay.pop_front();

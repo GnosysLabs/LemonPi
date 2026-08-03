@@ -112,6 +112,7 @@ pub(crate) struct PairedDevice {
 pub(crate) struct ProjectSummary {
     pub(crate) project_id: String,
     pub(crate) display_name: String,
+    pub(crate) display_path: String,
     pub(crate) trust_state: TrustState,
     pub(crate) is_active: bool,
 }
@@ -345,12 +346,20 @@ mod tests {
         let projects: Envelope<ProjectsResponse> =
             serde_json::from_slice(&fixture("projects-response.json")).unwrap();
         projects.validate().unwrap();
+        assert_eq!(
+            projects.data.as_ref().unwrap().projects[0].display_path,
+            "~/Dev/LemonPi"
+        );
         let sessions: Envelope<SessionsResponse> =
             serde_json::from_slice(&fixture("sessions-response.json")).unwrap();
         sessions.validate().unwrap();
         let state: Envelope<StateResponse> =
             serde_json::from_slice(&fixture("state-response.json")).unwrap();
         state.validate().unwrap();
+        assert_eq!(
+            state.data.as_ref().unwrap().project.display_path,
+            "~/Dev/LemonPi"
+        );
         let rpc: RpcRequest = serde_json::from_slice(&fixture("rpc-request.json")).unwrap();
         assert_eq!(rpc.command_type, "prompt");
         let accepted: Envelope<RpcAccepted> =
