@@ -7,7 +7,6 @@ pub(crate) mod auth;
 pub(crate) mod commands;
 pub(crate) mod config;
 pub(crate) mod events;
-pub(crate) mod hydration;
 pub(crate) mod identity;
 pub(crate) mod policy;
 pub(crate) mod projects;
