@@ -26,6 +26,27 @@ function isActive(status: string): boolean {
   return status === "running" || status === "queued" || status === "pending";
 }
 
+function isDismissedTerminal(status: string): boolean {
+  return status === "failed" || status === "stopped" || status === "rejected";
+}
+
+/** Removes unsuccessful children immediately while preserving useful completed siblings. */
+function withoutDismissedAgents(run: SubagentRunStatus): SubagentRunStatus | undefined {
+  if (!run.steps?.length) return isDismissedTerminal(run.state) ? undefined : run;
+  const steps = run.steps.filter((step) => !isDismissedTerminal(step.status));
+  if (steps.length === 0) return undefined;
+  if (steps.length === run.steps.length && !isDismissedTerminal(run.state)) return run;
+
+  const state = isDismissedTerminal(run.state)
+    ? steps.some((step) => isActive(step.status))
+      ? "running"
+      : steps.some((step) => step.status === "paused")
+        ? "paused"
+        : "complete"
+    : run.state;
+  return { ...run, state, steps, error: undefined };
+}
+
 function stepNeedsAttention(run: SubagentRunStatus, step: SubagentStepStatus): boolean {
   if (!isActive(step.status)) return false;
   if (step.activityState !== undefined) return step.activityState === "needs_attention";
@@ -581,7 +602,10 @@ export function AgentActivityPanel({
   }, []);
 
   const visibleRuns = useMemo(
-    () => runs.filter((run) => {
+    () => runs.flatMap((run) => {
+      const visibleRun = withoutDismissedAgents(run);
+      return visibleRun ? [visibleRun] : [];
+    }).filter((run) => {
       if (isActive(run.state)) return true;
       const historyAt = run.endedAt ?? run.lastUpdate ?? run.startedAt;
       return now - historyAt < 15 * 60_000;
