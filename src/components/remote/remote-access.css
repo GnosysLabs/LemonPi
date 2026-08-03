@@ -168,7 +168,7 @@
 
 .remote-access__fields {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) 124px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
 
