@@ -443,8 +443,9 @@ export function declaredExecutionMode(task: string): "read-only" | "implementati
 
 export function delegatesImplementation(spec: DelegatedSpec): boolean {
   const mode = declaredExecutionMode(spec.task);
-  if (mode === "read-only" || EXPLICIT_READ_ONLY_TASK.test(spec.task)) return false;
+  if (mode === "read-only") return false;
   if (mode === "implementation") return true;
+  if (EXPLICIT_READ_ONLY_TASK.test(spec.task)) return false;
   return hasBoundedChunkContract(spec.task) && IMPLEMENTATION_TASK.test(spec.task);
 }
 
@@ -544,6 +545,18 @@ export function restoredStatusAction(disposition: SubagentStatusDisposition): "s
 
 export function shouldSuppressStatusPoll(activeHandoffPending: boolean, action: unknown): boolean {
   return activeHandoffPending && action === "status";
+}
+
+export function missionHasActiveOwnership(input: {
+  activeDelegationCount: number;
+  recordedRunCount: number;
+  writerOccupied: boolean;
+  recordedWriterActive: boolean;
+}): boolean {
+  return input.activeDelegationCount > 0
+    || input.recordedRunCount > 0
+    || input.writerOccupied
+    || input.recordedWriterActive;
 }
 
 function delegationRunId(value: unknown): string | undefined {
@@ -809,9 +822,16 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     && mission.phase !== "paused"
     && (mission.phase === "integration" || mission.remainingTask));
 
+  const missionHasOwnedWork = () => missionHasActiveOwnership({
+    activeDelegationCount: activeDelegationRuns.size,
+    recordedRunCount: mission?.activeRunIds.length ?? 0,
+    writerOccupied,
+    recordedWriterActive: mission?.writerActive ?? false,
+  });
+
   const requestMissionWake = (reason: "plan" | "integration"): boolean => {
     if (!mission || mainAgentRunning) return false;
-    if (activeDelegationRuns.size > 0 || writerOccupied || !missionNeedsMain()) return false;
+    if (missionHasOwnedWork() || !missionNeedsMain()) return false;
     if (lastAssistantStopReason === "aborted" || lastAssistantStopReason === "error") return false;
     if (mission.wakeAttempts >= 3) {
       mission.phase = "paused";
@@ -971,7 +991,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   });
 
   const missionScheduler = setInterval(() => {
-    if (!missionNeedsMain() || mainAgentRunning || activeDelegationRuns.size > 0 || writerOccupied) return;
+    if (!missionNeedsMain() || mainAgentRunning || missionHasOwnedWork()) return;
     requestMissionWake(mission?.phase === "integration" ? "integration" : "plan");
   }, 5_000);
 
@@ -1409,7 +1429,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         }
         remainingPlanTask = nextTask;
         if (nextTask) {
-          const currentMission = ensureMission(activeDelegationRuns.size > 0 || writerOccupied ? "delegated" : "planning");
+          const currentMission = ensureMission(missionHasOwnedWork() ? "delegated" : "planning");
           currentMission.remainingTask = { ...nextTask };
           currentMission.wakeAttempts = 0;
         } else if (mission) {
@@ -1462,6 +1482,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     mainAgentRunning = false;
     const intentionallyStopped = lastAssistantStopReason === "aborted" || lastAssistantStopReason === "error";
     const strandedPlanTask = remainingPlanTask;
+    const ownedWorkActive = missionHasOwnedWork();
     if (intentionallyStopped && mission) {
       mission.phase = "paused";
       persistMission();
@@ -1498,8 +1519,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     }
     if (shouldWakeForPlanContinuation({
       hasRemainingTask: Boolean(strandedPlanTask),
-      activeDelegationCount: activeDelegationRuns.size,
-      writerOccupied,
+      activeDelegationCount: ownedWorkActive ? 1 : 0,
+      writerOccupied: ownedWorkActive,
       intentionallyStopped,
       attempts: planContinuationAttempts,
     }) && strandedPlanTask) {
@@ -1510,7 +1531,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         return;
       }
     }
-    if (mission?.phase === "integration" && activeDelegationRuns.size === 0 && !writerOccupied && !intentionallyStopped) {
+    if (mission?.phase === "integration" && !ownedWorkActive && !intentionallyStopped) {
       if (visibleExplanationAfterLastTool && !delegationFailurePending && !attentionRecovery && !remainingPlanTask) {
         mission.phase = "complete";
         mission.wakeAttempts = 0;

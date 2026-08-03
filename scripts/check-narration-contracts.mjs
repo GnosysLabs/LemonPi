@@ -5,6 +5,7 @@ import {
   declaredExecutionMode,
   delegatesImplementation,
   isManagedWorktreePatchCommand,
+  missionHasActiveOwnership,
   parallelWriterPolicyIssue,
   remainingPlanFromTodoResult,
   replayMissionState,
@@ -33,6 +34,10 @@ assert.equal(declaredExecutionMode(planningTask), "read-only");
 assert.equal(delegatesImplementation({ agent: "any-custom-planner", task: planningTask }), false);
 assert.equal(declaredExecutionMode(implementationTask), "implementation");
 assert.equal(delegatesImplementation({ agent: "any-custom-executor", task: implementationTask }), true);
+assert.equal(delegatesImplementation({
+  agent: "worker",
+  task: `${implementationTask}\nDo not edit unrelated files or modify the existing listener.`,
+}), true);
 assert.equal(declaredExecutionMode("Plan an implementation"), undefined);
 
 const readOnlyLaunch = { agent: "any-custom-planner", task: planningTask };
@@ -91,6 +96,9 @@ assert.equal(restoredStatusAction("needs_attention"), "wake_intervention");
 assert.equal(shouldSuppressStatusPoll(true, "status"), true);
 assert.equal(shouldSuppressStatusPoll(true, "steer"), false);
 assert.equal(shouldSuppressStatusPoll(false, "status"), false);
+assert.equal(missionHasActiveOwnership({ activeDelegationCount: 0, recordedRunCount: 1, writerOccupied: false, recordedWriterActive: false }), true);
+assert.equal(missionHasActiveOwnership({ activeDelegationCount: 0, recordedRunCount: 0, writerOccupied: false, recordedWriterActive: true }), true);
+assert.equal(missionHasActiveOwnership({ activeDelegationCount: 0, recordedRunCount: 0, writerOccupied: false, recordedWriterActive: false }), false);
 
 const lane = (outcome, paths) => ({
   agent: "worker",
