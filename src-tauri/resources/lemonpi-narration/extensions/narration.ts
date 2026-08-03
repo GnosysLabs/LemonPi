@@ -9,7 +9,7 @@ const SUBAGENT_RPC_TIMEOUT_MS = 6_000;
 const CHILD_TODO_GUIDANCE = `
 
 <lemonpi-child-checklist>
-Use the \`todo\` tool at the start of this delegated task to create a short checklist of the meaningful steps you will perform. Keep exactly one ordinary task in progress, update the checklist as your approach changes, and mark each item complete immediately after its outcome is actually verified. The checklist is visible to the user in LemonPi, so use specific outcome-oriented labels rather than duplicating individual tool calls. Do not skip the checklist merely because the parent supplied a chunk contract.
+Use the \`todo\` tool at the start of this delegated task to create a short checklist of the meaningful steps you will perform. When reviving a previous session, inspect and reuse any existing checklist; if none exists, create it before continuing the resumed work. Keep exactly one ordinary task in progress, update the checklist as your approach changes, and mark each item complete immediately after its outcome is actually verified. The checklist is visible to the user in LemonPi, so use specific outcome-oriented labels rather than duplicating individual tool calls. Do not skip the checklist merely because the parent supplied a chunk contract.
 </lemonpi-child-checklist>`;
 
 const NARRATION_CONTRACT = `
@@ -501,6 +501,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (event.toolName !== "subagent") return;
 
     const isManagementAction = typeof input.action === "string" && input.action.trim().length > 0;
+    if (input.action === "resume" && typeof input.message === "string" && !input.message.includes("<lemonpi-child-checklist>")) {
+      input.message = `${input.message.trimEnd()}${CHILD_TODO_GUIDANCE}`;
+    }
     if (input.action === "list") rosterListToolCalls.set(event.toolCallId, rosterGeneration);
     if (attentionRecovery && ["status", "steer", "stop"].includes(String(input.action ?? ""))) {
       const target = typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : "";

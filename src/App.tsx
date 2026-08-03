@@ -232,6 +232,7 @@ export default function App() {
   const projectRef = useRef<string | undefined>(undefined);
   const sessionRefreshRequestRef = useRef(0);
   const todoSnapshotRef = useRef<TodoSnapshot | undefined>(undefined);
+  const checklistNudgesRef = useRef(new Set<string>());
 
   const appUpdater = useAppUpdater();
   const finishStartup = useCallback(() => setStartupReady(true), []);
@@ -947,6 +948,36 @@ export default function App() {
       if (timeoutId) window.clearTimeout(timeoutId);
     };
   }, [activityTargetSignature, hasActiveSubagents, project]);
+
+  useEffect(() => {
+    const now = Date.now();
+    for (const run of subagentRuns) {
+      if (!isActiveSubagentRun(run)) continue;
+      for (const [position, step] of (run.steps ?? []).entries()) {
+        if (!["running", "queued", "pending"].includes(step.status)) continue;
+        const index = step.index ?? position;
+        const key = `${sessionState?.sessionFile ?? "session"}:${run.runId}:${index}`;
+        const snapshot = subagentActivity[`${run.runId}:${index}`];
+        const hasChecklist = snapshot?.todos?.some((task) => task.status !== "deleted") === true;
+        if (hasChecklist) {
+          checklistNudgesRef.current.add(key);
+          continue;
+        }
+        const startedAt = step.startedAt ?? run.startedAt;
+        const hasMeaningfulActivity = (snapshot?.events.length ?? 0) > 0 || (step.turnCount ?? 0) > 0;
+        if (!hasMeaningfulActivity || now - startedAt < 30_000 || checklistNudgesRef.current.has(key)) continue;
+        checklistNudgesRef.current.add(key);
+        void steerSubagent(
+          run.runId,
+          index,
+          "Before continuing, initialize or refresh your visible work checklist with the todo tool now. Reuse an existing checklist if present; otherwise create a short outcome-oriented plan, keep one item in progress, and update it as work completes. If the todo tool is unavailable in this revived session, report that exact blocker immediately.",
+        ).catch((error) => console.warn("Could not remind subagent to initialize its checklist", error));
+      }
+    }
+    if (checklistNudgesRef.current.size > 256) {
+      checklistNudgesRef.current = new Set([...checklistNudgesRef.current].slice(-128));
+    }
+  }, [sessionState?.sessionFile, steerSubagent, subagentActivity, subagentRuns]);
   return (
     <div className="app-shell">
       <WorkspaceRail
