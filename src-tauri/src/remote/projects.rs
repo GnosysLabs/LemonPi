@@ -180,13 +180,25 @@ impl ProjectCatalog {
     /// Resolves a project only while its current filesystem location still canonicalizes to the
     /// exact directory recorded at sync time. This prevents a later symlink or moved-target
     /// replacement from turning an opaque project ID into access to a new location.
-    pub(crate) fn resolve_project_path(&self, project_id: &str) -> Option<PathBuf> {
+    pub(crate) fn resolve_project_binding(
+        &self,
+        project_id: &str,
+    ) -> Option<InternalProjectBinding> {
         let project = self
             .document
             .projects
             .iter()
             .find(|project| project.id == project_id)?;
-        revalidate_directory(&project.path)
+        Some(InternalProjectBinding {
+            id: project.id.clone(),
+            path: revalidate_directory(&project.path)?,
+            trusted: project.trusted,
+        })
+    }
+
+    pub(crate) fn resolve_project_path(&self, project_id: &str) -> Option<PathBuf> {
+        self.resolve_project_binding(project_id)
+            .map(|binding| binding.path)
     }
 
     pub(crate) fn sync_sessions(
@@ -286,21 +298,50 @@ impl ProjectCatalog {
             .iter()
             .find(|project| project.id == project_id)?;
         revalidate_directory(&project.path)?;
-        let stored_directory = project.session_directory.as_deref()?;
-        let current_directory = canonical_directory(current_session_directory)?;
-        if current_directory != stored_directory {
-            return None;
-        }
+        let current_directory =
+            self.revalidated_session_directory(project, current_session_directory)?;
         let session = project
             .sessions
             .iter()
             .find(|session| session.id == session_id)?;
-        let current_session = session.path.canonicalize().ok()?;
-        let metadata = fs::metadata(&current_session).ok()?;
-        (metadata.is_file()
-            && current_session == session.path
-            && current_session.starts_with(&current_directory))
-        .then_some(current_session)
+        let current_session = revalidated_session_file(session, &current_directory)?;
+        Some(current_session)
+    }
+
+    /// Joins a freshly discovered canonical session path back to its opaque catalog ID. The path
+    /// stays crate-private and every project, directory, and file location is revalidated before
+    /// the ID can be returned.
+    pub(crate) fn session_id_for_path(
+        &self,
+        project_id: &str,
+        current_session_directory: &Path,
+        current_session_path: &Path,
+    ) -> Option<String> {
+        let project = self
+            .document
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)?;
+        revalidate_directory(&project.path)?;
+        let current_directory =
+            self.revalidated_session_directory(project, current_session_directory)?;
+        let canonical_path = current_session_path.canonicalize().ok()?;
+        let session = project
+            .sessions
+            .iter()
+            .find(|session| session.path == canonical_path)?;
+        revalidated_session_file(session, &current_directory)?;
+        Some(session.id.clone())
+    }
+
+    fn revalidated_session_directory(
+        &self,
+        project: &ProjectRecord,
+        current_session_directory: &Path,
+    ) -> Option<PathBuf> {
+        let stored_directory = project.session_directory.as_deref()?;
+        let current_directory = canonical_directory(current_session_directory)?;
+        (current_directory == stored_directory).then_some(current_directory)
     }
 
     /// Safe wire-ready summaries; no filesystem locations are exposed.
@@ -359,6 +400,15 @@ fn canonical_directory(path: &Path) -> Option<PathBuf> {
 fn revalidate_directory(stored_directory: &Path) -> Option<PathBuf> {
     let current_directory = canonical_directory(stored_directory)?;
     (current_directory == stored_directory).then_some(current_directory)
+}
+
+fn revalidated_session_file(session: &SessionRecord, current_directory: &Path) -> Option<PathBuf> {
+    let current_session = session.path.canonicalize().ok()?;
+    let metadata = fs::metadata(&current_session).ok()?;
+    (metadata.is_file()
+        && current_session == session.path
+        && current_session.starts_with(current_directory))
+    .then_some(current_session)
 }
 
 fn validate_document(document: &ProjectStoreDocument) -> RemoteResult<()> {

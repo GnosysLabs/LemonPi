@@ -1,22 +1,22 @@
 //! The deliberately small, pinned-TLS HTTP surface for LemonPi Go v1.
 //!
-//! This module owns only `/health`, `/pair`, and `/projects`. It deliberately has no generic Pi
-//! command, filesystem, settings, session, or WebSocket route. Internal paths remain confined to
-//! `ProjectCatalog`; handlers serialize only explicitly safe projections.
+//! This module owns only `/health`, `/pair`, `/projects`, and the read-only session catalogue. It
+//! deliberately has no generic Pi command, filesystem, settings, or WebSocket route. Internal
+//! paths remain confined to crate-private code; handlers serialize only explicitly safe projections.
 
 use super::{
     auth::{DeviceStore, PairingAttempt, PairingWindow},
     config::{AccessMode, RemoteConfig},
     identity::HostIdentity,
     policy::allows_peer,
-    projects::{ProjectCatalog, RemoteProjectSummary},
+    projects::{ProjectCatalog, RemoteProjectSummary, SessionSyncInput},
     protocol::{
         Capability, Envelope, Health, Limits, PairRequest, PairResponse, PairedDevice,
-        ProtocolError,
+        ProtocolError, SessionSummary, SessionsResponse,
     },
     RemoteError, RemoteResult,
 };
-use crate::PiManager;
+use crate::{list_pi_sessions_sync, session_directory, PiManager, PiSessionSummary};
 use axum::{
     body::{to_bytes, Body},
     extract::{ConnectInfo, State},
@@ -42,7 +42,9 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use time::{
+    format_description::well_known::Rfc3339, Date, Month, OffsetDateTime, PrimitiveDateTime, Time,
+};
 use tokio::{
     net::TcpStream,
     sync::{watch, Mutex},
@@ -94,6 +96,12 @@ struct ProjectsPayload {
     accepted_capabilities: Vec<Capability>,
 }
 
+#[derive(Debug)]
+enum SessionCatalogError {
+    ProjectNotFound,
+    HostUnavailable,
+}
+
 /// Builds the v1 router. The actual TCP listener also checks peers before TLS negotiation; this
 /// route-level check keeps the rule true for every request and permits deterministic router tests.
 pub(crate) fn router(state: BridgeState) -> Router {
@@ -101,6 +109,7 @@ pub(crate) fn router(state: BridgeState) -> Router {
         .route("/v1/health", get(health))
         .route("/v1/pair", post(pair))
         .route("/v1/projects", get(projects))
+        .route("/v1/sessions", get(sessions))
         .with_state(state)
 }
 
@@ -370,6 +379,315 @@ async fn projects(
     )
 }
 
+async fn sessions(
+    State(state): State<BridgeState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let context = match validate_request(&headers, peer, state.config.access_mode) {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    if !is_authenticated(&headers, &state).await {
+        return error(
+            StatusCode::UNAUTHORIZED,
+            &context.request_id,
+            "unauthenticated",
+            "Authentication is required.",
+            false,
+        );
+    }
+    if !AVAILABLE_CAPABILITIES.contains(&Capability::Projects) {
+        return error(
+            StatusCode::NOT_IMPLEMENTED,
+            &context.request_id,
+            "capability_unavailable",
+            "Session catalogues are not available on this host.",
+            false,
+        );
+    }
+    let Some(project_id) = project_id_query(&uri) else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            &context.request_id,
+            "malformed_request",
+            "The session catalogue request is invalid.",
+            false,
+        );
+    };
+
+    let storage = state.storage.clone();
+    let requested_project_id = project_id.clone();
+    let result =
+        tokio::task::spawn_blocking(move || session_catalogue(&storage, &requested_project_id))
+            .await;
+    let sessions = match result {
+        Ok(Ok(sessions)) => sessions,
+        Ok(Err(SessionCatalogError::ProjectNotFound)) => {
+            return error(
+                StatusCode::NOT_FOUND,
+                &context.request_id,
+                "project_not_found",
+                "The requested project is not available.",
+                false,
+            )
+        }
+        Ok(Err(SessionCatalogError::HostUnavailable)) | Err(_) => {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &context.request_id,
+                "host_unavailable",
+                "The host cannot provide sessions right now.",
+                true,
+            )
+        }
+    };
+
+    success(
+        StatusCode::OK,
+        &context.request_id,
+        SessionsResponse {
+            project_id,
+            sessions,
+            accepted_capabilities: context.accepted_capabilities,
+        },
+    )
+}
+
+fn session_catalogue(
+    storage: &std::path::Path,
+    project_id: &str,
+) -> Result<Vec<SessionSummary>, SessionCatalogError> {
+    let mut catalog = ProjectCatalog::load_or_create(storage)
+        .map_err(|_| SessionCatalogError::HostUnavailable)?;
+    let binding = catalog
+        .resolve_project_binding(project_id)
+        .ok_or(SessionCatalogError::ProjectNotFound)?;
+    if !binding.trusted {
+        catalog
+            .clear_sessions(project_id)
+            .map_err(|_| SessionCatalogError::HostUnavailable)?;
+        return Ok(Vec::new());
+    }
+
+    let directory =
+        session_directory(&binding.path).map_err(|_| SessionCatalogError::HostUnavailable)?;
+    let discovered =
+        list_pi_sessions_sync(&binding.path).map_err(|_| SessionCatalogError::HostUnavailable)?;
+    if catalog.resolve_project_binding(project_id).is_none() {
+        return Err(SessionCatalogError::ProjectNotFound);
+    }
+    let inputs = discovered
+        .iter()
+        .map(|session| SessionSyncInput {
+            path: PathBuf::from(&session.path),
+        })
+        .collect::<Vec<_>>();
+    catalog
+        .sync_sessions(project_id, &directory, &inputs)
+        .map_err(|_| SessionCatalogError::HostUnavailable)?;
+
+    Ok(discovered
+        .into_iter()
+        .filter_map(|session| {
+            project_session(&catalog, &binding.path, &directory, project_id, session)
+        })
+        .collect())
+}
+
+fn project_session(
+    catalog: &ProjectCatalog,
+    project_path: &std::path::Path,
+    directory: &std::path::Path,
+    project_id: &str,
+    session: PiSessionSummary,
+) -> Option<SessionSummary> {
+    let session_path = PathBuf::from(&session.path);
+    let session_id = catalog.session_id_for_path(project_id, directory, &session_path)?;
+    let modified_at = rfc3339_millis(session.modified)?;
+    let message_count = u64::try_from(session.message_count).ok()?;
+    let secrets = [
+        Some(project_path.to_string_lossy().into_owned()),
+        Some(directory.to_string_lossy().into_owned()),
+        Some(session.path.clone()),
+        Some(session.id.clone()),
+        session.parent_session_path.clone(),
+    ];
+    let name = session
+        .name
+        .as_deref()
+        .and_then(|name| safe_session_text(name, &secrets, 160));
+    let first_message_preview = safe_session_text(&session.first_message, &secrets, 280)
+        .unwrap_or_else(|| "New session".to_string());
+    let last_final_reply_at = session
+        .last_final_reply
+        .as_ref()
+        .and_then(|reply| reply.timestamp.as_deref())
+        .and_then(normalized_utc_timestamp);
+    Some(SessionSummary {
+        session_id,
+        name,
+        modified_at,
+        message_count,
+        first_message_preview,
+        last_final_reply_at,
+    })
+}
+
+fn safe_session_text(value: &str, secrets: &[Option<String>], limit: usize) -> Option<String> {
+    let mut redacted = value.to_string();
+    for secret in secrets.iter().flatten().filter(|secret| !secret.is_empty()) {
+        redacted = redacted.replace(secret, "[redacted]");
+    }
+    let printable = redacted
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let compact = printable
+        .split_whitespace()
+        .map(|word| {
+            if looks_like_internal_path(word) {
+                "[redacted]"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if compact.is_empty() {
+        return None;
+    }
+    Some(compact.chars().take(limit).collect())
+}
+
+fn looks_like_internal_path(word: &str) -> bool {
+    let candidate = word.trim_matches(|character: char| {
+        matches!(
+            character,
+            '\'' | '"' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
+        )
+    });
+    candidate.starts_with('/')
+        || candidate.starts_with('~')
+        || candidate.starts_with("\\\\")
+        || candidate.as_bytes().get(1) == Some(&b':')
+            && candidate
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphabetic)
+            && matches!(candidate.as_bytes().get(2), Some(b'/' | b'\\'))
+}
+
+fn rfc3339_millis(milliseconds: u64) -> Option<String> {
+    let nanoseconds = i128::from(milliseconds).checked_mul(1_000_000)?;
+    OffsetDateTime::from_unix_timestamp_nanos(nanoseconds)
+        .ok()?
+        .format(&Rfc3339)
+        .ok()
+}
+
+fn normalized_utc_timestamp(value: &str) -> Option<String> {
+    let value = value.strip_suffix('Z')?;
+    let (date, time) = value.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let year = date_parts.next()?.parse::<i32>().ok()?;
+    let month = date_parts.next()?.parse::<u8>().ok()?;
+    let day = date_parts.next()?.parse::<u8>().ok()?;
+    if date_parts.next().is_some() {
+        return None;
+    }
+    let mut time_parts = time.split(':');
+    let hour = time_parts.next()?.parse::<u8>().ok()?;
+    let minute = time_parts.next()?.parse::<u8>().ok()?;
+    let seconds = time_parts.next()?;
+    if time_parts.next().is_some() {
+        return None;
+    }
+    let (second, nanosecond) = if let Some((second, fraction)) = seconds.split_once('.') {
+        if fraction.is_empty()
+            || fraction.len() > 9
+            || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        let parsed = fraction.parse::<u32>().ok()?;
+        (
+            second.parse::<u8>().ok()?,
+            parsed.checked_mul(10u32.pow(9 - fraction.len() as u32))?,
+        )
+    } else {
+        (seconds.parse::<u8>().ok()?, 0)
+    };
+    let month = Month::try_from(month).ok()?;
+    let date = Date::from_calendar_date(year, month, day).ok()?;
+    let time = Time::from_hms_nano(hour, minute, second, nanosecond).ok()?;
+    PrimitiveDateTime::new(date, time)
+        .assume_utc()
+        .format(&Rfc3339)
+        .ok()
+}
+
+fn project_id_query(uri: &Uri) -> Option<String> {
+    let query = uri.query()?;
+    let mut members = query.split('&');
+    let member = members.next()?;
+    if members.next().is_some() {
+        return None;
+    }
+    let (name, value) = member.split_once('=')?;
+    if decode_query_component(name)? != "projectId" {
+        return None;
+    }
+    let value = decode_query_component(value)?;
+    (!value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+    .then_some(value)
+}
+
+fn decode_query_component(value: &str) -> Option<String> {
+    fn hex(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                let high = hex(*bytes.get(index + 1)?)?;
+                let low = hex(*bytes.get(index + 2)?)?;
+                decoded.push((high << 4) | low);
+                index += 3;
+            }
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
 fn validate_request(
     headers: &HeaderMap,
     peer: SocketAddr,
@@ -574,8 +892,34 @@ mod tests {
         projects::{KnownProjectInput, ProjectCatalog},
     };
     use axum::{body::to_bytes, http::Request};
+    use std::ffi::OsString;
     use tempfile::tempdir;
     use tower::ServiceExt;
+
+    const TEST_TOKEN: &str = "0LihExfkXNrXC_i04AvBeOx_Iyo9RsmXKQ66wPQPzcw";
+    static SESSION_DIRECTORY_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct SessionDirectoryOverride {
+        previous: Option<OsString>,
+    }
+
+    impl SessionDirectoryOverride {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("PI_CODING_AGENT_SESSION_DIR");
+            std::env::set_var("PI_CODING_AGENT_SESSION_DIR", path);
+            Self { previous }
+        }
+    }
+
+    impl Drop for SessionDirectoryOverride {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var("PI_CODING_AGENT_SESSION_DIR", previous);
+            } else {
+                std::env::remove_var("PI_CODING_AGENT_SESSION_DIR");
+            }
+        }
+    }
 
     async fn state(storage: PathBuf) -> BridgeState {
         let identity = Arc::new(HostIdentityStore::new(&storage).load_or_create().unwrap());
@@ -607,6 +951,89 @@ mod tests {
                 .unwrap(),
         )
         .unwrap()
+    }
+
+    async fn authorize(state: &BridgeState) {
+        state
+            .devices
+            .lock()
+            .await
+            .add_device(
+                "82c6fbb6-fa93-4672-8b48-b7755a947e7d".into(),
+                "Phone".into(),
+                TEST_TOKEN,
+                unix_seconds(),
+            )
+            .unwrap();
+    }
+
+    fn authorized_request(method: Method, uri: &str, request_id: &str) -> Request<Body> {
+        let mut request = request(method, uri, request_id, Body::empty());
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            format!("Bearer {TEST_TOKEN}").parse().unwrap(),
+        );
+        request
+    }
+
+    fn sync_project(storage: &std::path::Path, project: &std::path::Path, trusted: bool) -> String {
+        let mut catalog = ProjectCatalog::load_or_create(storage).unwrap();
+        let summaries = catalog
+            .sync_projects(
+                &[KnownProjectInput {
+                    path: project.to_string_lossy().into_owned(),
+                    trusted,
+                    last_opened: 1,
+                    pinned: None,
+                }],
+                None,
+            )
+            .unwrap();
+        serde_json::to_value(&summaries[0]).unwrap()["projectId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn write_session(
+        path: &std::path::Path,
+        project: &std::path::Path,
+        pi_id: &str,
+        parent: Option<&str>,
+        name: Option<&str>,
+        first_message: &str,
+    ) {
+        let mut header = serde_json::json!({
+            "type": "session",
+            "id": pi_id,
+            "cwd": project.canonicalize().unwrap().to_string_lossy(),
+        });
+        if let Some(parent) = parent {
+            header["parentSession"] = serde_json::Value::String(parent.to_string());
+        }
+        let mut records = vec![header];
+        if let Some(name) = name {
+            records.push(serde_json::json!({ "type": "session_info", "name": name }));
+        }
+        records.push(serde_json::json!({
+            "type": "message",
+            "message": { "role": "user", "content": first_message },
+        }));
+        records.push(serde_json::json!({
+            "type": "message",
+            "timestamp": "2026-08-03T01:20:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": "Done",
+                "stopReason": "stop",
+            },
+        }));
+        let contents = records
+            .into_iter()
+            .map(|record| serde_json::to_string(&record).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(path, format!("{contents}\n")).unwrap();
     }
 
     #[tokio::test]
@@ -871,6 +1298,327 @@ mod tests {
         );
         let response = app.oneshot(revoked_request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn sessions_returns_safe_stable_opaque_catalogue_and_projects_only_capability() {
+        let _environment_lock = SESSION_DIRECTORY_ENV.lock().unwrap();
+        let root = tempdir().unwrap();
+        let project = root.path().join("private-project-location");
+        let sessions = root.path().join("private-session-directory");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&sessions).unwrap();
+        let _override = SessionDirectoryOverride::set(&sessions);
+        let state = state(root.path().to_path_buf()).await;
+        let project_id = sync_project(root.path(), &project, true);
+        let session_path = sessions.join("private-session-file.jsonl");
+        let parent_path = root.path().join("private-parent-session.jsonl");
+        let pi_id = "pi-internal-session-id-should-not-escape";
+        write_session(
+            &session_path,
+            &project,
+            pi_id,
+            Some(parent_path.to_string_lossy().as_ref()),
+            Some("Remote bridge"),
+            &format!(
+                "Summarize the remote work in {} from {pi_id} at {}.",
+                project.display(),
+                session_path.display()
+            ),
+        );
+        authorize(&state).await;
+        let app = router(state);
+        let request_id = "7c9b9c14-e910-4be7-8878-5d3ed02b2f02";
+        let uri = format!("/v1/sessions?projectId={project_id}");
+        let mut first_request = authorized_request(Method::GET, &uri, request_id);
+        first_request.headers_mut().insert(
+            CAPABILITIES_HEADER,
+            "projects,state,rpc,events".parse().unwrap(),
+        );
+        let first_response = app.clone().oneshot(first_request).await.unwrap();
+        assert_eq!(first_response.status(), StatusCode::OK);
+        assert_eq!(first_response.headers()[PROTOCOL_HEADER], "1");
+        assert_eq!(first_response.headers()[REQUEST_ID_HEADER], request_id);
+        let first_bytes = to_bytes(first_response.into_body(), MAX_HTTP_BODY_BYTES)
+            .await
+            .unwrap();
+        let serialized = String::from_utf8(first_bytes.to_vec()).unwrap();
+        for secret in [
+            project.to_string_lossy().as_ref(),
+            session_path.to_string_lossy().as_ref(),
+            parent_path.to_string_lossy().as_ref(),
+            "private-project-location",
+            "private-session-directory",
+            "private-session-file.jsonl",
+            "private-parent-session.jsonl",
+            pi_id,
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "leaked {secret}: {serialized}"
+            );
+        }
+        let first: serde_json::Value = serde_json::from_slice(&first_bytes).unwrap();
+        assert_eq!(
+            first,
+            serde_json::json!({
+                "protocol": 1,
+                "requestId": request_id,
+                "data": {
+                    "projectId": project_id,
+                    "sessions": [first["data"]["sessions"][0].clone()],
+                    "acceptedCapabilities": ["projects"],
+                },
+            })
+        );
+        let session = &first["data"]["sessions"][0];
+        assert_eq!(session.as_object().unwrap().len(), 6);
+        assert_eq!(session["name"], "Remote bridge");
+        assert_eq!(session["messageCount"], 2);
+        assert!(session["firstMessagePreview"]
+            .as_str()
+            .unwrap()
+            .starts_with("Summarize the remote work"));
+        assert!(
+            session["firstMessagePreview"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count()
+                <= 280
+        );
+        assert_eq!(session["lastFinalReplyAt"], "2026-08-03T01:20:00Z");
+        assert!(normalized_utc_timestamp(session["modifiedAt"].as_str().unwrap()).is_some());
+        let session_id = session["sessionId"].as_str().unwrap().to_string();
+        assert!(session_id.starts_with("session_"));
+
+        let second_response = app
+            .oneshot(authorized_request(Method::GET, &uri, request_id))
+            .await
+            .unwrap();
+        assert_eq!(second_response.status(), StatusCode::OK);
+        let second = response_json(second_response).await;
+        assert_eq!(second["data"]["sessions"][0]["sessionId"], session_id);
+    }
+
+    #[tokio::test]
+    async fn sessions_rejects_invalid_queries_and_uses_uniform_auth_and_not_found_errors() {
+        let root = tempdir().unwrap();
+        let state = state(root.path().to_path_buf()).await;
+        authorize(&state).await;
+        let app = router(state.clone());
+        let request_id = "7c9b9c14-e910-4be7-8878-5d3ed02b2f02";
+
+        let missing_auth = app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                "/v1/sessions?projectId=unknown-project",
+                request_id,
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(missing_auth.status(), StatusCode::UNAUTHORIZED);
+        let missing_auth_body = response_json(missing_auth).await;
+        assert_eq!(missing_auth_body["error"]["code"], "unauthenticated");
+
+        for uri in [
+            "/v1/sessions",
+            "/v1/sessions?",
+            "/v1/sessions?projectId",
+            "/v1/sessions?projectId=",
+            "/v1/sessions?projectId=one&projectId=two",
+            "/v1/sessions?projectId=one&extra=two",
+            "/v1/sessions?extra=one",
+            "/v1/sessions?projectId=%ZZ",
+            "/v1/sessions?projectId=%FF",
+            "/v1/sessions?projectId=%2Fprivate%2Fproject",
+            "/v1/sessions?projectId=one+two",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(authorized_request(Method::GET, uri, request_id))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(response.headers()[PROTOCOL_HEADER], "1");
+            assert_eq!(response.headers()[REQUEST_ID_HEADER], request_id);
+            assert_eq!(
+                response_json(response).await["error"]["code"],
+                "malformed_request",
+                "{uri}"
+            );
+        }
+
+        let unknown_id = "unknown-project";
+        let not_found = app
+            .clone()
+            .oneshot(authorized_request(
+                Method::GET,
+                &format!("/v1/sessions?projectId={unknown_id}"),
+                request_id,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+        let not_found_bytes = to_bytes(not_found.into_body(), MAX_HTTP_BODY_BYTES)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&not_found_bytes).contains(unknown_id));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&not_found_bytes).unwrap()["error"]["code"],
+            "project_not_found"
+        );
+
+        state
+            .devices
+            .lock()
+            .await
+            .revoke("82c6fbb6-fa93-4672-8b48-b7755a947e7d")
+            .unwrap();
+        let revoked = app
+            .oneshot(authorized_request(
+                Method::GET,
+                "/v1/sessions?projectId=unknown-project",
+                request_id,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response_json(revoked).await, missing_auth_body);
+    }
+
+    #[tokio::test]
+    async fn untrusted_projects_return_empty_catalogues_and_clear_stale_session_ids() {
+        let root = tempdir().unwrap();
+        let project = root.path().join("untrusted-project");
+        let sessions = root.path().join("sessions");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&sessions).unwrap();
+        let session = sessions.join("stale.jsonl");
+        std::fs::write(&session, "{}\n").unwrap();
+        let project_id = sync_project(root.path(), &project, true);
+        let stale_session_id = {
+            let mut catalog = ProjectCatalog::load_or_create(root.path()).unwrap();
+            catalog
+                .sync_sessions(
+                    &project_id,
+                    &sessions,
+                    &[SessionSyncInput {
+                        path: session.clone(),
+                    }],
+                )
+                .unwrap();
+            catalog
+                .session_id_for_path(&project_id, &sessions, &session)
+                .unwrap()
+        };
+        assert_eq!(sync_project(root.path(), &project, false), project_id);
+
+        let state = state(root.path().to_path_buf()).await;
+        authorize(&state).await;
+        let response = router(state)
+            .oneshot(authorized_request(
+                Method::GET,
+                &format!("/v1/sessions?projectId={project_id}"),
+                "7c9b9c14-e910-4be7-8878-5d3ed02b2f02",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = response_json(response).await;
+        assert_eq!(value["data"]["sessions"], serde_json::json!([]));
+        assert!(!value.to_string().contains(&stale_session_id));
+        let catalog = ProjectCatalog::load_or_create(root.path()).unwrap();
+        assert!(catalog
+            .session_id_for_path(&project_id, &sessions, &session)
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replaced_projects_and_session_symlink_escapes_are_not_exposed() {
+        use std::os::unix::fs::symlink;
+
+        let _environment_lock = SESSION_DIRECTORY_ENV.lock().unwrap();
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        let sessions = root.path().join("sessions");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&sessions).unwrap();
+        let _override = SessionDirectoryOverride::set(&sessions);
+        let state = state(root.path().to_path_buf()).await;
+        let project_id = sync_project(root.path(), &project, true);
+        authorize(&state).await;
+        let app = router(state);
+        let request_id = "7c9b9c14-e910-4be7-8878-5d3ed02b2f02";
+
+        let outside = root.path().join("outside-session.jsonl");
+        write_session(
+            &outside,
+            &project,
+            "outside-pi-id",
+            None,
+            None,
+            "SYMLINK_ESCAPE_SECRET",
+        );
+        symlink(&outside, sessions.join("escape.jsonl")).unwrap();
+        let response = app
+            .clone()
+            .oneshot(authorized_request(
+                Method::GET,
+                &format!("/v1/sessions?projectId={project_id}"),
+                request_id,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), MAX_HTTP_BODY_BYTES)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["data"]["sessions"],
+            serde_json::json!([])
+        );
+        assert!(!String::from_utf8_lossy(&bytes).contains("SYMLINK_ESCAPE_SECRET"));
+
+        let moved = root.path().join("moved-project");
+        std::fs::rename(&project, &moved).unwrap();
+        symlink(&moved, &project).unwrap();
+        let response = app
+            .oneshot(authorized_request(
+                Method::GET,
+                &format!("/v1/sessions?projectId={project_id}"),
+                request_id,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "project_not_found"
+        );
+    }
+
+    #[test]
+    fn session_projection_helpers_enforce_opaque_query_and_safe_text_timestamp_bounds() {
+        assert_eq!(
+            project_id_query(&"/v1/sessions?project%49d=project_abc-123".parse().unwrap()),
+            Some("project_abc-123".to_string())
+        );
+        let long = "🍋".repeat(300);
+        assert_eq!(
+            safe_session_text(&long, &[], 280).unwrap().chars().count(),
+            280
+        );
+        assert_eq!(
+            normalized_utc_timestamp("2026-08-03T01:20:00.011Z").as_deref(),
+            Some("2026-08-03T01:20:00.011Z")
+        );
+        for invalid in ["2026-02-30T01:20:00Z", "2026-08-03T01:20:00+01:00", "1234"] {
+            assert!(normalized_utc_timestamp(invalid).is_none());
+        }
     }
 
     #[tokio::test]

@@ -141,24 +141,24 @@ struct PiPackagesSnapshot {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PiSessionFinalReply {
+pub(crate) struct PiSessionFinalReply {
     marker: String,
-    timestamp: Option<String>,
+    pub(crate) timestamp: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PiSessionSummary {
-    path: String,
-    id: String,
-    name: Option<String>,
-    parent_session_path: Option<String>,
+pub(crate) struct PiSessionSummary {
+    pub(crate) path: String,
+    pub(crate) id: String,
+    pub(crate) name: Option<String>,
+    pub(crate) parent_session_path: Option<String>,
     #[serde(skip_serializing)]
     anonymous_subagent_bootstrap: bool,
-    modified: u64,
-    message_count: usize,
-    first_message: String,
-    last_final_reply: Option<PiSessionFinalReply>,
+    pub(crate) modified: u64,
+    pub(crate) message_count: usize,
+    pub(crate) first_message: String,
+    pub(crate) last_final_reply: Option<PiSessionFinalReply>,
 }
 
 #[derive(Deserialize)]
@@ -545,7 +545,7 @@ fn path_for_frontend(path: &Path) -> String {
         .to_string()
 }
 
-fn session_directory(cwd: &Path) -> Result<PathBuf, String> {
+pub(crate) fn session_directory(cwd: &Path) -> Result<PathBuf, String> {
     if let Some(directory) = env::var_os("PI_CODING_AGENT_SESSION_DIR") {
         return Ok(expand_home(PathBuf::from(directory)));
     }
@@ -791,7 +791,7 @@ fn read_session_summary(path: &Path, expected_cwd: &Path) -> Option<PiSessionSum
     })
 }
 
-fn list_pi_sessions_sync(cwd: &Path) -> Result<Vec<PiSessionSummary>, String> {
+pub(crate) fn list_pi_sessions_sync(cwd: &Path) -> Result<Vec<PiSessionSummary>, String> {
     let directory = session_directory(cwd)?;
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
