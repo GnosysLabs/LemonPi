@@ -868,6 +868,14 @@ export function missionHasActiveOwnership(input: {
     || input.recordedWriterActive;
 }
 
+export function missionWakeIsBlocked(input: {
+  mainAgentRunning: boolean;
+  activeToolExecutions: number;
+  wakeQueued: boolean;
+}): boolean {
+  return input.mainAgentRunning || input.activeToolExecutions > 0 || input.wakeQueued;
+}
+
 export type AuthoritativeRuntimeWorkerState = "active" | "idle" | "unknown";
 
 export function authoritativeRuntimeWorkerState(value: unknown): AuthoritativeRuntimeWorkerState {
@@ -1099,6 +1107,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   let planContinuationAttempts = 0;
   let mission: MissionState | undefined;
   let mainAgentRunning = false;
+  let activeMainToolExecutions = 0;
+  let missionWakeQueued = false;
   let lastMissionWakeAt = 0;
   let missionWakeCheck: Promise<boolean> | undefined;
   let missionWakeGeneration = 0;
@@ -1161,7 +1171,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
 
   const requestMissionWake = (reason: "plan" | "integration"): Promise<boolean> => {
     if (missionWakeCheck) return Promise.resolve(false);
-    if (!mission || mainAgentRunning) return Promise.resolve(false);
+    if (!mission || missionWakeIsBlocked({ mainAgentRunning, activeToolExecutions: activeMainToolExecutions, wakeQueued: missionWakeQueued })) return Promise.resolve(false);
     if (missionHasOwnedWork() || !missionNeedsMain()) return Promise.resolve(false);
     if (lastAssistantStopReason === "aborted" || lastAssistantStopReason === "error") return Promise.resolve(false);
 
@@ -1179,7 +1189,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       }
 
       if (authoritativeRuntimeWorkerState(runtimeStatus) !== "idle") return false;
-      if (generation !== missionWakeGeneration || !mission || mission.id !== missionId || mainAgentRunning) return false;
+      if (generation !== missionWakeGeneration || !mission || mission.id !== missionId) return false;
+      if (missionWakeIsBlocked({ mainAgentRunning, activeToolExecutions: activeMainToolExecutions, wakeQueued: missionWakeQueued })) return false;
       if (missionHasOwnedWork() || !missionNeedsMain()) return false;
       if (lastAssistantStopReason === "aborted" || lastAssistantStopReason === "error") return false;
       if (mission.wakeAttempts >= 3) {
@@ -1197,10 +1208,19 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       const content = resolvedReason === "integration"
         ? MISSION_INTEGRATION
         : `${PLAN_CONTINUATION}${task ? `\n\nStranded task #${task.id}: ${task.subject} (${task.status})` : ""}`;
-      pi.sendMessage(
-        { customType: `lemonpi-mission-${resolvedReason}`, content, display: false },
-        { deliverAs: "followUp", triggerTurn: true },
-      );
+      // This remains set until the exact hidden wake begins a model turn. The runtime status
+      // query promise finishing is not consumption: clearing here allowed the scheduler to queue
+      // several identical follow-ups behind one long tool-running turn.
+      missionWakeQueued = true;
+      try {
+        pi.sendMessage(
+          { customType: `lemonpi-mission-${resolvedReason}`, content, display: false },
+          { deliverAs: "followUp", triggerTurn: true },
+        );
+      } catch (error) {
+        missionWakeQueued = false;
+        throw error;
+      }
       return true;
     })();
     missionWakeCheck = pending;
@@ -1315,6 +1335,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   const restoreMission = (ctx: { sessionManager: { getBranch(): Iterable<unknown> } }) => {
     missionWakeGeneration += 1;
     missionWakeCheck = undefined;
+    missionWakeQueued = false;
     const restored = replayMissionState(ctx.sessionManager.getBranch());
     restoreReconcileGeneration += 1;
     const generation = restoreReconcileGeneration;
@@ -1349,13 +1370,16 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   });
 
   const missionScheduler = setInterval(() => {
-    if (!missionNeedsMain() || mainAgentRunning || missionHasOwnedWork()) return;
+    if (!missionNeedsMain()
+      || missionWakeIsBlocked({ mainAgentRunning, activeToolExecutions: activeMainToolExecutions, wakeQueued: missionWakeQueued })
+      || missionHasOwnedWork()) return;
     void requestMissionWake(mission?.phase === "integration" ? "integration" : "plan");
   }, 5_000);
 
   pi.on("session_shutdown", async () => {
     missionWakeGeneration += 1;
     missionWakeCheck = undefined;
+    missionWakeQueued = false;
     if (restoreWakeTimer) clearTimeout(restoreWakeTimer);
     clearInterval(missionScheduler);
   });
@@ -1446,6 +1470,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (event) => {
     mainAgentRunning = true;
+    if (event.prompt === MISSION_INTEGRATION || event.prompt.startsWith(PLAN_CONTINUATION)) {
+      missionWakeQueued = false;
+    }
     return {
       systemPrompt: `${event.systemPrompt}\n\n${NARRATION_CONTRACT}\n\n${ORCHESTRATION_CONTRACT}${attentionRecovery ? `\n\n<lemonpi-attention-recovery>\nRun ${attentionRecovery.runId}${attentionRecovery.index !== undefined ? ` child ${attentionRecovery.index}` : ""} needs intervention now. Inspect and control that exact run before ending this turn.\n</lemonpi-attention-recovery>` : ""}`,
     };
@@ -1806,11 +1833,14 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_start", async () => {
+    activeMainToolExecutions += 1;
+    mainAgentRunning = true;
     sawToolActivity = true;
     visibleExplanationAfterLastTool = false;
   });
 
   pi.on("tool_execution_end", async (event) => {
+    activeMainToolExecutions = Math.max(0, activeMainToolExecutions - 1);
     const resumedCall = resumeToolCalls.get(event.toolCallId);
     resumeToolCalls.delete(event.toolCallId);
     if (resumedCall && !event.isError) {
