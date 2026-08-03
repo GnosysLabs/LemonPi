@@ -375,7 +375,6 @@ function AgentCard({
   const activityEvents = activity?.events ?? [];
   const newestActivityEvents = [...activityEvents].reverse();
   const latestEvent = activityEvents.at(-1);
-  const latestReasoning = [...activityEvents].reverse().find((event) => event.kind === "reasoning");
   const healthState = step.activityState ?? ((run.steps?.length ?? 0) <= 1 ? run.activityState : undefined);
   const visibleTodos = activity?.todos?.filter((task) => task.status !== "deleted") ?? [];
   const attemptStartedAt = step.startedAt ?? run.startedAt;
@@ -480,18 +479,6 @@ function AgentCard({
             {step.tokens && <span>{step.tokens.total.toLocaleString()} tok</span>}
             {step.turnCount != null && <span>{step.turnCount} turn{step.turnCount === 1 ? "" : "s"}</span>}
           </div>
-
-          {latestReasoning && (
-            <section className="agent-reasoning-preview" aria-live="polite">
-              <div className="agent-reasoning-preview__header">
-                <span>Latest reasoning</span>
-                <time>{formatElapsed(latestReasoning.at, undefined, now)} ago</time>
-              </div>
-              <div className="agent-reasoning-preview__content">
-                <ReactMarkdown>{latestReasoning.text}</ReactMarkdown>
-              </div>
-            </section>
-          )}
 
           {active && run.statusPath && (
             <form className="agent-steer" onSubmit={(event) => { event.preventDefault(); void submitSteer(); }}>
