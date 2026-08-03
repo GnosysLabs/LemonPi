@@ -1,0 +1,12 @@
+{
+  "protocol": 1,
+  "requestId": "a5d4c182-b0d5-4e2a-89d9-8d2155356dd1",
+  "error": {
+    "code": "unsupported_rpc_type",
+    "message": "This RPC type is not supported by LemonPi Remote Protocol v1.",
+    "retryable": false,
+    "details": {
+      "field": "type"
+    }
+  }
+}

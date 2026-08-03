@@ -1,0 +1,23 @@
+{
+  "protocol": 1,
+  "requestId": "6abf91fe-7ab8-4844-ae95-6aa89014e71f",
+  "data": {
+    "projectId": "project_aJ8nQ2",
+    "sessions": [
+      {
+        "sessionId": "session_7sJ2q",
+        "name": "Remote bridge",
+        "modifiedAt": "2026-08-03T01:20:02.011Z",
+        "messageCount": 12,
+        "firstMessagePreview": "Summarize the current remote bridge work.",
+        "lastFinalReplyAt": "2026-08-03T01:20:00.000Z"
+      }
+    ],
+    "acceptedCapabilities": [
+      "projects",
+      "state",
+      "rpc",
+      "events"
+    ]
+  }
+}

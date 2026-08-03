@@ -1,0 +1,10 @@
+{
+  "seq": 1044,
+  "timestamp": "2026-08-03T01:20:03.000Z",
+  "kind": "gap",
+  "payload": {
+    "fromSeq": 1,
+    "toSeq": 1043,
+    "reason": "replay_evicted"
+  }
+}

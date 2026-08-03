@@ -1,0 +1,17 @@
+{
+  "type": "hello",
+  "protocol": 1,
+  "hostId": "7c9b9c14-e910-4be7-8878-5d3ed02b2f02",
+  "highWaterSeq": 1040,
+  "acceptedCapabilities": [
+    "projects",
+    "state",
+    "rpc",
+    "events"
+  ],
+  "limits": {
+    "eventEnvelopeBytes": 1048576,
+    "replayEvents": 4096,
+    "broadcastQueue": 1024
+  }
+}

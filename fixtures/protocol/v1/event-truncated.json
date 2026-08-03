@@ -1,0 +1,11 @@
+{
+  "seq": 1045,
+  "timestamp": "2026-08-03T01:20:03.125Z",
+  "kind": "truncated",
+  "projectId": "project_aJ8nQ2",
+  "sessionId": "session_7sJ2q",
+  "payload": {
+    "originalKind": "piEvent",
+    "originalBytes": 1350000
+  }
+}

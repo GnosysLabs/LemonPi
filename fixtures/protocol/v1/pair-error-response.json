@@ -1,0 +1,9 @@
+{
+  "protocol": 1,
+  "requestId": "a0d88f19-3d8b-4e56-af2f-24d6fdb345d2",
+  "error": {
+    "code": "invalid_pairing_code",
+    "message": "The pairing code is invalid or no longer available.",
+    "retryable": true
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "protocol": 1,
+  "requestId": "31bea560-0c45-4c6f-92e1-bd371ac52cb4",
+  "data": {
+    "hostId": "7c9b9c14-e910-4be7-8878-5d3ed02b2f02",
+    "displayName": "LemonPi on Maya's Mac",
+    "port": 8787,
+    "capabilities": [
+      "projects",
+      "state",
+      "rpc",
+      "events"
+    ],
+    "acceptedCapabilities": [
+      "projects",
+      "state",
+      "rpc",
+      "events"
+    ],
+    "limits": {
+      "httpBodyBytes": 2097152,
+      "eventEnvelopeBytes": 1048576,
+      "devices": 16,
+      "sockets": 8,
+      "replayEvents": 4096,
+      "broadcastQueue": 1024
+    }
+  }
+}

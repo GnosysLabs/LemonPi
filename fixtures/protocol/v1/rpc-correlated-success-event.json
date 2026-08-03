@@ -1,0 +1,18 @@
+{
+  "seq": 1041,
+  "timestamp": "2026-08-03T01:20:01.234Z",
+  "kind": "piEvent",
+  "projectId": "project_aJ8nQ2",
+  "sessionId": "session_7sJ2q",
+  "payload": {
+    "operationId": "553a1595-bc99-4e2c-8fcc-826b803997fa",
+    "event": {
+      "type": "response",
+      "command": "prompt",
+      "success": true,
+      "data": {
+        "queued": true
+      }
+    }
+  }
+}

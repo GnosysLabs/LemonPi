@@ -1,0 +1,27 @@
+{
+  "protocol": 1,
+  "requestId": "734cd9ef-1afe-48b5-8893-7d806679c6fd",
+  "data": {
+    "project": {
+      "projectId": "project_aJ8nQ2",
+      "displayName": "LemonPi",
+      "trustState": "trusted",
+      "isActive": true
+    },
+    "state": {
+      "sessionId": "session_7sJ2q",
+      "sessionName": "Remote bridge",
+      "isStreaming": false,
+      "isCompacting": false,
+      "thinkingLevel": "high",
+      "messageCount": 12,
+      "pendingMessageCount": 0
+    },
+    "acceptedCapabilities": [
+      "projects",
+      "state",
+      "rpc",
+      "events"
+    ]
+  }
+}

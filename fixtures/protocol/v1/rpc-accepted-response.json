@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "requestId": "a5d4c182-b0d5-4e2a-89d9-8d2155356dd0",
+  "data": {
+    "operationId": "553a1595-bc99-4e2c-8fcc-826b803997fa",
+    "projectId": "project_aJ8nQ2",
+    "sessionId": "session_7sJ2q",
+    "acceptedAt": "2026-08-03T01:20:00Z",
+    "acceptedCapabilities": [
+      "projects",
+      "state",
+      "rpc",
+      "events"
+    ]
+  }
+}
