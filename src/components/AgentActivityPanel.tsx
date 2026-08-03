@@ -96,9 +96,13 @@ function MainAgentCard({
     : activeSubagentCount > 0
       ? `${activeSubagentCount} delegated agent${activeSubagentCount === 1 ? " is" : "s are"} working in the background`
       : "Ready for your next instruction";
-  let mode: "tool" | "reasoning" | "monitoring" | "attention" | "idle" = attentionSubagentCount > 0 ? "attention" : activeSubagentCount > 0 ? "monitoring" : "idle";
-  let mainState: "working" | "waiting" | "monitoring" | "idle" = activeSubagentCount > 0 ? "monitoring" : "idle";
-  if (isStreaming && activeTool) {
+  let mode: "tool" | "reasoning" | "compacting" | "monitoring" | "attention" | "idle" = attentionSubagentCount > 0 ? "attention" : activeSubagentCount > 0 ? "monitoring" : "idle";
+  let mainState: "working" | "waiting" | "compacting" | "monitoring" | "idle" = activeSubagentCount > 0 ? "monitoring" : "idle";
+  if (state?.isCompacting) {
+    latest = "Compressing older conversation context so work can continue";
+    mode = "compacting";
+    mainState = "compacting";
+  } else if (isStreaming && activeTool) {
     latest = describeToolActivity(activeTool);
     mode = "tool";
     mainState = waitingOnDelegation ? "waiting" : "working";
@@ -129,7 +133,7 @@ function MainAgentCard({
         <span className="command-main__state">{mainState !== "idle" ? <><i />{mainState}</> : "idle"}</span>
       </div>
       <div className="command-main__latest" role="status" aria-live="polite">
-        {mode === "tool" ? <TerminalWindow size={14} /> : mode === "reasoning" ? <Brain size={14} /> : mode === "monitoring" ? <CircleNotch className="spin" size={14} /> : mode === "attention" ? <Warning size={14} /> : <Robot size={14} />}
+        {mode === "tool" ? <TerminalWindow size={14} /> : mode === "reasoning" ? <Brain size={14} /> : mode === "compacting" || mode === "monitoring" ? <CircleNotch className="spin" size={14} /> : mode === "attention" ? <Warning size={14} /> : <Robot size={14} />}
         <span>{latest}</span>
       </div>
       <div className="command-main__meta">

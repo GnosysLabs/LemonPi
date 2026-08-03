@@ -88,6 +88,26 @@ describe("reduceTranscript", () => {
     ]);
   });
 
+  it("shows a submitted message immediately and reconciles it when Pi accepts it", () => {
+    let state = reduceTranscript(initialTranscriptState, {
+      type: "lemonpi_queue_user",
+      id: "pending-1",
+      text: "Keep going",
+      behavior: "prompt",
+      attachments: [],
+      createdAt: 1,
+    });
+    expect(state.items).toMatchObject([{ kind: "user", id: "pending-1", text: "Keep going", delivery: "pending" }]);
+
+    state = reduceTranscript(state, {
+      type: "message_start",
+      __lemonId: "accepted",
+      message: { role: "user", content: "Keep going", timestamp: 2 },
+    });
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]).toEqual({ kind: "user", id: "pending-1", text: "Keep going", attachments: [], createdAt: 1 });
+  });
+
   it("keeps attachments visible without dumping embedded file contents into the transcript", () => {
     const state = reduceTranscript(initialTranscriptState, {
       type: "message_start",

@@ -113,11 +113,13 @@ function AssistantMessage({ item, summary }: { item: Extract<TranscriptItem, { k
 export function Transcript({
   items,
   isStreaming,
+  isCompacting,
   hasProject,
   onChooseProject,
 }: {
   items: TranscriptItem[];
   isStreaming: boolean;
+  isCompacting: boolean;
   hasProject: boolean;
   onChooseProject: () => void;
 }) {
@@ -173,6 +175,15 @@ export function Transcript({
                       <span><strong>{attachment.name}</strong><small>Text attachment</small></span>
                     </div>
                   ))}
+                </div>
+              )}
+              {item.delivery && (
+                <div className={`user-message__delivery user-message__delivery--${item.delivery}`} role="status">
+                  {item.delivery === "failed" ? (
+                    <><Warning size={13} /><span><strong>Message was not sent</strong>{item.deliveryError && <small>{item.deliveryError}</small>}</span></>
+                  ) : (
+                    <><CircleNotch className="spin" size={13} /><span><strong>{isCompacting ? "Queued during context compaction" : item.deliveryBehavior === "steer" ? "Steering Pi…" : item.deliveryBehavior === "follow_up" ? "Queued for the next turn" : "Sending to Pi…"}</strong>{isCompacting && <small>It will be delivered automatically as soon as compaction finishes.</small>}</span></>
+                  )}
                 </div>
               )}
             </article>

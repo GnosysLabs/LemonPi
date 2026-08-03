@@ -911,7 +911,9 @@ async fn start_pi(
     let narration_extension = narration_extension_path(&app)?;
     let child_todo_bridge = narration_extension.with_file_name("child-todo-bridge.ts");
     ensure_required_pi_packages(&executable).await?;
-    ensure_subagent_todo_access(&pi_agent_dir()?, &cwd_path, trusted, &child_todo_bridge)?;
+    let agent_dir = pi_agent_dir()?;
+    ensure_auto_compaction_default(&agent_dir)?;
+    ensure_subagent_todo_access(&agent_dir, &cwd_path, trusted, &child_todo_bridge)?;
     let mut command = pi_command(&executable)?;
     command
         .args(["--mode", "rpc", project_trust_arg(trusted)])
@@ -1713,6 +1715,34 @@ fn read_settings_object(path: &Path) -> Result<serde_json::Map<String, Value>, S
             path.display()
         )),
     }
+}
+
+fn ensure_auto_compaction_default(agent_dir: &Path) -> Result<(), String> {
+    let settings_path = agent_dir.join("settings.json");
+    let mut settings = read_settings_object(&settings_path)?;
+    let mut changed = false;
+
+    match settings.get_mut("compaction") {
+        Some(Value::Object(compaction)) => {
+            if !compaction.contains_key("enabled") {
+                compaction.insert("enabled".to_string(), Value::Bool(true));
+                changed = true;
+            }
+        }
+        None => {
+            settings.insert("compaction".to_string(), json!({ "enabled": true }));
+            changed = true;
+        }
+        Some(_) => {
+            // Preserve an explicitly authored value even if a newer Pi version
+            // rejects it; LemonPi must not silently rewrite user configuration.
+        }
+    }
+
+    if changed {
+        write_settings_object(&settings_path, &settings)?;
+    }
+    Ok(())
 }
 
 fn subagents_object(
@@ -3115,6 +3145,41 @@ mod tests {
             json!([path_for_frontend(&bridge)])
         );
         fs::remove_dir_all(root).expect("remove todo access fixture");
+    }
+
+    #[test]
+    fn auto_compaction_is_seeded_without_overriding_user_choice() {
+        let root = env::temp_dir().join(format!(
+            "lemonpi-auto-compaction-default-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create settings fixture directory");
+
+        write_settings_object(
+            &root.join("settings.json"),
+            &serde_json::Map::from_iter([("theme".to_string(), json!("dark"))]),
+        )
+        .expect("write settings fixture");
+        ensure_auto_compaction_default(&root).expect("seed auto compaction");
+        let seeded =
+            read_settings_object(&root.join("settings.json")).expect("read seeded settings");
+        assert_eq!(seeded["compaction"]["enabled"], json!(true));
+        assert_eq!(seeded["theme"], json!("dark"));
+
+        let mut explicit = seeded;
+        explicit.insert(
+            "compaction".to_string(),
+            json!({ "enabled": false, "reserveTokens": 9000 }),
+        );
+        write_settings_object(&root.join("settings.json"), &explicit)
+            .expect("write explicit setting");
+        ensure_auto_compaction_default(&root).expect("preserve explicit setting");
+        let preserved =
+            read_settings_object(&root.join("settings.json")).expect("read preserved settings");
+        assert_eq!(preserved["compaction"]["enabled"], json!(false));
+        assert_eq!(preserved["compaction"]["reserveTokens"], json!(9000));
+
+        fs::remove_dir_all(root).expect("remove settings fixture");
     }
 
     #[test]

@@ -7,6 +7,9 @@ export type TranscriptItem =
       text: string;
       attachments: TranscriptAttachment[];
       createdAt: number;
+      delivery?: "pending" | "failed";
+      deliveryBehavior?: "prompt" | "steer" | "follow_up";
+      deliveryError?: string;
     }
   | {
       kind: "assistant";
@@ -155,6 +158,30 @@ export function reduceTranscript(state: TranscriptState, event: PiEvent): Transc
       return initialTranscriptState;
     case "lemonpi_hydrate":
       return hydrateTranscript(Array.isArray(event.messages) ? event.messages as AgentMessage[] : []);
+    case "lemonpi_queue_user": {
+      const text = typeof event.text === "string" ? event.text : "";
+      const attachments = Array.isArray(event.attachments) ? event.attachments as TranscriptAttachment[] : [];
+      if (!text && attachments.length === 0) return state;
+      return {
+        ...state,
+        items: [...state.items, {
+          kind: "user",
+          id: typeof event.id === "string" ? event.id : eventId(event, "pending-user"),
+          text,
+          attachments,
+          createdAt: typeof event.createdAt === "number" ? event.createdAt : Date.now(),
+          delivery: "pending",
+          deliveryBehavior: event.behavior === "steer" || event.behavior === "follow_up" ? event.behavior : "prompt",
+        }],
+      };
+    }
+    case "lemonpi_queue_user_failed":
+      return {
+        ...state,
+        items: state.items.map((item) => item.kind === "user" && item.id === event.id
+          ? { ...item, delivery: "failed", deliveryError: typeof event.error === "string" ? event.error : "Pi could not accept this message." }
+          : item),
+      };
     case "agent_start":
       return { ...state, isStreaming: true };
     case "agent_settled":
@@ -165,6 +192,18 @@ export function reduceTranscript(state: TranscriptState, event: PiEvent): Transc
       if (message.role === "user") {
         const { text, attachments } = userMessageContent(message.content);
         if (!text && attachments.length === 0) return state;
+        const pendingIndex = state.items.findIndex((item) => item.kind === "user"
+          && item.delivery !== undefined
+          && item.text.trim() === text.trim()
+          && item.attachments.length === attachments.length);
+        if (pendingIndex >= 0) {
+          return {
+            ...state,
+            items: state.items.map((item, index) => index === pendingIndex
+              ? { kind: "user", id: item.id, text, attachments, createdAt: item.createdAt }
+              : item),
+          };
+        }
         return {
           ...state,
           items: [...state.items, { kind: "user", id: eventId(event, "user"), text, attachments, createdAt: timestamp(message) }],

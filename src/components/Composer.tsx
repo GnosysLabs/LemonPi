@@ -123,6 +123,12 @@ export function Composer({
 
   return (
     <div className="composer-shell">
+      {state?.isCompacting && (
+        <div className="composer-compaction" role="status" aria-live="polite">
+          <CircleNotch className="spin" size={14} />
+          <span><strong>Compacting context</strong><small>You can keep typing. Sent messages are queued safely and shown in the chat immediately.</small></span>
+        </div>
+      )}
       {streaming && (
         <div className="composer-modes" role="radiogroup" aria-label="Message delivery">
           <button className={behavior === "steer" ? "active" : ""} type="button" onClick={() => setBehavior("steer")} role="radio" aria-checked={behavior === "steer"}>
@@ -173,7 +179,7 @@ export function Composer({
           onChange={(event) => setText(event.target.value)}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
-          placeholder={connected ? (streaming ? "Guide the work in progress…" : "Ask Pi to work on this project…") : "Open a project to begin…"}
+          placeholder={connected ? (state?.isCompacting ? "Send now — Pi will read it after compaction…" : streaming ? "Guide the work in progress…" : "Ask Pi to work on this project…") : "Open a project to begin…"}
           disabled={!connected}
           rows={1}
           aria-label="Message Pi"

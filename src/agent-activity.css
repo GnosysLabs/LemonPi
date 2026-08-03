@@ -87,6 +87,10 @@
   border-left: 2px solid var(--warning);
 }
 
+.command-main--compacting {
+  border-left: 2px solid var(--warning);
+}
+
 .command-main--monitoring {
   border-left: 2px solid var(--success);
 }
@@ -124,6 +128,10 @@
 }
 
 .command-main--waiting .command-main__state i {
+  background: var(--warning);
+}
+
+.command-main--compacting .command-main__state i {
   background: var(--warning);
 }
 

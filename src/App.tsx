@@ -69,6 +69,7 @@ type PendingRequest = {
   onSuccess?: (data: unknown) => void;
   onError?: (error: string) => void;
   timeoutId?: number;
+  timeoutMs?: number | false;
 };
 
 type SessionsStatus = "loading" | "ready" | "error";
@@ -271,14 +272,16 @@ export default function App() {
   const rpc = useCallback(async (command: Record<string, unknown>, pending?: PendingRequest) => {
     const id = crypto.randomUUID();
     if (pending) {
-      const timeoutId = window.setTimeout(() => {
-        const waiting = pendingRef.current.get(id);
-        if (!waiting) return;
-        pendingRef.current.delete(id);
-        const message = "Pi did not answer this request within 60 seconds.";
-        waiting.onError?.(message);
-        addToast(message, "error");
-      }, 60_000);
+      const timeoutMs = pending.timeoutMs === false ? undefined : pending.timeoutMs ?? 60_000;
+      const timeoutId = timeoutMs === undefined ? undefined : window.setTimeout(() => {
+          const waiting = pendingRef.current.get(id);
+          if (!waiting) return;
+          pendingRef.current.delete(id);
+          const timeoutSeconds = Math.round(timeoutMs / 1000);
+          const message = `Pi did not answer this request within ${timeoutSeconds} seconds.`;
+          waiting.onError?.(message);
+          addToast(message, "error");
+        }, timeoutMs);
       pendingRef.current.set(id, { ...pending, timeoutId });
     }
     try {
@@ -350,6 +353,14 @@ export default function App() {
     if (eventPid && activePidRef.current && eventPid !== activePidRef.current) return;
     const event: PiEvent = { ...rawEvent, __lemonId: String(++sequenceRef.current) };
     dispatchTranscript(event);
+
+    if (event.type === "compaction_start") {
+      setSessionState((current) => current ? { ...current, isCompacting: true } : current);
+    } else if (event.type === "compaction_end") {
+      setSessionState((current) => current ? { ...current, isCompacting: false } : current);
+      if (typeof event.errorMessage === "string" && event.errorMessage) addToast(event.errorMessage, "error");
+      refreshState();
+    }
 
     const nextTodos = todoSnapshotFromEvent(event);
     if (nextTodos) applyTodoSnapshot(nextTodos);
@@ -794,12 +805,29 @@ export default function App() {
 
   function submitMessage(text: string, behavior: ComposerBehavior, attachments: ComposerAttachment[]) {
     setMainTodoInterrupted(false);
-    const images = promptImages(attachments);
-    void rpc({
-      type: behavior === "prompt" ? "prompt" : behavior === "steer" ? "steer" : "follow_up",
-      message: buildPromptWithAttachments(text, attachments),
-      ...(images.length > 0 ? { images } : {}),
+    const pendingId = `pending-user-${crypto.randomUUID()}`;
+    dispatchTranscript({
+      type: "lemonpi_queue_user",
+      id: pendingId,
+      text,
+      behavior,
+      createdAt: Date.now(),
+      attachments: attachments.map(({ name, mimeType, size, kind, data }) => ({ name, mimeType, size, kind, data })),
     });
+    const images = promptImages(attachments);
+    void rpc(
+      {
+        type: behavior === "prompt" ? "prompt" : behavior === "steer" ? "steer" : "follow_up",
+        message: buildPromptWithAttachments(text, attachments),
+        ...(images.length > 0 ? { images } : {}),
+      },
+      {
+        onError: (error) => dispatchTranscript({ type: "lemonpi_queue_user_failed", id: pendingId, error }),
+        // A prompt submitted during compaction is intentionally acknowledged only
+        // after the compacted context is ready. Process exit still rejects it.
+        timeoutMs: false,
+      },
+    );
   }
 
   const subagentSteerWhileStreaming = sessionState?.isStreaming ?? transcript.isStreaming;
@@ -1066,12 +1094,13 @@ export default function App() {
             <Transcript
               items={transcript.items}
               isStreaming={streaming}
+              isCompacting={sessionState?.isCompacting ?? false}
               hasProject={Boolean(project)}
               onChooseProject={() => void chooseProject()}
             />
           </div>
           <div className="conversation-dock">
-            <TodoPanel snapshot={todoSnapshot} hiddenCompletedIds={hiddenCompletedTodoIds} interrupted={mainTodoInterrupted} />
+            <TodoPanel snapshot={todoSnapshot} hiddenCompletedIds={hiddenCompletedTodoIds} interrupted={mainTodoInterrupted} paused={sessionState?.isCompacting} />
             {Object.entries(extensionStatuses).length > 0 && (
               <div className="extension-statuses">
                 {Object.entries(extensionStatuses).map(([key, value]) => <span key={key}><i />{value}</span>)}

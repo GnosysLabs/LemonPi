@@ -31,8 +31,8 @@ export function StatusStrip({
 
         <div className="status-strip__session">
           <span className={`connection-pill connection-pill--${connected ? "online" : "offline"}`}>
-            {state?.isStreaming ? <CircleNotch className="spin" size={12} /> : <Pulse size={12} weight="light" />}
-            {state?.isStreaming ? "Pi working" : connected ? "Pi ready" : project ? "Offline" : "No project"}
+            {state?.isCompacting || state?.isStreaming ? <CircleNotch className="spin" size={12} /> : <Pulse size={12} weight="light" />}
+            {state?.isCompacting ? "Compacting context" : state?.isStreaming ? "Pi working" : connected ? "Pi ready" : project ? "Offline" : "No project"}
           </span>
           <span className="status-strip__cost" title="Session cost">
             <Coins size={12} weight="light" />

@@ -136,6 +136,15 @@
   color: var(--danger);
 }
 
+.todo-panel--paused .todo-panel__summary,
+.todo-task--paused .todo-task__status {
+  color: var(--warning);
+}
+
+.todo-task--paused .todo-task__copy small {
+  color: var(--muted);
+}
+
 .todo-task--interrupted .todo-task__copy small {
   color: color-mix(in srgb, var(--danger) 72%, var(--muted));
 }
