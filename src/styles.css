@@ -78,10 +78,8 @@ body {
 
 .startup-splash__logo {
   display: block;
-  place-self: center;
-  width: min(500px, 76vw);
+  width: min(250px, 38vw);
   height: auto;
-  margin: auto;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -36,6 +36,7 @@
 
 .workspace-rail__top,
 .workspace-rail--collapsed .workspace-rail__top {
+  position: relative;
   display: flex;
   width: 100%;
   height: 36px;
@@ -48,7 +49,24 @@
 }
 
 .workspace-rail__top .brand__mark {
-  height: 26px;
+  height: 52px;
+}
+
+.workspace-rail:not(.workspace-rail--collapsed) .workspace-rail__top {
+  height: 64px;
+  padding: 0;
+  justify-content: center;
+}
+
+.workspace-rail:not(.workspace-rail--collapsed) .workspace-rail__top .brand {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.workspace-rail:not(.workspace-rail--collapsed) .workspace-rail__top .rail-collapse-button {
+  position: absolute;
+  right: 2px;
 }
 
 .workspace-rail--collapsed .workspace-rail__top {
