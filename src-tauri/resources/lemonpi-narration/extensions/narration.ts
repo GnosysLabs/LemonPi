@@ -3,6 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 const SUBAGENT_STEER_PREFIX = "__lemonpi_subagent_steer_v1__:";
 const SUBAGENT_STOP_PREFIX = "__lemonpi_subagent_stop_v1__:";
 const SUBAGENT_TERMINAL_PREFIX = "__lemonpi_subagent_terminal_v1__:";
+const MAIN_AGENT_STOP_PREFIX = "__lemonpi_main_agent_stop_v1__:";
 const SUBAGENT_RPC_REQUEST_EVENT = "subagents:rpc:v1:request";
 const SUBAGENT_RPC_REPLY_PREFIX = "subagents:rpc:v1:reply:";
 const SUBAGENT_RPC_TIMEOUT_MS = 6_000;
@@ -89,13 +90,13 @@ Parallel execution is the normal operating mode, not a rare optimization. Keep t
 
 Routing policy:
 
-1. Fast path — for a genuinely single, bounded, well-understood implementation outcome, call the built-in \`worker\` immediately with a concise outcome and completion condition. Do not create a plan, inspect the roster, or launch a planner first. LemonPi compiles execution mode, chunk fields, acceptance defaults, async behavior, and a one-item child checklist automatically. Aim to launch in the first Main turn. This singleton path is an exception for work too small or indivisible to benefit from parallelism, not the default for a broader request.
+1. Fast path — for a genuinely single, bounded, well-understood implementation outcome, call the built-in \`worker\` immediately with a concise outcome and completion condition. A singleton implementation task must include \`Single-writer reason:\` with exactly one of \`atomic\`, \`overlapping_ownership\`, \`dependency_blocked\`, \`unsafe_checkout\`, or \`overhead_exceeds_benefit\`, plus a concrete \`Single-writer detail:\`. Before the tool call, visibly tell the user \`I’m using a single writer because ...\` with the same real constraint. LemonPi rejects an unexplained singleton. Do not create a plan, inspect the roster, or launch a planner first for truly atomic work. LemonPi compiles execution mode, chunk fields, acceptance defaults, async behavior, and the initial child checklist automatically. Aim to launch in the first Main turn. This singleton path is an exception for work too small or indivisible to benefit from parallelism, not the default for a broader request.
 2. Parallel-first decomposition — for broader work, spend only a brief inspection identifying outcome-sized vertical lanes, their exact ownership, and real dependencies. Collect every lane that is ready now. When two to four ready lanes have disjoint write ownership, dispatch them together in one wave immediately. Do not launch the first obvious lane and postpone other independent lanes until it completes. Dependent or overlapping lanes move to a later wave. Do not split by file merely to create more agents.
 3. Planning and roster — use a planner only when architecture, ordering, or ambiguity cannot be resolved by brief direct inspection. The planner must answer a concrete decision and must never be a ritual before ordinary coding. The built-in \`worker\` is the default executor. Call \`subagent({ action: "list" })\` only when a specialist or custom agent may materially improve the result, then reuse that roster for the task instead of rediscovering it.
-4. Semantic dispatch — tell each child the actual outcome, scope, completion condition, and meaningful constraints in plain language. You do not need to reproduce LemonPi's mechanical execution declaration, acceptance boilerplate, or one-item checklist; the runtime compiles missing fields. For parallel writers only, include \`Owned paths:\` with exact repo-relative files or directories. If ownership cannot be assigned confidently, serialize the work.
+4. Semantic dispatch — tell each child the actual outcome, scope, completion condition, and meaningful constraints in plain language. You do not need to reproduce LemonPi's mechanical execution declaration, acceptance boilerplate, or one-item checklist; the runtime compiles missing fields. For parallel writers, include \`Owned paths:\` with exact repo-relative files or directories. An \`unsafe_checkout\` singleton must also declare exact \`Owned paths:\`. If ownership cannot be assigned confidently, use \`overlapping_ownership\` only when the overlap is real and explain it specifically. Give each worker only focused validation for its lane; do not paste the repository's entire test matrix into every child.
 5. Child progress — LemonPi initializes a child checklist automatically. Supply a custom \`Child checklist:\` only when a delegated lane genuinely has two to five meaningful internal milestones. Do not create checklist items for tool calls or final-response delivery.
 6. Useful specialists — read-only planning, research, review, and analysis must answer a concrete question that changes the next decision. Run useful independent read-only work concurrently with writers when it shortens the critical path, such as preparing the next dependency-ready wave while implementation proceeds. Never launch ceremonial, duplicative, or make-work agents merely to occupy a slot.
-7. Execution path and checkout hygiene — inspect \`git status --porcelain\` once during the brief dispatch pass. If two to four disjoint implementation lanes are ready, make a clean worktree base and launch all of them as one top-level \`tasks\` call; LemonPi adds worktree isolation and caps concurrency automatically. A dirty checkout is a cleanup task, not a sequential-execution excuse. Classify every dirty path first; validate and commit completed in-scope work, use a path-scoped dry run before removing confirmed rebuildable noise, or preserve unrelated changes in a clearly labeled recoverable checkpoint commit when that is safe. Never discard, overwrite, or silently hide user work. If the dirty changes are incomplete, ambiguous, or overlap the planned lanes and no safe checkpoint can preserve their semantics, state that concrete constraint and use one shared-checkout writer. Useful independent read-only subagents should still run alongside it when they save time.
+7. Execution path and checkout hygiene — inspect \`git status --porcelain\` during the brief dispatch pass, but never trust a status or HEAD remembered from before a reload, reset, compaction, or another turn. Immediately before every implementation launch, LemonPi independently reads the target repository's current HEAD and working tree and appends an authoritative checkout snapshot to each child task. If two to four disjoint implementation lanes are ready, make a clean worktree base and launch all of them as one top-level \`tasks\` call; LemonPi adds worktree isolation and caps concurrency automatically. A dirty checkout is a cleanup task, not a sequential-execution excuse. Classify every dirty path first; validate and commit completed in-scope work, use a path-scoped dry run before removing confirmed rebuildable noise, or preserve unrelated changes in a clearly labeled recoverable checkpoint commit when that is safe. Never discard, overwrite, or silently hide user work. LemonPi permits \`unsafe_checkout\` only when the fresh dirty paths actually overlap the singleton's exact owned paths and cannot be normalized safely. Useful independent read-only subagents should still run alongside it when they save time.
 8. Checkpoint and integration review — Main Pi reviews every completed chunk directly: inspect what changed, compare it with the stated scope, owned paths, and out-of-scope boundary, and perform the smallest useful check. For a worktree wave, read the versioned manifest at \`parallelHandoff.path\`; require the expected base commit, a completed child status, a non-error patch, and changed paths confined to that lane's ownership. Apply accepted patches to the primary checkout one at a time with \`git apply --check\` followed by \`git apply --3way\`. This narrow patch application is git integration, not implementation. Never apply a failed, stale-base, out-of-lane, overlapping, or conflict-producing patch blindly; preserve its artifact and re-delegate only that bounded lane after the accepted patches are integrated. Report the concrete checkpoint to the user before continuing. Run a final holistic validation once after all chunks are integrated; do not rerun the full suite after every small chunk unless its risk requires that.
 9. Review gate — independent review is justified only when the user explicitly requests it or the change crosses a material risk boundary such as authentication, authorization, security, privacy, money, irreversible data changes, migrations, cryptography, public protocols, concurrency, or production release infrastructure. State that boundary in the delegated task as "Review justification: ...". At most one reviewer pass is allowed per user request unless the user explicitly asks for multiple independent reviews. Routine work is reviewed by Main Pi at each chunk checkpoint.
 10. Repair rule — only a concrete blocker or major correctness defect warrants a repair pass. Notes, hypothetical edge cases, test-coverage wishes, and low-severity residual risks do not trigger an automatic writer-review loop. For a bounded correction, steer or resume the same writer rather than launching a new implementation owner. After the writer repairs it, Main Pi inspects and validates directly. Do not launch a second reviewer to confirm the first reviewer.
@@ -191,6 +192,12 @@ const CHUNK_DONE_WHEN = /(?:^|\n)\s*done when\s*:\s*\S/i;
 const CHUNK_OUT_OF_SCOPE = /(?:^|\n)\s*out of scope\s*:\s*\S/i;
 const OWNED_PATHS = /(?:^|\n)\s*owned paths\s*:\s*([^\n]+)/i;
 const NO_DEPENDENCIES = /(?:^|\n)\s*depends on\s*:\s*none\s*(?:\n|$)/i;
+const SINGLE_WRITER_REASON = /(?:^|\n)\s*single-writer reason\s*:\s*([^\n]+)/i;
+const SINGLE_WRITER_DETAIL = /(?:^|\n)\s*single-writer detail\s*:\s*([^\n]+)/i;
+const SINGLE_WRITER_VISIBLE_NARRATION = /\b(?:i(?:['’]m| am)|we(?:['’]re| are))\s+(?:using|launching|keeping|choosing)\s+(?:a\s+)?single\s+writer\s+because\b/i;
+const CHECKOUT_SNAPSHOT_START = "<lemonpi-checkout-snapshot>";
+const CHECKOUT_SNAPSHOT_END = "</lemonpi-checkout-snapshot>";
+const CHECKOUT_SNAPSHOT_BLOCK = /\n*<lemonpi-checkout-snapshot>[\s\S]*?<\/lemonpi-checkout-snapshot>\s*/gi;
 const MAX_PARALLEL_WRITERS = 4;
 const MAIN_MUTATION_TOOLS = new Set(["edit", "write", "apply_patch", "patch", "write_file", "edit_file", "create_file", "delete_file", "move_file"]);
 const IMPLEMENTATION_TASK = /\b(?:implement|build|create|edit|modify|update|change|fix|add|remove|refactor|wire|style|replace|rename|delete|patch)\b/i;
@@ -202,6 +209,22 @@ interface DelegatedSpec {
   agent: string;
   task: string;
 }
+
+export type SingleWriterReason = "atomic" | "overlapping_ownership" | "dependency_blocked" | "unsafe_checkout" | "overhead_exceeds_benefit";
+
+export interface CheckoutSnapshot {
+  root: string;
+  head: string;
+  dirtyEntries: string[];
+}
+
+const SINGLE_WRITER_REASONS = new Set<SingleWriterReason>([
+  "atomic",
+  "overlapping_ownership",
+  "dependency_blocked",
+  "unsafe_checkout",
+  "overhead_exceeds_benefit",
+]);
 
 function delegatedSpecs(value: unknown): DelegatedSpec[] {
   const specs: DelegatedSpec[] = [];
@@ -271,7 +294,7 @@ function conciseTaskSummary(task: string): string {
   const line = task
     .split("\n")
     .map((value) => value.trim())
-    .find((value) => value && !/^(?:execution mode|chunk outcome|in scope|done when|out of scope|owned paths|depends on|child checklist)\s*:/i.test(value));
+    .find((value) => value && !/^(?:execution mode|chunk outcome|in scope|done when|out of scope|owned paths|depends on|single-writer reason|single-writer detail|child checklist)\s*:/i.test(value));
   return (line ?? "Complete the delegated outcome").replace(/^[-*]\s+/, "").slice(0, 180);
 }
 
@@ -408,6 +431,128 @@ export function parallelWriterPolicyIssue(input: Record<string, unknown>): strin
     lanes.push({ agent, paths });
   }
   return undefined;
+}
+
+function implementationSpecs(input: Record<string, unknown>): DelegatedSpec[] {
+  return delegatedSpecs(input).filter(delegatesImplementation);
+}
+
+export function singleWriterDispatch(input: Record<string, unknown>): { reason?: SingleWriterReason; detail?: string; rawReason?: string } | undefined {
+  const writers = implementationSpecs(input);
+  if (writers.length !== 1) return undefined;
+  const rawReason = SINGLE_WRITER_REASON.exec(writers[0].task)?.[1]?.trim().toLowerCase();
+  const detail = SINGLE_WRITER_DETAIL.exec(writers[0].task)?.[1]?.trim();
+  const reason = rawReason && SINGLE_WRITER_REASONS.has(rawReason as SingleWriterReason)
+    ? rawReason as SingleWriterReason
+    : undefined;
+  return {
+    ...(rawReason ? { rawReason } : {}),
+    ...(reason ? { reason } : {}),
+    ...(detail ? { detail } : {}),
+  };
+}
+
+export function singletonWriterPolicyIssue(input: Record<string, unknown>, visibleNarration = ""): string | undefined {
+  const dispatch = singleWriterDispatch(input);
+  if (!dispatch) return undefined;
+  if (!dispatch.rawReason) {
+    return "A singleton implementation launch needs `Single-writer reason:` set to atomic, overlapping_ownership, dependency_blocked, unsafe_checkout, or overhead_exceeds_benefit. Parallel implementation is the default; otherwise redraw the task as a top-level worktree wave.";
+  }
+  if (!dispatch.reason) {
+    return `Unknown Single-writer reason: ${dispatch.rawReason}. Use atomic, overlapping_ownership, dependency_blocked, unsafe_checkout, or overhead_exceeds_benefit.`;
+  }
+  if (!dispatch.detail || dispatch.detail.length < 16) {
+    return "A singleton implementation launch needs a concrete `Single-writer detail:` explaining the actual constraint in at least one specific sentence.";
+  }
+  if (!SINGLE_WRITER_VISIBLE_NARRATION.test(visibleNarration)) {
+    return "Before launching one implementation writer, tell the user why in visible narration using the form `I’m using a single writer because ...`, matching the structured Single-writer reason and detail. Then retry the same bounded launch.";
+  }
+  return undefined;
+}
+
+function normalizedDirtyPaths(entry: string): string[] {
+  const body = entry.length > 3 ? entry.slice(3) : entry;
+  return body
+    .split(/\s+->\s+/)
+    .map((value) => value.trim().replace(/^"|"$/g, "").normalize("NFC").replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+$/, "").toLowerCase())
+    .filter(Boolean);
+}
+
+export function checkoutSnapshotPolicyIssue(input: Record<string, unknown>, snapshot: CheckoutSnapshot): string | undefined {
+  const writers = implementationSpecs(input);
+  if (writers.length === 0) return undefined;
+  const dispatch = writers.length === 1 ? singleWriterDispatch(input) : undefined;
+  const dirtyPaths = snapshot.dirtyEntries.flatMap(normalizedDirtyPaths);
+
+  if (dirtyPaths.length === 0) {
+    if (dispatch?.reason === "unsafe_checkout") {
+      return "The fresh checkout preflight is clean, so unsafe_checkout is not a valid singleton reason. Launch the dependency-ready parallel wave or use the actual remaining constraint.";
+    }
+    return undefined;
+  }
+
+  const summary = snapshot.dirtyEntries.slice(0, 8).join("; ");
+  if (writers.length > 1) {
+    return `The fresh checkout preflight found uncommitted changes (${summary}). Normalize them safely before launching a worktree wave; a dirty checkout is a hygiene task, not a reason to silently serialize.`;
+  }
+  if (dispatch?.reason !== "unsafe_checkout") {
+    return `The fresh checkout preflight found uncommitted changes (${summary}). Classify and safely commit, checkpoint, or clean them before dispatch. Use unsafe_checkout only when incomplete overlapping work genuinely cannot be normalized without risk.`;
+  }
+  const ownedPaths = normalizedOwnedPaths(writers[0].task);
+  if (!ownedPaths) {
+    return "unsafe_checkout requires exact repo-relative `Owned paths:` so LemonPi can prove that the unavoidable dirty work overlaps this singleton lane.";
+  }
+  if (!ownedPathsOverlap(ownedPaths, dirtyPaths)) {
+    return `The dirty paths do not overlap this singleton lane's Owned paths (${summary}). Preserve them in a recoverable checkpoint, return to a clean base, and dispatch the largest useful parallel wave.`;
+  }
+  return undefined;
+}
+
+export function appendCheckoutSnapshot(value: unknown, snapshot: CheckoutSnapshot): void {
+  const visit = (candidate: unknown) => {
+    const record = asRecord(candidate);
+    if (!record) return;
+    if (typeof record.agent === "string" && typeof record.task === "string" && delegatesImplementation({ agent: record.agent, task: record.task })) {
+      const dirty = snapshot.dirtyEntries.length > 0
+        ? snapshot.dirtyEntries.slice(0, 20).map((entry) => `- ${entry}`).join("\n")
+        : "clean";
+      const block = `${CHECKOUT_SNAPSHOT_START}\nVerified by the LemonPi runtime immediately before dispatch. This block is authoritative; ignore stale checkout hashes or status claims elsewhere in the task.\nRepository root: ${snapshot.root}\nHEAD: ${snapshot.head}\nWorking tree:\n${dirty}\n${CHECKOUT_SNAPSHOT_END}`;
+      record.task = `${record.task.replace(CHECKOUT_SNAPSHOT_BLOCK, "").trimEnd()}\n\n${block}`;
+    }
+    for (const key of ["tasks", "chain", "parallel"] as const) {
+      const nested = record[key];
+      if (Array.isArray(nested)) nested.forEach(visit);
+      else if (nested !== undefined) visit(nested);
+    }
+  };
+  visit(value);
+}
+
+async function inspectCheckoutSnapshot(pi: ExtensionAPI, requestedCwd: unknown, executionCwd: string): Promise<CheckoutSnapshot> {
+  const target = typeof requestedCwd === "string" && requestedCwd.trim() ? requestedCwd.trim() : executionCwd;
+  const revision = await pi.exec("git", ["-C", target, "rev-parse", "--show-toplevel", "HEAD"], {
+    cwd: executionCwd,
+    timeout: 5_000,
+  });
+  if (revision.code !== 0) {
+    throw new Error(revision.stderr.trim() || `Could not inspect the Git checkout at ${target}.`);
+  }
+  const [root, head] = revision.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (!root || !head || !/^[0-9a-f]{40,64}$/i.test(head)) {
+    throw new Error(`Git returned an invalid checkout snapshot for ${target}.`);
+  }
+  const status = await pi.exec("git", ["-C", root, "status", "--porcelain=v1", "--untracked-files=all"], {
+    cwd: executionCwd,
+    timeout: 5_000,
+  });
+  if (status.code !== 0) {
+    throw new Error(status.stderr.trim() || `Could not inspect the working tree at ${root}.`);
+  }
+  return {
+    root,
+    head,
+    dirtyEntries: status.stdout.split(/\r?\n/).filter((line) => line.trim().length > 0),
+  };
 }
 
 function commandText(input: Record<string, unknown>): string {
@@ -757,6 +902,7 @@ export function shouldWakeForPlanContinuation(input: {
 export default function lemonPiNarration(pi: ExtensionAPI) {
   let sawToolActivity = false;
   let visibleExplanationAfterLastTool = false;
+  let currentAssistantVisibleText = "";
   let lastAssistantStopReason: string | undefined;
   let delegationRepairRequested = false;
   let closingRepairAttempts = 0;
@@ -1016,6 +1162,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   ) => {
     const key = terminalRunKey(sessionId, runId);
     if (integratedTerminalRuns.has(key) && !force) return;
+    if (mission?.phase === "paused") return;
     rememberTerminalRun(key);
     pi.sendMessage(
       {
@@ -1036,7 +1183,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     activeWriterRunId = undefined;
     if (mission) {
       mission.writerActive = false;
-      if (status !== "paused" && mission.activeRunIds.length === 0) mission.phase = "integration";
+      if (status !== "paused" && mission.activeRunIds.length === 0 && mission.phase !== "paused") mission.phase = "integration";
       persistMission();
     }
     if (status === "completed") consecutiveWriterFailures = 0;
@@ -1062,7 +1209,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     activeDelegationHandoffPending = false;
     if (mission && runId) {
       mission.activeRunIds = mission.activeRunIds.filter((candidate) => candidate !== runId);
-      mission.phase = "integration";
+      if (mission.phase !== "paused") mission.phase = "integration";
       mission.wakeAttempts = 0;
       persistMission();
     }
@@ -1099,7 +1246,31 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     const isSteerRequest = event.text.startsWith(SUBAGENT_STEER_PREFIX);
     const isStopRequest = event.text.startsWith(SUBAGENT_STOP_PREFIX);
     const isTerminalRequest = event.text.startsWith(SUBAGENT_TERMINAL_PREFIX);
-    if (!isSteerRequest && !isStopRequest && !isTerminalRequest) return { action: "continue" };
+    const isMainStopRequest = event.text.startsWith(MAIN_AGENT_STOP_PREFIX);
+    if (!isSteerRequest && !isStopRequest && !isTerminalRequest && !isMainStopRequest) return { action: "continue" };
+
+    if (isMainStopRequest) {
+      restoreReconcileGeneration += 1;
+      if (restoreWakeTimer) {
+        clearTimeout(restoreWakeTimer);
+        restoreWakeTimer = undefined;
+      }
+      activeStatusChecksThisTurn.clear();
+      activeDelegationHandoffPending = false;
+      delegationFailurePending = false;
+      delegationRepairRequested = false;
+      attentionRepairRequested = false;
+      closingRepairAttempts = 0;
+      planContinuationAttempts = 0;
+      remainingPlanTask = undefined;
+      if (mission) {
+        mission.phase = "paused";
+        mission.wakeAttempts = 0;
+        delete mission.remainingTask;
+        persistMission();
+      }
+      return { action: "handled" };
+    }
 
     try {
       const prefix = isSteerRequest ? SUBAGENT_STEER_PREFIX : isStopRequest ? SUBAGENT_STOP_PREFIX : SUBAGENT_TERMINAL_PREFIX;
@@ -1148,7 +1319,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         if (mission) {
           mission.activeRunIds = mission.activeRunIds.filter((candidate) => candidate !== runId);
           mission.writerActive = false;
-          mission.phase = "integration";
+          if (mission.phase !== "paused") mission.phase = "integration";
           mission.wakeAttempts = 0;
           persistMission();
         }
@@ -1160,7 +1331,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     return { action: "handled" };
   });
 
-  pi.on("tool_call", async (event) => {
+  pi.on("tool_call", async (event, ctx) => {
     if (process.env.PI_SUBAGENT_CHILD === "1") return;
 
     const input = event.input as Record<string, unknown>;
@@ -1254,6 +1425,13 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           reason: parallelWriterIssue,
         };
       }
+      const singletonWriterIssue = singletonWriterPolicyIssue(input, currentAssistantVisibleText);
+      if (singletonWriterIssue) {
+        return {
+          block: true,
+          reason: singletonWriterIssue,
+        };
+      }
       if (writers.length > 0 && writerOccupied) {
         return {
           block: true,
@@ -1265,6 +1443,25 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           block: true,
           reason: "LemonPi stopped a third consecutive writer attempt after two failed chunks or waves. Report the exact blocker or ask the user before starting another automatic recovery cycle.",
         };
+      }
+      if (writers.length > 0) {
+        let checkoutSnapshot: CheckoutSnapshot;
+        try {
+          checkoutSnapshot = await inspectCheckoutSnapshot(pi, input.cwd, ctx.cwd);
+        } catch (error) {
+          return {
+            block: true,
+            reason: `LemonPi could not verify the target checkout immediately before dispatch: ${error instanceof Error ? error.message : String(error)} No implementation worker was launched.`,
+          };
+        }
+        const checkoutIssue = checkoutSnapshotPolicyIssue(input, checkoutSnapshot);
+        if (checkoutIssue) {
+          return {
+            block: true,
+            reason: checkoutIssue,
+          };
+        }
+        appendCheckoutSnapshot(input, checkoutSnapshot);
       }
       const currentMission = ensureMission("delegated");
       currentMission.writerActive = writers.length > 0;
@@ -1306,6 +1503,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       details?: { event?: { runId?: unknown; index?: unknown; to?: unknown } };
     };
     const notification = visibleText(message.content);
+    if (event.message.role === "assistant") currentAssistantVisibleText = notification;
     if (event.message.role === "user" && message.customType == null) {
       activeStatusChecksThisTurn.clear();
       activeDelegationHandoffPending = false;
@@ -1320,6 +1518,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       latestUserRequest = notification;
       reviewDispatches = 0;
       consecutiveWriterFailures = 0;
+      currentAssistantVisibleText = "";
       if (attentionRecovery) attentionRepairRequested = false;
     }
     if (typeof message.customType === "string" && message.customType.startsWith("lemonpi-mission-")) {
@@ -1349,7 +1548,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       activeDelegationHandoffPending = false;
       if (mission) {
         if (notifiedRunId) mission.activeRunIds = mission.activeRunIds.filter((candidate) => candidate !== notifiedRunId);
-        mission.phase = "integration";
+        if (mission.phase !== "paused") mission.phase = "integration";
         mission.wakeAttempts = 0;
         persistMission();
       }
@@ -1365,9 +1564,14 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     }
   });
 
+  pi.on("message_update", async (event) => {
+    if (event.message.role === "assistant") currentAssistantVisibleText = visibleText(event.message.content);
+  });
+
   pi.on("message_end", async (event) => {
     if (event.message.role !== "assistant") return;
-    visibleExplanationAfterLastTool = Boolean(visibleText(event.message.content));
+    currentAssistantVisibleText = visibleText(event.message.content);
+    visibleExplanationAfterLastTool = Boolean(currentAssistantVisibleText);
     lastAssistantStopReason = event.message.stopReason;
   });
 
@@ -1412,7 +1616,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         activeDelegationHandoffPending = false;
         if (mission) {
           if (runId) mission.activeRunIds = mission.activeRunIds.filter((candidate) => candidate !== runId && !candidate.startsWith(runId) && !runId.startsWith(candidate));
-          mission.phase = "integration";
+          if (mission.phase !== "paused") mission.phase = "integration";
           mission.writerActive = false;
           mission.wakeAttempts = 0;
           persistMission();
@@ -1453,7 +1657,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         currentMission.wakeAttempts = 0;
         persistMission();
       } else if (mission) {
-        mission.phase = "integration";
+        if (mission.phase !== "paused") mission.phase = "integration";
         mission.wakeAttempts = 0;
         persistMission();
       }
@@ -1470,7 +1674,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       settleWriter("failed");
     }
     if (mission) {
-      mission.phase = "integration";
+      if (mission.phase !== "paused") mission.phase = "integration";
       mission.wakeAttempts = 0;
       persistMission();
     }

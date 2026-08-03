@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import {
+  appendCheckoutSnapshot,
   applyDelegationSafetyContracts,
+  checkoutSnapshotPolicyIssue,
   compileDelegationContracts,
   declaredExecutionMode,
   delegatesImplementation,
@@ -12,6 +14,8 @@ import {
   restoredStatusAction,
   shouldSuppressStatusPoll,
   shouldWakeForPlanContinuation,
+  singleWriterDispatch,
+  singletonWriterPolicyIssue,
   subagentStatusDisposition,
 } from "../src-tauri/resources/lemonpi-narration/extensions/narration.ts";
 
@@ -117,6 +121,39 @@ assert.match(parallelWriterPolicyIssue({ tasks: [lane("API", "src/"), lane("UI",
 assert.match(parallelWriterPolicyIssue({ tasks: [lane("API", "src/api/"), lane("UI", "src/ui/")] }), /worktree: true/);
 assert.match(parallelWriterPolicyIssue({ tasks: [lane("1", "src/1"), lane("2", "src/2"), lane("3", "src/3"), lane("4", "src/4"), lane("5", "src/5")], worktree: true }), /at most 4/);
 assert.match(parallelWriterPolicyIssue({ tasks: [{ ...lane("Repeated", "src/repeated"), count: 2 }], worktree: true }), /cannot use count/);
+
+const singleton = (reason, detail = "The change is one atomic outcome with one inseparable write surface.", paths) => ({
+  agent: "worker",
+  task: `${implementationTask}
+Single-writer reason: ${reason}
+Single-writer detail: ${detail}${paths ? `\nOwned paths: ${paths}` : ""}`,
+});
+assert.match(singletonWriterPolicyIssue({ agent: "worker", task: implementationTask }, "I’m using a single writer because this is atomic."), /Single-writer reason/);
+assert.match(singletonWriterPolicyIssue(singleton("guess"), "I’m using a single writer because this is atomic."), /Unknown Single-writer reason/);
+assert.match(singletonWriterPolicyIssue(singleton("atomic", "Too short"), "I’m using a single writer because this is atomic."), /concrete/);
+assert.match(singletonWriterPolicyIssue(singleton("atomic"), "Launching the worker now."), /tell the user why/);
+assert.equal(singletonWriterPolicyIssue(singleton("atomic"), "I’m using a single writer because the behavior is one inseparable state transition."), undefined);
+assert.deepEqual(singleWriterDispatch(singleton("dependency_blocked", "The later lane requires this schema to exist before it can compile.")), {
+  rawReason: "dependency_blocked",
+  reason: "dependency_blocked",
+  detail: "The later lane requires this schema to exist before it can compile.",
+});
+
+const cleanSnapshot = { root: "/repo", head: "a".repeat(40), dirtyEntries: [] };
+const dirtySnapshot = { ...cleanSnapshot, dirtyEntries: [" M src/api/client.ts"] };
+assert.equal(checkoutSnapshotPolicyIssue(singleton("atomic"), cleanSnapshot), undefined);
+assert.match(checkoutSnapshotPolicyIssue(singleton("unsafe_checkout", undefined, "src/api/"), cleanSnapshot), /preflight is clean/);
+assert.match(checkoutSnapshotPolicyIssue(singleton("atomic"), dirtySnapshot), /safely commit/);
+assert.match(checkoutSnapshotPolicyIssue({ tasks: [lane("API", "src/api/"), lane("UI", "src/ui/")], worktree: true }, dirtySnapshot), /hygiene task/);
+assert.match(checkoutSnapshotPolicyIssue(singleton("unsafe_checkout"), dirtySnapshot), /Owned paths/);
+assert.match(checkoutSnapshotPolicyIssue(singleton("unsafe_checkout", undefined, "src/ui/"), dirtySnapshot), /do not overlap/);
+assert.equal(checkoutSnapshotPolicyIssue(singleton("unsafe_checkout", undefined, "src/api/"), dirtySnapshot), undefined);
+
+const snapshotLaunch = singleton("atomic");
+appendCheckoutSnapshot(snapshotLaunch, cleanSnapshot);
+assert.match(snapshotLaunch.task, /<lemonpi-checkout-snapshot>/);
+assert.match(snapshotLaunch.task, new RegExp(`HEAD: ${"a".repeat(40)}`));
+assert.match(snapshotLaunch.task, /Working tree:\nclean/);
 
 const compiledParallelLaunch = {
   tasks: [

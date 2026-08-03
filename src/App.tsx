@@ -77,6 +77,7 @@ type SessionsStatus = "loading" | "ready" | "error";
 type UiPreferences = { sidebarCollapsed: boolean; sidebarWidth: number };
 
 const UI_PREFERENCES_KEY = "lemonpi.ui.v1";
+const MAIN_AGENT_STOP_PREFIX = "__lemonpi_main_agent_stop_v1__:";
 const INITIAL_STARTUP_TIMEOUT_MS = 90_000;
 const SPLASH_EXIT_MS = 180;
 
@@ -234,6 +235,7 @@ export default function App() {
   const [extensionStatuses, setExtensionStatuses] = useState<Record<string, string>>({});
   const [todoSnapshot, setTodoSnapshot] = useState<TodoSnapshot>();
   const [mainTodoInterrupted, setMainTodoInterrupted] = useState(false);
+  const [mainStopping, setMainStopping] = useState(false);
   const [hiddenCompletedTodoIds, setHiddenCompletedTodoIds] = useState<Set<number>>(() => new Set());
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [stderrTail, setStderrTail] = useState<string[]>([]);
@@ -248,6 +250,9 @@ export default function App() {
   const todoSnapshotRef = useRef<TodoSnapshot | undefined>(undefined);
   const checklistNudgesRef = useRef(new Set<string>());
   const mainStreamingRef = useRef(false);
+  const mainStopPendingRef = useRef(false);
+  const mainPlanInterruptedRef = useRef(false);
+  const todoResumeEligibleRef = useRef(false);
 
   const appUpdater = useAppUpdater();
   const finishStartup = useCallback(() => setStartupReady(true), []);
@@ -366,11 +371,20 @@ export default function App() {
     }
 
     const nextTodos = todoSnapshotFromEvent(event);
-    if (nextTodos) applyTodoSnapshot(nextTodos);
+    if (nextTodos) {
+      applyTodoSnapshot(nextTodos);
+      if (mainPlanInterruptedRef.current && todoResumeEligibleRef.current) {
+        mainPlanInterruptedRef.current = false;
+        todoResumeEligibleRef.current = false;
+        setMainTodoInterrupted(false);
+      }
+    }
 
     if (event.type === "message_end") {
       const message = asRecord(event.message);
       if (message?.role === "assistant" && (message.stopReason === "aborted" || message.stopReason === "error")) {
+        mainPlanInterruptedRef.current = true;
+        todoResumeEligibleRef.current = false;
         setMainTodoInterrupted(true);
       }
     }
@@ -434,7 +448,10 @@ export default function App() {
 
     if (event.type === "agent_start") {
       mainStreamingRef.current = true;
-      setMainTodoInterrupted(false);
+      if (mainPlanInterruptedRef.current) todoResumeEligibleRef.current = true;
+      else setMainTodoInterrupted(false);
+      setMainStopping(false);
+      mainStopPendingRef.current = false;
       const currentTodos = todoSnapshotRef.current;
       if (currentTodos) {
         setHiddenCompletedTodoIds((current) => new Set([
@@ -449,6 +466,8 @@ export default function App() {
 
     if (event.type === "agent_settled") {
       mainStreamingRef.current = false;
+      setMainStopping(false);
+      mainStopPendingRef.current = false;
       setSessionState((current) => current ? { ...current, isStreaming: false } : current);
       refreshState();
       void refreshSessions();
@@ -746,6 +765,8 @@ export default function App() {
       if (pending.timeoutId) window.clearTimeout(pending.timeoutId);
     }
     pendingRef.current.clear();
+    mainPlanInterruptedRef.current = false;
+    todoResumeEligibleRef.current = false;
     setMainTodoInterrupted(false);
     setConnection("launching");
     setDetectionError(undefined);
@@ -792,7 +813,10 @@ export default function App() {
             const messages = asRecord(data)?.messages;
             const sessionMessages = Array.isArray(messages) ? messages : [];
             dispatchTranscript({ type: "lemonpi_hydrate", messages: sessionMessages });
-            setMainTodoInterrupted(lastAgentTurnWasInterrupted(sessionMessages));
+            const interrupted = lastAgentTurnWasInterrupted(sessionMessages);
+            mainPlanInterruptedRef.current = interrupted;
+            todoResumeEligibleRef.current = false;
+            setMainTodoInterrupted(interrupted);
             applyTodoSnapshot(todoSnapshotFromMessages(sessionMessages), true);
             refreshState();
             if (initialRestore) finishStartup();
@@ -812,6 +836,8 @@ export default function App() {
   }
 
   function submitMessage(text: string, behavior: ComposerBehavior, attachments: ComposerAttachment[]) {
+    mainPlanInterruptedRef.current = false;
+    todoResumeEligibleRef.current = false;
     setMainTodoInterrupted(false);
     const pendingId = `pending-user-${crypto.randomUUID()}`;
     dispatchTranscript({
@@ -870,12 +896,30 @@ export default function App() {
   }), [rpc, subagentSteerWhileStreaming]);
 
   const stopMainAgent = useCallback(() => {
+    if (mainStopPendingRef.current) return;
+    mainStopPendingRef.current = true;
+    mainPlanInterruptedRef.current = true;
+    todoResumeEligibleRef.current = false;
+    setMainStopping(true);
     setMainTodoInterrupted(true);
-    void rpc(
-      { type: "abort" },
-      { onError: () => setMainTodoInterrupted(false) },
-    );
-  }, [rpc]);
+    void (async () => {
+      try {
+        await sendPi({
+          type: "prompt",
+          id: crypto.randomUUID(),
+          message: `${MAIN_AGENT_STOP_PREFIX}${JSON.stringify({ stoppedAt: Date.now() })}`,
+          streamingBehavior: "steer",
+        });
+        await sendPi({ type: "abort", id: crypto.randomUUID() });
+      } catch (error) {
+        mainStopPendingRef.current = false;
+        mainPlanInterruptedRef.current = false;
+        setMainStopping(false);
+        setMainTodoInterrupted(false);
+        addToast(error instanceof Error ? error.message : String(error), "error");
+      }
+    })();
+  }, [addToast]);
 
   const respondToExtension = useCallback((response: ExtensionUiResponse) => {
     setDialogQueue((current) => current.slice(1));
@@ -895,6 +939,8 @@ export default function App() {
             setStats(undefined);
             setForegroundRuns([]);
             setSubagentRuns([]);
+            mainPlanInterruptedRef.current = false;
+            todoResumeEligibleRef.current = false;
             setMainTodoInterrupted(false);
             applyTodoSnapshot(undefined);
             refreshState();
@@ -921,6 +967,8 @@ export default function App() {
           setStats(undefined);
           setForegroundRuns([]);
           setSubagentRuns([]);
+          mainPlanInterruptedRef.current = false;
+          todoResumeEligibleRef.current = false;
           setMainTodoInterrupted(false);
           applyTodoSnapshot(undefined);
           refreshState();
@@ -931,7 +979,10 @@ export default function App() {
                 const messages = asRecord(messagesData)?.messages;
                 const sessionMessages = Array.isArray(messages) ? messages : [];
                 dispatchTranscript({ type: "lemonpi_hydrate", messages: sessionMessages });
-                setMainTodoInterrupted(lastAgentTurnWasInterrupted(sessionMessages));
+                const interrupted = lastAgentTurnWasInterrupted(sessionMessages);
+                mainPlanInterruptedRef.current = interrupted;
+                todoResumeEligibleRef.current = false;
+                setMainTodoInterrupted(interrupted);
                 applyTodoSnapshot(todoSnapshotFromMessages(sessionMessages), true);
                 setSessionSwitching(false);
                 refreshState();
@@ -1136,6 +1187,7 @@ export default function App() {
             <Composer
               connected={online}
               streaming={streaming}
+              stopping={mainStopping}
               steeringCount={sessionState?.pendingSteeringCount ?? 0}
               followUpCount={sessionState?.pendingFollowUpCount ?? 0}
               state={sessionState}

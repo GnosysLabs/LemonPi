@@ -14,6 +14,7 @@ export type ComposerBehavior = "prompt" | "steer" | "follow_up";
 export function Composer({
   connected,
   streaming,
+  stopping,
   steeringCount,
   followUpCount,
   state,
@@ -29,6 +30,7 @@ export function Composer({
 }: {
   connected: boolean;
   streaming: boolean;
+  stopping: boolean;
   steeringCount: number;
   followUpCount: number;
   state?: PiSessionState;
@@ -208,8 +210,8 @@ export function Composer({
               {readingAttachments ? <CircleNotch className="spin" size={15} /> : attachments.some((attachment) => attachment.kind === "image") ? <ImageSquare size={15} weight="light" /> : <Paperclip size={15} weight="light" />}
             </button>
             {streaming && (
-              <button className="stop-button" type="button" onClick={onAbort} title="Stop current operation">
-                <Stop size={12} weight="fill" />
+              <button className="stop-button" type="button" onClick={onAbort} disabled={stopping} title={stopping ? "Stopping Main Pi" : "Stop Main Pi"} aria-label={stopping ? "Stopping Main Pi" : "Stop Main Pi"}>
+                {stopping ? <CircleNotch className="spin" size={13} /> : <Stop size={12} weight="fill" />}
               </button>
             )}
             {(text.trim() || attachments.length > 0) && (
