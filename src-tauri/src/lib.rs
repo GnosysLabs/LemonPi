@@ -16,6 +16,11 @@ use tokio::{
     sync::{oneshot, Mutex},
 };
 
+// Persistence and policy helpers for a future opt-in remote bridge. This module intentionally
+// starts no listener and is not connected to any Tauri command or current runtime path.
+#[allow(dead_code)]
+mod remote;
+
 const MAX_RPC_RECORD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SESSION_FILES: usize = 250;
 const STDERR_CHUNK_BYTES: usize = 8 * 1024;
