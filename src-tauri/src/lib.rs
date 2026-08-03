@@ -16,12 +16,15 @@ use tokio::{
     sync::{oneshot, Mutex},
 };
 
-// Private persistence, policy, and transport-neutral event helpers for a future opt-in remote
-// bridge. This module starts no listener and exposes no remote Tauri command.
+// Private persistence, policy, catalog, and transport-neutral event helpers for a future opt-in
+// remote bridge. This module starts no listener; its local catalog-sync command cannot enable it.
 #[allow(dead_code)]
 mod remote;
 
-use remote::events::{EventHub, EventKind};
+use remote::{
+    events::{EventHub, EventKind},
+    projects::{KnownProjectInput, ProjectCatalog, RemoteProjectSummary, SessionSyncInput},
+};
 
 const MAX_RPC_RECORD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SESSION_FILES: usize = 250;
@@ -826,6 +829,61 @@ async fn list_pi_sessions(cwd: String) -> Result<Vec<PiSessionSummary>, String> 
     tauri::async_runtime::spawn_blocking(move || list_pi_sessions_sync(&cwd))
         .await
         .map_err(|error| format!("Could not inspect project sessions: {error}"))?
+}
+
+fn remote_storage_directory(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|directory| directory.join("remote"))
+        .map_err(|error| format!("Could not locate LemonPi's remote storage: {error}"))
+}
+
+/// Synchronizes the desktop UI's own recently known project records into the private remote
+/// catalog. This command neither enables remote access nor starts a Pi process.
+#[tauri::command]
+async fn sync_known_projects(
+    app: AppHandle,
+    manager: State<'_, Arc<PiManager>>,
+    projects: Vec<KnownProjectInput>,
+) -> Result<Vec<RemoteProjectSummary>, String> {
+    let active_project = {
+        let registry = manager.registry.lock().await;
+        registry.active_project.clone()
+    };
+    let storage = remote_storage_directory(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut catalog =
+            ProjectCatalog::load_or_create(storage).map_err(|error| error.to_string())?;
+        let summaries = catalog
+            .sync_projects(&projects, active_project.as_deref())
+            .map_err(|error| error.to_string())?;
+        for binding in catalog.project_bindings() {
+            if !binding.trusted {
+                catalog
+                    .clear_sessions(&binding.id)
+                    .map_err(|error| error.to_string())?;
+                continue;
+            }
+            let Ok(session_directory) = session_directory(&binding.path) else {
+                continue;
+            };
+            let Ok(sessions) = list_pi_sessions_sync(&binding.path) else {
+                continue;
+            };
+            let inputs = sessions
+                .into_iter()
+                .map(|session| SessionSyncInput {
+                    path: PathBuf::from(session.path),
+                })
+                .collect::<Vec<_>>();
+            catalog
+                .sync_sessions(&binding.id, &session_directory, &inputs)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(summaries)
+    })
+    .await
+    .map_err(|error| format!("Could not synchronize known projects: {error}"))?
 }
 
 fn forward_framed_result(
@@ -3088,6 +3146,7 @@ pub fn run() {
             start_pi,
             send_pi,
             list_pi_sessions,
+            sync_known_projects,
             get_git_branch,
             get_subagent_runs,
             get_subagent_activity,

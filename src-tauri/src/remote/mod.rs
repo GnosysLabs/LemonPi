@@ -8,6 +8,8 @@ mod config;
 pub(crate) mod events;
 mod identity;
 mod policy;
+pub(crate) mod projects;
+pub(crate) mod protocol;
 
 use serde::{de::DeserializeOwned, Serialize};
 use std::{

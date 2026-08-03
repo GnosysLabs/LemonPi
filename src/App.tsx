@@ -24,6 +24,7 @@ import {
   onPiStderr,
   sendPi,
   startPi,
+  syncKnownProjects,
 } from "./lib/pi-client";
 import {
   isExtensionUiRequest,
@@ -542,6 +543,11 @@ export default function App() {
     } catch {
       // The app remains usable if OS webview storage is unavailable.
     }
+    if (!isTauriRuntime()) return;
+    void syncKnownProjects(recentProjects).catch((error) => {
+      // Remote catalog synchronization is advisory; it must never interrupt desktop work.
+      console.warn("Could not synchronize LemonPi's remote project catalog", error);
+    });
   }, [recentProjects]);
 
   useEffect(() => {

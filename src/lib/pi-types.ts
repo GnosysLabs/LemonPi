@@ -104,6 +104,22 @@ export interface PiProcessInfo {
   cwd?: string;
 }
 
+/** Desktop-owned recent-project input used only to refresh the private remote catalog. */
+export interface KnownProjectSyncInput {
+  path: string;
+  trusted: boolean;
+  lastOpened: number;
+  pinned?: boolean;
+}
+
+/** Safe remote-facing project metadata; it intentionally contains no filesystem path. */
+export interface RemoteProjectSummary {
+  projectId: string;
+  displayName: string;
+  trustState: "trusted" | "untrusted";
+  isActive: boolean;
+}
+
 export interface PiProcessEvent {
   state: "started" | "exited" | "stopped" | "error";
   pid?: number;
