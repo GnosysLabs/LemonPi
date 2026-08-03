@@ -386,7 +386,6 @@ function AgentCard({
   const model = shortModel(step.model);
   const activityEvents = activity?.events ?? [];
   const newestActivityEvents = [...activityEvents].reverse();
-  const latestEvent = activityEvents.at(-1);
   const healthState = step.activityState ?? ((run.steps?.length ?? 0) <= 1 ? run.activityState : undefined);
   const visibleTodos = activity?.todos?.filter((task) => task.status !== "deleted") ?? [];
   const attemptStartedAt = step.startedAt ?? run.startedAt;
@@ -395,29 +394,9 @@ function AgentCard({
   const finalizing = active && todoSnapshotFresh && visibleTodos.length > 0 && visibleTodos.every((task) => task.status === "completed");
   const promptText = step.prompt?.trim() || step.description?.trim();
   const promptSummary = step.summary?.trim() || (promptText ? subagentPromptSummary(promptText) : undefined);
-  let showingPrompt = false;
-  let currentActivity = activity?.headline ?? step.status;
-
-  if (active && step.currentTool) {
-    currentActivity = `Running ${step.currentTool}${step.currentToolArgs ? ` · ${step.currentToolArgs}` : ""}`;
-  } else if (active && healthState === "needs_attention") {
-    currentActivity = "Needs attention — the worker has stopped producing visible activity";
-  } else if (restoringTodos) {
-    currentActivity = "Resuming agent and refreshing its tasks";
-  } else if (finalizing) {
-    currentActivity = "Finalizing response — work checklist complete";
-  } else if (active) {
-    if (latestEvent?.kind === "reasoning" && latestEvent.text) {
-      currentActivity = `Reasoning · ${latestEvent.text}`;
-    } else if (promptSummary) {
-      currentActivity = promptSummary;
-      showingPrompt = true;
-    } else {
-      currentActivity = "Waiting for the model's next action";
-    }
-  }
-  if (!active && promptText) showingPrompt = true;
-  const collapsedStatus = active ? compactLine(currentActivity, 110) : (promptSummary ? compactLine(promptSummary, 110) : `${run.mode} child ${index + 1}`);
+  const collapsedStatus = promptSummary
+    ? compactLine(promptSummary, 110)
+    : `Delegated ${step.label ?? step.agent} task`;
 
   async function submitSteer() {
     const message = steerText.trim();
@@ -455,7 +434,7 @@ function AgentCard({
           className="agent-card__summary"
           type="button"
           onClick={(event) => {
-            if (showingPrompt && (event.target as HTMLElement).closest("[data-agent-prompt]")) setPromptOpen(true);
+            if (promptText && (event.target as HTMLElement).closest("[data-agent-prompt]")) setPromptOpen(true);
             else setExpanded((value) => !value);
           }}
           aria-expanded={expanded}
@@ -463,7 +442,7 @@ function AgentCard({
           <span className="agent-card__status"><StatusIcon status={step.status} needsAttention={active && healthState === "needs_attention"} /></span>
           <span className="agent-card__identity">
             <strong>{step.label ?? step.agent}</strong>
-            <small data-agent-prompt={showingPrompt ? "true" : undefined} title={showingPrompt ? "View the full delegated prompt" : step.description}>{collapsedStatus}</small>
+            <small data-agent-prompt={promptText ? "true" : undefined} title={promptText ? "View the full delegated prompt" : step.description}>{collapsedStatus}</small>
           </span>
           <span className="agent-card__elapsed"><Clock size={10} />{formatElapsed(step.startedAt ?? run.startedAt, step.endedAt, now)}</span>
         </button>

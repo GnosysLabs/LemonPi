@@ -3,6 +3,7 @@ import {
   authoritativeRuntimeWorkerState,
   appendCheckoutSnapshot,
   applyDelegationSafetyContracts,
+  authoredWorkerSummaryIssue,
   compileDelegationContracts,
   declaredExecutionMode,
   delegatesImplementation,
@@ -43,6 +44,10 @@ assert.match(writerLaunch.task, /^Worker summary: Implement compact status state
 assert.equal(writerLaunch.summary, undefined);
 assert.equal(delegatesImplementation(writerLaunch), true);
 assert.equal(normalizeWorkerSummary("one two three four five six seven eight nine", implementationTask), "one two three four five six seven eight");
+assert.match(authoredWorkerSummaryIssue(undefined), /required/);
+assert.match(authoredWorkerSummaryIssue("one two three four five six seven eight nine"), /eight words/);
+assert.match(authoredWorkerSummaryIssue("Complete delegated outcome"), /actual outcome/);
+assert.equal(authoredWorkerSummaryIssue("Implement compact status state"), undefined);
 
 const writerSpawn = independentSpawnParams(writerLaunch);
 assert.equal(writerSpawn.implementation, true);

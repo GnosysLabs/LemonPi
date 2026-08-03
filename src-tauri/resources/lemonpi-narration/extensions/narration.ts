@@ -377,6 +377,19 @@ export function normalizeWorkerSummary(value: unknown, task: string): string {
     || "Complete delegated outcome";
 }
 
+export function authoredWorkerSummaryIssue(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim()) {
+    return "is required and must describe this lane's concrete purpose";
+  }
+  const summary = cleanChecklistText(value).replace(/^worker summary\s*:\s*/i, "");
+  const words = summary.split(/\s+/).filter(Boolean);
+  if (words.length > 8) return "must contain eight words or fewer";
+  if (/^(?:complete|handle|perform|execute|work on)(?: the)?(?: delegated)?(?: task| outcome| work)?[.!]?$/i.test(summary)) {
+    return "must describe the actual outcome, not generic delegation boilerplate";
+  }
+  return undefined;
+}
+
 function cleanChecklistText(value: string): string {
   return value
     .replace(/^\s*(?:#{1,6}\s*|[-*+]\s+)/, "")
@@ -1564,6 +1577,11 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
 
       await Promise.all(prepared.map(async (candidate) => {
         stripPerDispatchBudgets(candidate.lane);
+        const summaryIssue = authoredWorkerSummaryIssue(candidate.lane.summary);
+        if (summaryIssue) {
+          candidate.issue = `Worker summary ${summaryIssue}. Add a user-facing purpose such as \"Repair remote settings layout\".`;
+          return;
+        }
         compileDelegationContracts(candidate.lane);
         candidate.implementation = delegatesImplementation({
           agent: candidate.agent,
