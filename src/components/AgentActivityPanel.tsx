@@ -197,7 +197,6 @@ function AgentTaskPreview({
   task,
   anchor,
   blocked,
-  blockers,
   terminalLabel,
   onMouseEnter,
   onMouseLeave,
@@ -206,7 +205,6 @@ function AgentTaskPreview({
   task: AgentTodoItem;
   anchor: DOMRect;
   blocked: boolean;
-  blockers: string[];
   terminalLabel?: string;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
@@ -224,7 +222,6 @@ function AgentTaskPreview({
     : blocked
       ? "Blocked"
       : task.status.replace("_", " ");
-  const activeForm = task.activeForm?.trim();
   const description = task.description?.trim();
 
   return createPortal(
@@ -242,18 +239,6 @@ function AgentTaskPreview({
       </header>
       <h4>{task.subject}</h4>
       {description && <p>{description}</p>}
-      {activeForm && activeForm !== description && (
-        <div className="agent-task-preview__now">
-          <span>Current step</span>
-          <p>{activeForm}</p>
-        </div>
-      )}
-      {(task.owner || blockers.length > 0) && (
-        <footer>
-          {task.owner && <span><b>Owner</b>{task.owner}</span>}
-          {blockers.length > 0 && <span><b>Waiting on</b>{blockers.join(", ")}</span>}
-        </footer>
-      )}
     </aside>,
     document.body,
   );
@@ -272,7 +257,7 @@ function AgentTodos({
 }) {
   const tooltipPrefix = useId();
   const hideTimer = useRef<number | undefined>(undefined);
-  const [preview, setPreview] = useState<{ task: AgentTodoItem; anchor: DOMRect; blocked: boolean; blockers: string[] } | null>(null);
+  const [preview, setPreview] = useState<{ task: AgentTodoItem; anchor: DOMRect; blocked: boolean } | null>(null);
   useEffect(() => () => {
     if (hideTimer.current !== undefined) window.clearTimeout(hideTimer.current);
   }, []);
@@ -301,9 +286,9 @@ function AgentTodos({
     cancelHide();
     hideTimer.current = window.setTimeout(() => setPreview(null), 100);
   };
-  const showPreview = (task: AgentTodoItem, target: HTMLElement, blocked: boolean, blockers: string[]) => {
+  const showPreview = (task: AgentTodoItem, target: HTMLElement, blocked: boolean) => {
     cancelHide();
-    setPreview({ task, anchor: target.getBoundingClientRect(), blocked, blockers });
+    setPreview({ task, anchor: target.getBoundingClientRect(), blocked });
   };
   return (
     <section className={`agent-todos${visible.length === 0 ? " agent-todos--empty" : ""}${interrupted ? " agent-todos--interrupted" : ""}`} aria-label="Agent tasks">
@@ -317,9 +302,6 @@ function AgentTodos({
       ) : <div className="agent-todos__list">
         {ordered.map((task) => {
           const blocked = task.status === "pending" && task.blockedBy.some((id) => !completed.has(id));
-          const blockers = task.blockedBy
-            .filter((id) => !completed.has(id))
-            .map((id) => visible.find((candidate) => candidate.id === id)?.subject ?? `Task ${id}`);
           const detailId = `${tooltipPrefix}-task-${task.id}`;
           return (
             <div
@@ -327,9 +309,9 @@ function AgentTodos({
               key={task.id}
               tabIndex={0}
               aria-describedby={preview?.task.id === task.id ? detailId : undefined}
-              onMouseEnter={(event) => showPreview(task, event.currentTarget, blocked, blockers)}
+              onMouseEnter={(event) => showPreview(task, event.currentTarget, blocked)}
               onMouseLeave={hidePreview}
-              onFocus={(event) => showPreview(task, event.currentTarget, blocked, blockers)}
+              onFocus={(event) => showPreview(task, event.currentTarget, blocked)}
               onBlur={hidePreview}
             >
               <span className="agent-todo__status">
@@ -346,7 +328,6 @@ function AgentTodos({
           task={preview.task}
           anchor={preview.anchor}
           blocked={preview.blocked}
-          blockers={preview.blockers}
           terminalLabel={interrupted ? terminalLabel : undefined}
           onMouseEnter={cancelHide}
           onMouseLeave={hidePreview}
