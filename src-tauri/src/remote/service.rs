@@ -22,7 +22,7 @@ use std::{
 use tokio::{
     net::TcpListener,
     sync::{watch, Mutex, Semaphore},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
 };
 use tokio_rustls::TlsAcceptor;
 
@@ -270,8 +270,8 @@ impl RemoteService {
         Ok(())
     }
 
-    /// Must be called with `transition` held. It closes the listening socket before returning and
-    /// aborts only the listener task if it does not acknowledge shutdown promptly.
+    /// Must be called with `transition` held. It waits for the listener plus its tracked connection
+    /// tasks before returning, aborting the listener if it does not acknowledge shutdown promptly.
     async fn stop_locked(&self) {
         let running = self.running.lock().await.take();
         if let Some(running) = running {
@@ -366,12 +366,19 @@ async fn run_listener(
     mut shutdown: watch::Receiver<bool>,
     connection_budget: Arc<Semaphore>,
 ) -> ListenerExit {
+    let mut connections = JoinSet::new();
     loop {
         let accepted = tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
+                    abort_and_drain(&mut connections).await;
                     return ListenerExit::Shutdown;
                 }
+                continue;
+            }
+            completed = connections.join_next(), if !connections.is_empty() => {
+                // Connection task results remain silent.
+                let _ = completed;
                 continue;
             }
             accepted = listener.accept() => accepted,
@@ -380,7 +387,10 @@ async fn run_listener(
             Ok(accepted) => accepted,
             // Do not spin on a persistent listener failure. `status` reaps this completed task
             // and surfaces only a stable local error string, never an OS/peer diagnostic.
-            Err(_) => return ListenerExit::AcceptError,
+            Err(_) => {
+                abort_and_drain(&mut connections).await;
+                return ListenerExit::AcceptError;
+            }
         };
         // This happens before TLS and before route handling. A denied TCP peer gets no protocol
         // information or error body to probe.
@@ -396,7 +406,7 @@ async fn run_listener(
         let connection_acceptor = acceptor.clone();
         let connection_app = app.clone();
         let connection_shutdown = shutdown.clone();
-        tokio::spawn(async move {
+        connections.spawn(async move {
             let _permit = permit;
             serve_tls_connection(
                 connection_acceptor,
@@ -408,6 +418,11 @@ async fn run_listener(
             .await;
         });
     }
+}
+
+async fn abort_and_drain(tasks: &mut JoinSet<()>) {
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
 }
 
 fn remote_device(device: DeviceSummary) -> RemoteDevice {
@@ -453,6 +468,7 @@ fn valid_pairing_host(host: &str) -> bool {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    use tokio::sync::Notify;
 
     fn unused_port() -> u16 {
         unused_ports(1)[0]
@@ -654,6 +670,31 @@ mod tests {
         drop(replacement);
         drop(permits);
         assert_eq!(budget.available_permits(), MAX_REMOTE_CONNECTIONS);
+    }
+
+    #[tokio::test]
+    async fn abort_and_drain_stops_stalled_task_and_restores_permit() {
+        let budget = Arc::new(Semaphore::new(1));
+        let permit = budget.clone().try_acquire_owned().unwrap();
+        let started = Arc::new(Notify::new());
+        let stalled = Arc::new(Notify::new());
+        let mut tasks = JoinSet::new();
+        tasks.spawn({
+            let started = Arc::clone(&started);
+            let stalled = Arc::clone(&stalled);
+            async move {
+                let _permit = permit;
+                started.notify_one();
+                stalled.notified().await;
+            }
+        });
+        started.notified().await;
+        assert_eq!(budget.available_permits(), 0);
+
+        abort_and_drain(&mut tasks).await;
+
+        assert!(tasks.is_empty());
+        assert_eq!(budget.available_permits(), 1);
     }
 
     #[test]
