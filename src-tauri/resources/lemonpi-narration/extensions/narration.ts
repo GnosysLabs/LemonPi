@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 const SUBAGENT_STEER_PREFIX = "__lemonpi_subagent_steer_v1__:";
 const SUBAGENT_STOP_PREFIX = "__lemonpi_subagent_stop_v1__:";
@@ -11,6 +11,33 @@ const RESTORE_STATUS_RPC_TIMEOUT_MS = 2_000;
 const RESTORE_RECONCILE_DELAYS_MS = [500, 1_500, 3_000] as const;
 const CHILD_TODO_SEED_TAG = "lemonpi-child-todo-seed";
 const CURRENT_CHILD_OWNER = "__lemonpi_current_child__";
+
+const IndependentDispatchSchema = {
+  type: "object",
+  properties: {
+    lanes: {
+      type: "array",
+      minItems: 1,
+      description: "Every dependency-ready lane. Each becomes its own async run and completes independently.",
+      items: {
+        type: "object",
+        properties: {
+          agent: { type: "string", description: "Executable runtime agent name from the live roster." },
+          task: { type: "string", description: "One independently actionable outcome with scope and completion condition." },
+          cwd: { type: "string", description: "Repository or project directory for this lane." },
+          model: { type: "string", description: "Optional model override for this lane." },
+          skill: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }, { type: "boolean" }] },
+          acceptance: {},
+        },
+        required: ["agent", "task"],
+        additionalProperties: false,
+      },
+    },
+    context: { type: "string", enum: ["fresh", "fork"] },
+  },
+  required: ["lanes"],
+  additionalProperties: false,
+} as const;
 
 interface InitialChildTodo {
   id: number;
@@ -82,7 +109,7 @@ The user is watching this work in LemonPi. Hidden reasoning and tool activity ar
 Delegated work is asynchronous by default in LemonPi. After launching subagents, continue any brief independent read-only work that is immediately useful, then visibly report that delegated work is active and end the turn. Do not call subagent_wait: LemonPi is interactive, the background worker remains alive, and its completion notification will wake you. Ending the turn keeps Main Pi available to read and respond to user messages while workers run. If the user supplies guidance, respond first and steer the relevant worker when appropriate. A completed background delegation is input to your work, not a substitute for your own closing response.
 </lemonpi-visible-narration>`;
 
-const ORCHESTRATION_CONTRACT = `
+/* Legacy grouped-dispatch contract retained only in source history below this line.
 <lemonpi-orchestration>
 You are Main Pi, the read-only supervisor and integration owner. You do not implement changes in project files. Optimize for the shortest reliable path to the user's outcome by selecting the best currently available subagent for each necessary phase, giving each writer a clear coherent slice, then inspecting, integrating, and validating its result. File count alone never makes work large.
 
@@ -110,6 +137,27 @@ Routing policy:
 16. Visible full-mission plan rule — use the \`todo\` tool for work with multiple meaningful steps so the user can see the complete path to done and live progress in LemonPi. Main Pi owns the session-level plan: represent every relevant outcome and dependency, not just the current and next step; create concise outcome-oriented tasks; mark every lane in the active parallel wave in progress; and keep at least three tasks actively delegated unless the enforced rare exception applies. Tasks from later graph levels may be in progress now when their inputs are stable. Update status as results arrive and complete tasks only after inspecting the corresponding result. Do not settle while the plan has unfinished work unless delegated agents are actively carrying it; refill the ready wave, continue the next dependency-ready work, or move a genuinely blocked task out of in-progress state and explain what input or external change is required. Do not create a checklist for a single trivial action, duplicate every tool call as a task, or use the checklist as a substitute for visible narration.
 
 Main Pi may use read-only inspection, search, status, test, build, and git-management operations. It must not call file editing/writing tools or use shell commands to mutate project files, except for applying an accepted package-generated worktree patch from \`.pi-subagents/artifacts/worktree-diffs/\` with the exact guarded \`git apply\` flow above. Launch implementation asynchronously, do only brief useful read-only work, then return control to the user; completion events provide the integration wake-up. For explanation, diagnosis, review, or other read-only requests, do not launch an implementation worker.
+</lemonpi-orchestration>
+*/
+
+const ORCHESTRATION_CONTRACT = `
+<lemonpi-orchestration>
+You are Main Pi, the read-only supervisor and integration owner. You do not implement project changes yourself. Optimize for wall-clock delivery time by seeing the complete path to done, dispatching every dependency-ready lane immediately, reacting to each result as it arrives, and keeping useful work flowing until the outcome is verified.
+
+Independent dispatch is the default:
+
+1. Before meaningful execution, spend only a brief pass mapping the whole outcome graph: implementation, investigation, UX, platform, validation preparation, integration, and any material review boundary. Look several steps ahead. A later-step lane may start now whenever its inputs are already stable.
+2. Use \`lemonpi_dispatch\` for every implementation lane and whenever two or more read-only lanes are ready, with one lane per independent outcome. LemonPi launches every lane as a separate async run, not as a grouped subagent job. Each child completion wakes Main Pi independently, so inspect and integrate that result immediately while siblings continue. Refill newly-ready work without waiting for the original set to finish.
+3. A direct single read-only delegation is appropriate only when exactly one useful read-only lane is ready. There is no numerical quota: never manufacture agents, but never serialize independent work for convenience, superficial file overlap, a dirty checkout, or because the first lane is easiest to describe.
+4. Grouped \`subagent.tasks\` and chains are exceptional. Use them only when the user needs one atomic aggregate result whose partial child results are not independently actionable. Ordinary parallel research, implementation, review, and validation are independent lanes.
+5. Choose agents from the live roster by capability, including custom user agents. Call \`subagent({ action: "list" })\` once when the roster is not already known and role choice matters, then reuse it. Use planners, designers, scouts, context builders, reviewers, or other specialists when their output changes a real decision; do not create ceremonial diversity or default every task to worker/planner/reviewer.
+6. Give each lane one coherent checkpoint outcome, its scope, its done condition, and exact \`Owned paths:\` for implementation. LemonPi compiles execution mode, safety, acceptance, and an initial child checklist. Keep assignments concise; five minutes is a decomposition aspiration, not a timeout or a mechanical prompt-length gate.
+7. LemonPi isolates every independently dispatched writer in a package-managed worktree. Multiple same-repository writers may therefore run concurrently when ownership is disjoint. Main Pi reads each completed run's \`parallelHandoff.path\`, checks the base, status, patch, and ownership, then applies accepted patches individually with \`git apply --check\` followed by \`git apply --3way\`. Integrate one result while unrelated writers continue. Never let one dirty or invalid lane suppress valid read-only or other-repository work; preserve user changes and report the exact blocked lane.
+8. Independent review is reserved for explicit review requests or material security, privacy, money, migration, cryptography, concurrency, public-protocol, or release risk. Routine chunks are inspected by Main Pi. Repair only concrete blockers or major correctness defects, preferably by steering or resuming the same writer.
+9. Never set model-authored timeout, turn, tool, or usage budgets. Never call \`subagent_wait\`. End the turn after dispatch and concise narration so the user can steer Main Pi while children run. Completion and needs-attention events wake Main Pi; ordinary status updates do not.
+10. Main Pi alone asks the user clarifying questions. Maintain a concise visible todo plan for multi-step work, update it as individual results arrive, and never leave an unfinished ready lane idle.
+
+Main Pi may inspect, search, test, build, and manage Git. It may not edit project files, except for the guarded application of package-generated worktree patches under \`.pi-subagents/artifacts/worktree-diffs/\`. For read-only user requests, do not launch implementation.
 </lemonpi-orchestration>`;
 
 const CLOSING_REPAIR = `The previous response ended after tool activity without a visible closing explanation. Do not call more tools. Give the user a concise, specific closing explanation now: state the outcome, what changed, what was verified, and any blocker or next step. If the task is incomplete, say exactly where it stopped and why.`;
@@ -135,8 +183,8 @@ function visibleText(content: unknown): string {
 
 function requestSubagentRpc<T>(
   pi: ExtensionAPI,
-  method: "status" | "steer" | "stop",
-  params: { id?: string; index?: number; message?: string },
+  method: "spawn" | "status" | "steer" | "stop",
+  params: Record<string, unknown>,
   timeoutMs = SUBAGENT_RPC_TIMEOUT_MS,
 ): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -180,6 +228,10 @@ function requestSubagentStatus(pi: ExtensionAPI, id?: string): Promise<unknown> 
   return requestSubagentRpc<unknown>(pi, "status", id ? { id } : {}, RESTORE_STATUS_RPC_TIMEOUT_MS);
 }
 
+function requestSubagentSpawn(pi: ExtensionAPI, params: Record<string, unknown>): Promise<unknown> {
+  return requestSubagentRpc<unknown>(pi, "spawn", params, 15_000);
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
@@ -189,60 +241,27 @@ const CHUNK_IN_SCOPE = /(?:^|\n)\s*in scope\s*:\s*\S/i;
 const CHUNK_DONE_WHEN = /(?:^|\n)\s*done when\s*:\s*\S/i;
 const CHUNK_OUT_OF_SCOPE = /(?:^|\n)\s*out of scope\s*:\s*\S/i;
 const NO_DEPENDENCIES = /(?:^|\n)\s*depends on\s*:\s*none\s*(?:\n|$)/i;
-const SINGLE_WRITER_REASON = /(?:^|\n)\s*single-writer reason\s*:\s*([^\n]+)/i;
-const SINGLE_WRITER_DETAIL = /(?:^|\n)\s*single-writer detail\s*:\s*([^\n]+)/i;
-const CONCURRENCY_EXCEPTION = /(?:^|\n)\s*concurrency exception\s*:\s*([^\n]+)/i;
-const CONCURRENCY_DETAIL = /(?:^|\n)\s*concurrency detail\s*:\s*([^\n]+)/i;
-const PARALLEL_LANES_CONSIDERED = /(?:^|\n)\s*parallel lanes considered\s*:\s*([^\n]+)/i;
 const SLICE_TARGET = /(?:^|\n)\s*slice target\s*:\s*under 5 minutes\s*(?:\n|$)/i;
-const SLICE_EXCEPTION = /(?:^|\n)\s*slice exception\s*:\s*([^\n]+)/i;
-const SLICE_DETAIL = /(?:^|\n)\s*slice detail\s*:\s*([^\n]+)/i;
-const ROLE_DIVERSITY_EXCEPTION = /(?:^|\n)\s*role diversity exception\s*:\s*([^\n]+)/i;
-const ROLE_DIVERSITY_DETAIL = /(?:^|\n)\s*role diversity detail\s*:\s*([^\n]+)/i;
-const AGENT_TYPES_CONSIDERED = /(?:^|\n)\s*agent types considered\s*:\s*([^\n]+)/i;
 const CHECKOUT_SNAPSHOT_START = "<lemonpi-checkout-snapshot>";
 const CHECKOUT_SNAPSHOT_END = "</lemonpi-checkout-snapshot>";
 const CHECKOUT_SNAPSHOT_BLOCK = /\n*<lemonpi-checkout-snapshot>[\s\S]*?<\/lemonpi-checkout-snapshot>\s*/gi;
 const MAIN_MUTATION_TOOLS = new Set(["edit", "write", "apply_patch", "patch", "write_file", "edit_file", "create_file", "delete_file", "move_file"]);
 const IMPLEMENTATION_TASK = /\b(?:implement|build|create|edit|modify|update|change|fix|add|remove|refactor|wire|style|replace|rename|delete|patch)\b/i;
 const EXPLICIT_READ_ONLY_TASK = /\b(?:execution mode:\s*read[- ]only|read[- ]only|no code changes|do not (?:edit|write|modify)|without (?:editing|writing|modifying)|plan only|report only|analysis only)\b/i;
-const EXECUTION_MODE = /^\s*execution mode\s*:\s*(read[- ]only|implementation)\s*(?:\n|$)/i;
+const EXECUTION_MODE = /(?:^|\n)\s*execution mode\s*:\s*(read[- ]only|implementation)\s*(?:\n|$)/i;
 const PACKAGE_READ_ONLY_GUARD = "Do not modify any project files. Return only the requested read-only artifact.";
+const ATOMIC_AGGREGATE = /(?:^|\n)\s*atomic aggregate\s*:\s*required\s*(?:\n|$)/i;
 
 interface DelegatedSpec {
   agent: string;
   task: string;
 }
 
-export type SingleWriterReason = "atomic" | "dependency_blocked" | "unsafe_checkout" | "overhead_exceeds_benefit";
-export type SliceException = "external_runtime" | "indivisible_operation" | "critical_integration";
-export type RoleDiversityException = "implementation_only" | "only_capable_role" | "roster_restricted";
-export const MINIMUM_USEFUL_CONCURRENT_AGENTS = 3;
-export const MAX_NORMAL_CHILD_MILESTONES = 3;
-export const MAX_NORMAL_CHILD_PROMPT_CHARACTERS = 3_600;
-
 export interface CheckoutSnapshot {
   root: string;
   head: string;
   dirtyEntries: string[];
 }
-
-const SINGLE_WRITER_REASONS = new Set<SingleWriterReason>([
-  "atomic",
-  "dependency_blocked",
-  "unsafe_checkout",
-  "overhead_exceeds_benefit",
-]);
-const SLICE_EXCEPTIONS = new Set<SliceException>([
-  "external_runtime",
-  "indivisible_operation",
-  "critical_integration",
-]);
-const ROLE_DIVERSITY_EXCEPTIONS = new Set<RoleDiversityException>([
-  "implementation_only",
-  "only_capable_role",
-  "roster_restricted",
-]);
 
 function directConcurrentDelegationSpecs(input: Record<string, unknown>): DelegatedSpec[] {
   const candidates = Array.isArray(input.tasks)
@@ -262,103 +281,16 @@ function directConcurrentDelegationSpecs(input: Record<string, unknown>): Delega
   return nested.length > 0 ? [nested[0]!] : [];
 }
 
-/**
- * The user explicitly requires a standing floor of three useful concurrent delegated agents.
- * A chain never satisfies that floor because only one child in a chain is active at a time.
- */
-export function delegationConcurrencyPolicyIssue(
-  input: Record<string, unknown>,
-  activeAgentCount = 0,
-): string | undefined {
-  const direct = directConcurrentDelegationSpecs(input);
-  if (direct.length === 0) return undefined;
-  const resultingCount = activeAgentCount + direct.length;
-  if (resultingCount >= MINIMUM_USEFUL_CONCURRENT_AGENTS) return undefined;
-
-  const declaration = direct.map((spec) => spec.task).join("\n");
-  const rawReason = (CONCURRENCY_EXCEPTION.exec(declaration)?.[1]
-    ?? SINGLE_WRITER_REASON.exec(declaration)?.[1])?.trim().toLowerCase();
-  const detail = (CONCURRENCY_DETAIL.exec(declaration)?.[1]
-    ?? SINGLE_WRITER_DETAIL.exec(declaration)?.[1])?.trim();
-  const considered = PARALLEL_LANES_CONSIDERED.exec(declaration)?.[1]?.trim();
-
-  if (!rawReason || !SINGLE_WRITER_REASONS.has(rawReason as SingleWriterReason)) {
-    return `This launch would leave only ${resultingCount} useful delegated agent${resultingCount === 1 ? "" : "s"} active; LemonPi requires at least ${MINIMUM_USEFUL_CONCURRENT_AGENTS}. Analyze the work beyond the immediate next step and dispatch every ready planner, investigator, reviewer, validator, platform lane, and writer together. A genuinely rare exception must declare Concurrency exception: atomic, dependency_blocked, unsafe_checkout, or overhead_exceeds_benefit.`;
-  }
-  if (!detail || detail.length < 48) {
-    return `A below-${MINIMUM_USEFUL_CONCURRENT_AGENTS} concurrency exception needs a concrete Concurrency detail of at least 48 characters explaining the real constraint, not merely file overlap or convenience.`;
-  }
-  if (!considered || considered.length < 24) {
-    return `A below-${MINIMUM_USEFUL_CONCURRENT_AGENTS} concurrency exception must include Parallel lanes considered: followed by the additional forward-looking lanes examined and the concrete reason none can run now.`;
-  }
-  return undefined;
-}
-
-/** Non-trivial orchestration must be based on the package's live executable roster. */
-export function delegationRosterPolicyIssue(
-  input: Record<string, unknown>,
-  rosterDiscovered: boolean,
-  activeAgentCount = 0,
-): string | undefined {
-  if (rosterDiscovered) return undefined;
-  const direct = directConcurrentDelegationSpecs(input);
-  if (direct.length === 0 || activeAgentCount + direct.length < MINIMUM_USEFUL_CONCURRENT_AGENTS) return undefined;
-  return "Before this non-trivial delegation, call subagent({ action: \"list\" }) exactly once and use the complete executable roster to build a capability map. Select all relevant built-in and custom agent types by their live runtime names and descriptions; do not default to the same familiar roles. Reuse the result for later waves in this mission.";
-}
-
-/** Reject assignments that are large enough to recreate the observed 20-40 minute child runs. */
-export function delegationGranularityPolicyIssue(input: Record<string, unknown>): string | undefined {
-  for (const spec of delegatedSpecs(input)) {
-    const task = spec.task.replace(CHECKOUT_SNAPSHOT_BLOCK, "").trim();
-    const milestoneCount = parseChildChecklist(task, spec.agent).length;
-    const oversizedChecklist = milestoneCount > MAX_NORMAL_CHILD_MILESTONES;
-    const oversizedPrompt = task.length > MAX_NORMAL_CHILD_PROMPT_CHARACTERS;
-    if (!oversizedChecklist && !oversizedPrompt) continue;
-
-    const rawException = SLICE_EXCEPTION.exec(task)?.[1]?.trim().toLowerCase();
-    const detail = SLICE_DETAIL.exec(task)?.[1]?.trim();
-    if (!rawException || !SLICE_EXCEPTIONS.has(rawException as SliceException)) {
-      const reason = oversizedChecklist
-        ? `${milestoneCount} internal milestones`
-        : `${task.length.toLocaleString()} prompt characters`;
-      return `Delegated task for '${spec.agent}' is too large for LemonPi's normal under-five-minute slice target (${reason}). Split it into smaller checkpoint outcomes and move independent preparation or validation into sibling agents. A genuinely indivisible exception must declare Slice exception: external_runtime, indivisible_operation, or critical_integration plus a concrete Slice detail.`;
-    }
-    if (!detail || detail.length < 48) {
-      return "A slice exception needs a concrete Slice detail of at least 48 characters explaining why this assignment cannot be divided without losing correctness or increasing wall-clock time.";
-    }
-  }
-  return undefined;
-}
-
-/** A useful parallel wave should exercise the capability roster, not clone one default role. */
-export function delegationRoleDiversityPolicyIssue(
-  input: Record<string, unknown>,
-  activeAgentNames: string[] = [],
-): string | undefined {
-  const direct = directConcurrentDelegationSpecs(input);
-  const participatingAgents = [...activeAgentNames, ...direct.map((spec) => spec.agent)]
-    .map((agent) => agent.trim().toLowerCase())
-    .filter(Boolean);
-  if (participatingAgents.length < MINIMUM_USEFUL_CONCURRENT_AGENTS) return undefined;
-
-  const requiredDistinct = Math.min(MINIMUM_USEFUL_CONCURRENT_AGENTS, participatingAgents.length);
-  const distinctCount = new Set(participatingAgents).size;
-  if (distinctCount >= requiredDistinct) return undefined;
-
-  const declaration = direct.map((spec) => spec.task).join("\n");
-  const rawException = ROLE_DIVERSITY_EXCEPTION.exec(declaration)?.[1]?.trim().toLowerCase();
-  const detail = ROLE_DIVERSITY_DETAIL.exec(declaration)?.[1]?.trim();
-  const considered = AGENT_TYPES_CONSIDERED.exec(declaration)?.[1]?.trim();
-  if (!rawException || !ROLE_DIVERSITY_EXCEPTIONS.has(rawException as RoleDiversityException)) {
-    return `This ${participatingAgents.length}-agent wave uses only ${distinctCount} distinct runtime agent type${distinctCount === 1 ? "" : "s"}; LemonPi requires ${requiredDistinct} distinct capable types in a normal parallel wave. Use the live roster to match different relevant agents to the full task graph. If the roster genuinely cannot support that, declare Role diversity exception: implementation_only, only_capable_role, or roster_restricted.`;
-  }
-  if (!detail || detail.length < 48) {
-    return "A role-diversity exception needs a concrete Role diversity detail of at least 48 characters explaining why distinct live roster capabilities cannot own these lanes.";
-  }
-  if (!considered || considered.length < 24) {
-    return "A role-diversity exception must include Agent types considered: followed by the actual alternative live roster types evaluated and why none can contribute usefully now.";
-  }
-  return undefined;
+export function groupedDelegationPolicyIssue(input: Record<string, unknown>): string | undefined {
+  const groupedCount = Array.isArray(input.tasks)
+    ? input.tasks.length
+    : Array.isArray(input.chain)
+      ? input.chain.length
+      : 0;
+  if (groupedCount <= 1) return undefined;
+  const declaration = delegatedSpecs(input).map((spec) => spec.task).join("\n");
+  if (ATOMIC_AGGREGATE.test(declaration)) return undefined;
+  return "Grouped subagent runs delay every actionable result until the whole group finishes. Dispatch these lanes through lemonpi_dispatch so each gets its own async run and wakes Main Pi independently. Use a grouped tasks/chain call only for a truly indivisible aggregate and declare `Atomic aggregate: required` in its task.";
 }
 
 function delegatedSpecs(value: unknown): DelegatedSpec[] {
@@ -574,7 +506,9 @@ export function compileDelegationContracts(input: Record<string, unknown>): void
       const summary = conciseTaskSummary(originalTask);
       const mode = inferredExecutionMode(record.agent, originalTask);
       let task = originalTask;
-      if (!declaredExecutionMode(task)) task = `Execution mode: ${mode}\n${task}`.trimEnd();
+      // Keep the human task first so Command Center shows the delegated outcome instead of
+      // generic runtime metadata such as "Execution mode: read-only".
+      if (!declaredExecutionMode(task)) task = `${task.trimEnd()}\nExecution mode: ${mode}`.trim();
       if (mode === "implementation") task = appendMissingImplementationContract(task, summary);
       if (directWriterCount > 1 && mode === "implementation" && !NO_DEPENDENCIES.test(task)) {
         task = `${task.trimEnd()}\nDepends on: none`;
@@ -602,6 +536,44 @@ export function compileDelegationContracts(input: Record<string, unknown>): void
       : directAgentCount;
     input.concurrency = Math.max(directAgentCount, requestedConcurrency);
   }
+}
+
+export function independentSpawnParams(lane: Record<string, unknown>): {
+  implementation: boolean;
+  params: Record<string, unknown>;
+} {
+  const task = typeof lane.task === "string" ? lane.task : "";
+  const agent = typeof lane.agent === "string" ? lane.agent : "";
+  const implementation = delegatesImplementation({ agent, task });
+  const cwd = typeof lane.cwd === "string" && lane.cwd.trim() ? lane.cwd.trim() : undefined;
+  const prepared = { ...lane };
+  delete prepared.cwd;
+
+  if (implementation) {
+    return {
+      implementation: true,
+      params: {
+        tasks: [prepared],
+        concurrency: 1,
+        worktree: true,
+        artifacts: true,
+        async: true,
+        clarify: false,
+        ...(cwd ? { cwd } : {}),
+      },
+    };
+  }
+
+  return {
+    implementation: false,
+    params: {
+      ...prepared,
+      artifacts: true,
+      async: true,
+      clarify: false,
+      ...(cwd ? { cwd } : {}),
+    },
+  };
 }
 
 function ownedPathFieldValues(task: string): string[] | undefined {
@@ -710,43 +682,6 @@ function implementationSpecs(input: Record<string, unknown>): DelegatedSpec[] {
   return delegatedSpecs(input).filter(delegatesImplementation);
 }
 
-export function singleWriterDispatch(input: Record<string, unknown>): { reason?: SingleWriterReason; detail?: string; rawReason?: string } | undefined {
-  const writers = implementationSpecs(input);
-  if (writers.length !== 1) return undefined;
-  const rawReason = SINGLE_WRITER_REASON.exec(writers[0].task)?.[1]?.trim().toLowerCase();
-  const detail = SINGLE_WRITER_DETAIL.exec(writers[0].task)?.[1]?.trim();
-  const reason = rawReason && SINGLE_WRITER_REASONS.has(rawReason as SingleWriterReason)
-    ? rawReason as SingleWriterReason
-    : undefined;
-  return {
-    ...(rawReason ? { rawReason } : {}),
-    ...(reason ? { reason } : {}),
-    ...(detail ? { detail } : {}),
-  };
-}
-
-export function singletonWriterPolicyIssue(input: Record<string, unknown>, visibleNarration = ""): string | undefined {
-  const dispatch = singleWriterDispatch(input);
-  if (!dispatch) return undefined;
-  if (!dispatch.rawReason) {
-    return "A singleton implementation launch needs `Single-writer reason:` set to atomic, dependency_blocked, unsafe_checkout, or overhead_exceeds_benefit. Parallel implementation is the default; otherwise redraw the task as a top-level worktree wave.";
-  }
-  if (!dispatch.reason) {
-    return `Unknown Single-writer reason: ${dispatch.rawReason}. Internal ownership overlap can define one lane but cannot justify leaving other lanes idle. Use atomic, dependency_blocked, unsafe_checkout, or overhead_exceeds_benefit.`;
-  }
-  if (!dispatch.detail || dispatch.detail.length < 16) {
-    return "A singleton implementation launch needs a concrete `Single-writer detail:` explaining the actual constraint in at least one specific sentence.";
-  }
-  const checklistCount = parseChildChecklist(implementationSpecs(input)[0]!.task, "worker").length;
-  if ((dispatch.reason === "atomic" || dispatch.reason === "overhead_exceeds_benefit") && checklistCount > 2) {
-    return `The proposed ${dispatch.reason} singleton has ${checklistCount} meaningful milestones, so it is mechanically substantial. Decompose it into the largest useful parallel implementation wave; read-only scouts do not satisfy this requirement.`;
-  }
-  // Visible narration remains prompt policy, not a brittle exact-phrase runtime blocker. Requiring
-  // the explanation in the same assistant fragment caused valid retries to fail mechanically.
-  void visibleNarration;
-  return undefined;
-}
-
 export function workConservingLaneSelection(issues: Array<string | undefined>): {
   launchIndexes: number[];
   deferred: Array<{ index: number; reason: string }>;
@@ -779,42 +714,12 @@ export function retainWorkConservingLanes(
   input.concurrency = Math.max(1, Math.min(requestedConcurrency, remainingTaskCount));
 }
 
-function normalizedDirtyPaths(entry: string): string[] {
-  const body = entry.length > 3 ? entry.slice(3) : entry;
-  return body
-    .split(/\s+->\s+/)
-    .map((value) => value.trim().replace(/^"|"$/g, "").normalize("NFC").replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+$/, "").toLowerCase())
-    .filter(Boolean);
-}
-
 export function checkoutSnapshotPolicyIssue(input: Record<string, unknown>, snapshot: CheckoutSnapshot): string | undefined {
   const writers = implementationSpecs(input);
   if (writers.length === 0) return undefined;
-  const dispatch = writers.length === 1 ? singleWriterDispatch(input) : undefined;
-  const dirtyPaths = snapshot.dirtyEntries.flatMap(normalizedDirtyPaths);
-
-  if (dirtyPaths.length === 0) {
-    if (dispatch?.reason === "unsafe_checkout") {
-      return "The fresh checkout preflight is clean, so unsafe_checkout is not a valid singleton reason. Launch the dependency-ready parallel wave or use the actual remaining constraint.";
-    }
-    return undefined;
-  }
-
+  if (snapshot.dirtyEntries.length === 0) return undefined;
   const summary = snapshot.dirtyEntries.slice(0, 8).join("; ");
-  if (writers.length > 1) {
-    return `The fresh checkout preflight found uncommitted changes (${summary}). Normalize them safely before launching a worktree wave; a dirty checkout is a hygiene task, not a reason to silently serialize.`;
-  }
-  if (dispatch?.reason !== "unsafe_checkout") {
-    return `The fresh checkout preflight found uncommitted changes (${summary}). Classify and safely commit, checkpoint, or clean them before dispatch. Use unsafe_checkout only when incomplete overlapping work genuinely cannot be normalized without risk.`;
-  }
-  const ownedPaths = normalizedOwnedPaths(writers[0].task);
-  if (!ownedPaths) {
-    return "unsafe_checkout requires exact repo-relative `Owned paths:` so LemonPi can prove that the unavoidable dirty work overlaps this singleton lane.";
-  }
-  if (!ownedPathsOverlap(ownedPaths, dirtyPaths)) {
-    return `The dirty paths do not overlap this singleton lane's Owned paths (${summary}). Preserve them in a recoverable checkpoint, return to a clean base, and dispatch the largest useful parallel wave.`;
-  }
-  return undefined;
+  return `The fresh checkout preflight found uncommitted changes (${summary}). Preserve and normalize them before creating isolated writer worktrees; never discard or silently hide user work.`;
 }
 
 export function appendCheckoutSnapshot(value: unknown, snapshot: CheckoutSnapshot): void {
@@ -931,11 +836,10 @@ function escapedRegExp(value: string): string {
 }
 
 function writerNotificationStatus(content: string, agent: string | undefined): "completed" | "failed" | "paused" | "stopped" | undefined {
-  if (!agent) return undefined;
-  const escapedAgent = escapedRegExp(agent);
+  const escapedAgent = agent ? escapedRegExp(agent) : "[^*]+";
   const single = content.match(new RegExp(`^(?:Background task|Detached foreground task) (completed|failed|paused|stopped): \\*\\*${escapedAgent}\\*\\*`, "mi"));
   if (single) return single[1] as "completed" | "failed" | "paused" | "stopped";
-  if (new RegExp(`^Background tasks completed \\(\\d+\\):.*\\*\\*${escapedAgent}\\*\\*`, "mi").test(content)) return "completed";
+  if (agent && new RegExp(`^Background tasks completed \\(\\d+\\):.*\\*\\*${escapedAgent}\\*\\*`, "mi").test(content)) return "completed";
   return undefined;
 }
 
@@ -1253,8 +1157,6 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   let lastDelegationFailure: string | undefined;
   let latestUserRequest = "";
   let writerOccupied = false;
-  let activeWriterAgent: string | undefined;
-  let activeWriterRunId: string | undefined;
   let attentionRecovery: { runId: string; index?: number } | undefined;
   let attentionActionObserved = false;
   let attentionRepairRequested = false;
@@ -1272,11 +1174,16 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   const activeDelegationRuns = new Set<string>();
   const delegationToolCalls = new Set<string>();
   const delegationLaunchWidths = new Map<string, number>();
-  const delegationLaunchAgents = new Map<string, string[]>();
   const activeDelegationWidths = new Map<string, number>();
-  const activeDelegationAgents = new Map<string, string[]>();
-  const rosterListToolCalls = new Set<string>();
-  let rosterDiscovered = false;
+  const activeWriterRuns = new Set<string>();
+  const independentDispatchRuns = new Set<string>();
+  const pendingIndependentCompletions = new Map<string, {
+    runId: string;
+    sessionId?: string;
+    status: Exclude<WriterLifecycleStatus, "paused">;
+    agent?: string;
+  }>();
+  let independentCompletionTimer: ReturnType<typeof setTimeout> | undefined;
   const statusToolCalls = new Map<string, { key: string; target?: string }>();
   const activeStatusChecksThisTurn = new Set<string>();
   const resumeToolCalls = new Map<string, { implementation: boolean }>();
@@ -1332,12 +1239,6 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     writerOccupied,
     recordedWriterActive: mission?.writerActive ?? false,
   });
-
-  const activeDelegatedAgentCount = () => [...activeDelegationRuns]
-    .reduce((total, runId) => total + (activeDelegationWidths.get(runId) ?? 1), 0);
-
-  const activeDelegatedAgentNames = () => [...activeDelegationRuns]
-    .flatMap((runId) => activeDelegationAgents.get(runId) ?? []);
 
   const requestMissionWake = (reason: "plan" | "integration"): Promise<boolean> => {
     if (missionWakeCheck) return Promise.resolve(false);
@@ -1471,11 +1372,11 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       if (runId) {
         activeDelegationRuns.delete(runId);
         activeDelegationWidths.delete(runId);
-        activeDelegationAgents.delete(runId);
+        activeWriterRuns.delete(runId);
       } else {
         activeDelegationRuns.clear();
         activeDelegationWidths.clear();
-        activeDelegationAgents.clear();
+        activeWriterRuns.clear();
       }
       if (runId && (disposition === "completed" || disposition === "failed" || disposition === "stopped")) {
         terminal.push({ runId, status: disposition });
@@ -1485,10 +1386,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     mission.activeRunIds = mission.activeRunIds.filter((runId) => activeDelegationRuns.has(runId));
     const untargetedWriterActive = targets.some((runId, index) => runId === undefined
       && ["active", "needs_attention", "paused"].includes(dispositions[index]!));
-    writerOccupied = (mission.activeRunIds.length > 0 || untargetedWriterActive) && mission.writerActive;
+    writerOccupied = activeWriterRuns.size > 0 || untargetedWriterActive;
     mission.writerActive = writerOccupied;
-    activeWriterRunId = mission.activeRunIds.length === 1 && writerOccupied ? mission.activeRunIds[0] : undefined;
-    if (!writerOccupied) activeWriterAgent = undefined;
+    if (!writerOccupied) activeWriterRuns.clear();
     if (mission.activeRunIds.length === 0 && !writerOccupied) mission.phase = "integration";
     mission.wakeAttempts = 0;
     persistMission();
@@ -1519,16 +1419,18 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     mission = restored;
     activeDelegationRuns.clear();
     activeDelegationWidths.clear();
-    activeDelegationAgents.clear();
+    activeWriterRuns.clear();
+    independentDispatchRuns.clear();
     remainingPlanTask = restored?.remainingTask ? { ...restored.remainingTask } : undefined;
     planContinuationAttempts = restored?.wakeAttempts ?? 0;
     writerOccupied = restored?.writerActive ?? false;
     if (restored) restored.activeRunIds.forEach((runId) => {
       activeDelegationRuns.add(runId);
-      activeDelegationWidths.set(runId, restored.activeRunWidths?.[runId] ?? 1);
+      const width = restored.activeRunWidths?.[runId] ?? 1;
+      activeDelegationWidths.set(runId, width);
+      if (width === 1) independentDispatchRuns.add(runId);
     });
-    activeWriterRunId = restored?.writerActive && restored.activeRunIds.length === 1 ? restored.activeRunIds[0] : undefined;
-    if (!restored?.writerActive) activeWriterAgent = undefined;
+    if (restored?.writerActive) restored.activeRunIds.forEach((runId) => activeWriterRuns.add(runId));
     if (restoreWakeTimer) clearTimeout(restoreWakeTimer);
     if (!restored
       || restored.phase === "complete"
@@ -1563,6 +1465,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     missionWakeCheck = undefined;
     missionWakeQueued = false;
     if (restoreWakeTimer) clearTimeout(restoreWakeTimer);
+    if (independentCompletionTimer) clearTimeout(independentCompletionTimer);
+    pendingIndependentCompletions.clear();
     clearInterval(missionScheduler);
   });
 
@@ -1594,14 +1498,194 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     );
   };
 
-  const settleWriter = (status: WriterLifecycleStatus) => {
+  const flushIndependentCompletions = () => {
+    independentCompletionTimer = undefined;
+    if (mission?.phase === "paused") {
+      pendingIndependentCompletions.clear();
+      return;
+    }
+    const completed = [...pendingIndependentCompletions.values()]
+      .filter(({ runId, sessionId }) => !integratedTerminalRuns.has(terminalRunKey(sessionId, runId)));
+    pendingIndependentCompletions.clear();
+    if (completed.length === 0) return;
+    completed.forEach(({ runId, sessionId }) => rememberTerminalRun(terminalRunKey(sessionId, runId)));
+    const lines = completed.map(({ runId, status, agent }) => `- ${runId}${agent ? ` (${agent})` : ""}: ${status}`);
+    pi.sendMessage(
+      {
+        customType: "lemonpi-independent-integration",
+        content: `These independently dispatched lanes reached a terminal state:\n${lines.join("\n")}\n\nInspect each exact result now. Integrate every safe completed patch or finding immediately while unrelated delegated runs continue; do not wait for siblings or relaunch completed work. Then dispatch any newly dependency-ready lane before ending the turn.`,
+        display: false,
+      },
+      { deliverAs: "followUp", triggerTurn: true },
+    );
+  };
+
+  const queueIndependentCompletion = (completion: {
+    runId: string;
+    sessionId?: string;
+    status: Exclude<WriterLifecycleStatus, "paused">;
+    agent?: string;
+  }) => {
+    const key = terminalRunKey(completion.sessionId, completion.runId);
+    if (integratedTerminalRuns.has(key)) return;
+    pendingIndependentCompletions.set(key, completion);
+    if (independentCompletionTimer) return;
+    // Coalesce only completions that arrive together; do not recreate a group barrier.
+    independentCompletionTimer = setTimeout(flushIndependentCompletions, 300);
+  };
+
+  const independentDispatchTool: ToolDefinition<any, Record<string, unknown>> = {
+    name: "lemonpi_dispatch",
+    label: "Dispatch independent lanes",
+    description: "Launch dependency-ready lanes as separate async subagent runs. Use this instead of grouped subagent tasks whenever two or more results can be acted on independently. Each lane completes and wakes Main Pi on its own; implementation lanes are isolated in separate package-managed Git worktrees.",
+    parameters: IndependentDispatchSchema,
+    async execute(_toolCallId, rawParams, _signal, _onUpdate, ctx) {
+      const params = rawParams as { lanes: Array<Record<string, unknown>>; context?: "fresh" | "fork" };
+      const prepared = params.lanes.map((lane, index) => ({
+        index,
+        agent: String(lane.agent ?? "").trim(),
+        lane: { ...lane },
+        implementation: false,
+        snapshot: undefined as CheckoutSnapshot | undefined,
+        issue: undefined as string | undefined,
+      }));
+
+      await Promise.all(prepared.map(async (candidate) => {
+        stripPerDispatchBudgets(candidate.lane);
+        compileDelegationContracts(candidate.lane);
+        candidate.implementation = delegatesImplementation({
+          agent: candidate.agent,
+          task: typeof candidate.lane.task === "string" ? candidate.lane.task : "",
+        });
+        const invalidAcceptancePath = invalidVerifiedAcceptancePath(candidate.lane);
+        if (invalidAcceptancePath) {
+          candidate.issue = `${invalidAcceptancePath}: verified acceptance requires a non-empty runtime verify command array.`;
+          return;
+        }
+        if (candidate.implementation) {
+          const ownedPaths = normalizedOwnedPaths(String(candidate.lane.task ?? ""));
+          if (!ownedPaths) {
+            candidate.issue = "Implementation lanes need exact repo-relative Owned paths with no globs so their patches can be integrated independently.";
+            return;
+          }
+          try {
+            candidate.snapshot = await inspectCheckoutSnapshot(pi, candidate.lane.cwd, ctx.cwd);
+          } catch (error) {
+            candidate.issue = error instanceof Error ? error.message : String(error);
+            return;
+          }
+          if (candidate.snapshot.dirtyEntries.length > 0) {
+            candidate.issue = `The source checkout is not clean (${candidate.snapshot.dirtyEntries.slice(0, 8).join("; ")}). Preserve and normalize those paths before creating an isolated writer worktree.`;
+          }
+        }
+      }));
+
+      for (let leftIndex = 0; leftIndex < prepared.length; leftIndex += 1) {
+        const left = prepared[leftIndex]!;
+        if (!left.implementation || !left.snapshot || left.issue) continue;
+        const leftPaths = normalizedOwnedPaths(String(left.lane.task ?? ""))!;
+        for (let rightIndex = leftIndex + 1; rightIndex < prepared.length; rightIndex += 1) {
+          const right = prepared[rightIndex]!;
+          if (!right.implementation || !right.snapshot || right.issue || left.snapshot.root !== right.snapshot.root) continue;
+          const overlap = ownedPathsOverlap(leftPaths, normalizedOwnedPaths(String(right.lane.task ?? ""))!);
+          if (!overlap) continue;
+          const reason = `Writer ownership overlaps at ${overlap}; redraw these as one coherent lane or give them disjoint ownership.`;
+          left.issue = reason;
+          right.issue = reason;
+        }
+      }
+
+      for (const candidate of prepared) {
+        if (candidate.issue) continue;
+        if (candidate.snapshot) appendCheckoutSnapshot(candidate.lane, candidate.snapshot);
+        if (candidate.lane.acceptance === undefined) {
+          candidate.lane.acceptance = {
+            level: "none",
+            reason: "Main Pi owns per-result integration and validation.",
+          };
+        }
+        applyDelegationSafetyContracts(candidate.lane);
+        addChildTodoGuidance(candidate.lane);
+      }
+
+      const launched = await Promise.all(prepared.map(async (candidate) => {
+        if (candidate.issue) return { ...candidate, result: undefined as unknown, runId: undefined as string | undefined };
+        const spawn = independentSpawnParams(candidate.lane).params;
+        if (params.context) spawn.context = params.context;
+        try {
+          const result = await requestSubagentSpawn(pi, spawn);
+          const runId = delegationRunId(result);
+          if (!runId) throw new Error("The subagent runtime acknowledged the lane without returning a run ID.");
+          return { ...candidate, result, runId };
+        } catch (error) {
+          return {
+            ...candidate,
+            issue: error instanceof Error ? error.message : String(error),
+            result: undefined as unknown,
+            runId: undefined as string | undefined,
+          };
+        }
+      }));
+
+      const successes = launched.filter((candidate): candidate is typeof candidate & { runId: string } => Boolean(candidate.runId));
+      const failures = launched.filter((candidate) => !candidate.runId);
+      for (const candidate of successes) {
+        const runId = candidate.runId;
+        independentDispatchRuns.add(runId);
+        activeDelegationRuns.add(runId);
+        activeDelegationWidths.set(runId, 1);
+        if (candidate.implementation) activeWriterRuns.add(runId);
+      }
+      if (successes.length > 0) {
+        writerOccupied = activeWriterRuns.size > 0;
+        activeDelegationHandoffPending = true;
+        const currentMission = ensureMission("delegated");
+        for (const candidate of successes) {
+          if (!currentMission.activeRunIds.includes(candidate.runId)) currentMission.activeRunIds.push(candidate.runId);
+        }
+        currentMission.writerActive = writerOccupied;
+        currentMission.wakeAttempts = 0;
+        persistMission();
+      }
+
+      if (successes.length === 0) {
+        delegationFailurePending = true;
+        lastDelegationFailure = failures.map((candidate) => `${candidate.agent}: ${candidate.issue ?? "launch failed"}`).join("\n").slice(0, 800);
+      }
+      const summary = [
+        successes.length > 0
+          ? `Launched ${successes.length} independent async lane${successes.length === 1 ? "" : "s"}: ${successes.map((candidate) => `${candidate.agent} (${candidate.runId})`).join(", ")}.`
+          : "No independent lane launched.",
+        failures.length > 0
+          ? `Deferred ${failures.length} lane${failures.length === 1 ? "" : "s"}: ${failures.map((candidate) => `${candidate.agent}: ${candidate.issue ?? "launch failed"}`).join("; ")}.`
+          : "Each completion will be delivered independently.",
+      ].join("\n");
+      return {
+        content: [{ type: "text", text: summary }],
+        ...(successes.length === 0 ? { isError: true } : {}),
+        details: {
+          mode: "independent",
+          runs: successes.map((candidate) => ({ runId: candidate.runId, agent: candidate.agent, implementation: candidate.implementation })),
+          failures: failures.map((candidate) => ({ agent: candidate.agent, reason: candidate.issue ?? "launch failed" })),
+        },
+      };
+    },
+  };
+  pi.registerTool(independentDispatchTool);
+
+  const settleWriter = (status: WriterLifecycleStatus, runId?: string) => {
     if (status === "paused") return;
-    if (activeWriterRunId) terminalWriterRuns.delete(activeWriterRunId);
-    writerOccupied = false;
-    activeWriterAgent = undefined;
-    activeWriterRunId = undefined;
+    if (runId) {
+      terminalWriterRuns.delete(runId);
+      activeWriterRuns.delete(runId);
+    } else if (activeWriterRuns.size === 1) {
+      const onlyRun = activeWriterRuns.values().next().value as string;
+      terminalWriterRuns.delete(onlyRun);
+      activeWriterRuns.delete(onlyRun);
+    }
+    writerOccupied = activeWriterRuns.size > 0;
     if (mission) {
-      mission.writerActive = false;
+      mission.writerActive = writerOccupied;
       if (status !== "paused" && mission.activeRunIds.length === 0 && mission.phase !== "paused") mission.phase = "integration";
       persistMission();
     }
@@ -1622,10 +1706,10 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
 
   pi.events.on("subagent:async-complete", (payload) => {
     const runId = delegationRunId(payload);
+    const independentlyDispatched = runId ? independentDispatchRuns.delete(runId) : false;
     if (runId) {
       activeDelegationRuns.delete(runId);
       activeDelegationWidths.delete(runId);
-      activeDelegationAgents.delete(runId);
     }
     activeStatusChecksThisTurn.clear();
     activeDelegationHandoffPending = false;
@@ -1639,12 +1723,14 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (runId && status) {
       terminalWriterRuns.set(runId, status);
       if (terminalWriterRuns.size > 64) terminalWriterRuns.delete(terminalWriterRuns.keys().next().value!);
-      if (writerOccupied && activeWriterRunId === runId) settleWriter(status);
+      if (activeWriterRuns.has(runId)) settleWriter(status, runId);
       if (status !== "paused") {
         const root = asRecord(payload);
         const sessionId = delegationSessionId(payload);
         const agent = typeof root?.agent === "string" ? root.agent : undefined;
-        if (root?.intercomDelivered === true) wakeForTerminalRun(runId, sessionId, status, agent);
+        if (independentlyDispatched && root?.intercomDelivered !== true) queueIndependentCompletion({ runId, sessionId, status, agent });
+        else if (independentlyDispatched) rememberTerminalRun(terminalRunKey(sessionId, runId));
+        else if (root?.intercomDelivered === true) wakeForTerminalRun(runId, sessionId, status, agent);
         else rememberTerminalRun(terminalRunKey(sessionId, runId));
       }
     }
@@ -1740,7 +1826,6 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         if (!status) throw new Error("The subagent completion request was malformed.");
         activeDelegationRuns.delete(runId);
         activeDelegationWidths.delete(runId);
-        activeDelegationAgents.delete(runId);
         activeStatusChecksThisTurn.clear();
         activeDelegationHandoffPending = false;
         if (mission) {
@@ -1779,7 +1864,6 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (event.toolName !== "subagent") return;
 
     const isManagementAction = typeof input.action === "string" && input.action.trim().length > 0;
-    if (input.action === "list") rosterListToolCalls.add(event.toolCallId);
     if (input.action === "status") {
       const target = typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : undefined;
       const key = target ?? "__active_runs__";
@@ -1795,8 +1879,6 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       const message = typeof input.message === "string" ? input.message.trimEnd() : "";
       const targetedMessage = SLICE_TARGET.test(message) ? message : `${message}\nSlice target: under 5 minutes`.trimStart();
       const compiledMessage = appendDefaultChecklist(targetedMessage, conciseTaskSummary(targetedMessage));
-      const granularityIssue = delegationGranularityPolicyIssue({ agent: CURRENT_CHILD_OWNER, task: compiledMessage });
-      if (granularityIssue) return { block: true, reason: granularityIssue };
       const resumedTasks = parseChildChecklist(compiledMessage, CURRENT_CHILD_OWNER);
       if (!message.includes("<lemonpi-child-checklist>")) {
         input.message = `${compiledMessage}${childTodoGuidance(CURRENT_CHILD_OWNER, resumedTasks)}`;
@@ -1819,23 +1901,17 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
 
     if (isDelegation && !isManagementAction) {
       stripPerDispatchBudgets(input);
+      const groupedIssue = groupedDelegationPolicyIssue(input);
+      if (groupedIssue) return { block: true, reason: groupedIssue };
       compileDelegationContracts(input);
       specs = delegatedSpecs(input);
       const writers = specs.filter(delegatesImplementation);
 
-      if (input.clarify !== true) {
-        const dispatchPolicyIssues = [
-          delegationRosterPolicyIssue(input, rosterDiscovered, activeDelegatedAgentCount()),
-          delegationGranularityPolicyIssue(input),
-          delegationConcurrencyPolicyIssue(input, activeDelegatedAgentCount()),
-          delegationRoleDiversityPolicyIssue(input, activeDelegatedAgentNames()),
-        ].filter((issue): issue is string => Boolean(issue));
-        if (dispatchPolicyIssues.length > 0) {
-          return {
-            block: true,
-            reason: dispatchPolicyIssues.join("\n\n"),
-          };
-        }
+      if (writers.length > 0) {
+        return {
+          block: true,
+          reason: "Implementation must be launched through lemonpi_dispatch, even for one lane. It creates a separately completable isolated worktree run so Main Pi can integrate it without blocking or conflicting with other workers.",
+        };
       }
 
       const invalidAcceptancePath = invalidVerifiedAcceptancePath(input);
@@ -1851,19 +1927,6 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         return {
           block: true,
           reason: parallelWriterIssue,
-        };
-      }
-      const singletonWriterIssue = singletonWriterPolicyIssue(input, currentAssistantVisibleText);
-      if (singletonWriterIssue) {
-        return {
-          block: true,
-          reason: singletonWriterIssue,
-        };
-      }
-      if (writers.length > 0 && writerToolCalls.size > 0) {
-        return {
-          block: true,
-          reason: "An implementation launch is already being submitted. Put concurrently ready lanes in that top-level tasks call, or wait for the tool call to confirm or reject before submitting another wave.",
         };
       }
       if (writers.length > 0) {
@@ -1963,10 +2026,6 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         event.toolCallId,
         Math.max(1, directConcurrentDelegationSpecs(input).length),
       );
-      delegationLaunchAgents.set(
-        event.toolCallId,
-        directConcurrentDelegationSpecs(input).map((spec) => spec.agent),
-      );
       delegationFailurePending = false;
       lastDelegationFailure = undefined;
     }
@@ -2019,7 +2078,6 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       if (notifiedRunId) {
         activeDelegationRuns.delete(notifiedRunId);
         activeDelegationWidths.delete(notifiedRunId);
-        activeDelegationAgents.delete(notifiedRunId);
       }
       activeStatusChecksThisTurn.clear();
       activeDelegationHandoffPending = false;
@@ -2029,8 +2087,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         mission.wakeAttempts = 0;
         persistMission();
       }
-      const workerStatus = writerNotificationStatus(notification, activeWriterAgent);
-      if (workerStatus) settleWriter(workerStatus);
+      const workerStatus = writerNotificationStatus(notification, undefined);
+      if (workerStatus) settleWriter(workerStatus, notifiedRunId);
       sawToolActivity = false;
       visibleExplanationAfterLastTool = false;
       lastAssistantStopReason = undefined;
@@ -2061,7 +2119,6 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
 
   pi.on("tool_execution_end", async (event) => {
     activeMainToolExecutions = Math.max(0, activeMainToolExecutions - 1);
-    if (rosterListToolCalls.delete(event.toolCallId) && !event.isError) rosterDiscovered = true;
     const resumedCall = resumeToolCalls.get(event.toolCallId);
     resumeToolCalls.delete(event.toolCallId);
     if (resumedCall && !event.isError) {
@@ -2073,7 +2130,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         if (!currentMission.activeRunIds.includes(runId)) currentMission.activeRunIds.push(runId);
         if (resumedCall.implementation) {
           writerOccupied = true;
-          activeWriterRunId = runId;
+          activeWriterRuns.add(runId);
           currentMission.writerActive = true;
         }
         currentMission.wakeAttempts = 0;
@@ -2096,7 +2153,6 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         if (runId) {
           activeDelegationRuns.delete(runId);
           activeDelegationWidths.delete(runId);
-          activeDelegationAgents.delete(runId);
         }
         activeStatusChecksThisTurn.clear();
         activeDelegationHandoffPending = false;
@@ -2107,7 +2163,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           mission.wakeAttempts = 0;
           persistMission();
         }
-        if (writerOccupied) settleWriter(status);
+        if (writerOccupied) settleWriter(status, runId);
       }
     }
     if (event.toolName === "todo" && !event.isError) {
@@ -2135,8 +2191,6 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     deferredWriterLanesByToolCall.delete(event.toolCallId);
     const launchWidth = delegationLaunchWidths.get(event.toolCallId) ?? 1;
     delegationLaunchWidths.delete(event.toolCallId);
-    const launchAgents = delegationLaunchAgents.get(event.toolCallId) ?? [];
-    delegationLaunchAgents.delete(event.toolCallId);
     if (!delegationToolCalls.delete(event.toolCallId)) return;
     const failure = writerCall && writerCall.async !== false
       ? asyncWriterLaunchFailure(event.result, event.isError)
@@ -2146,7 +2200,6 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       if (runId) {
         activeDelegationRuns.add(runId);
         activeDelegationWidths.set(runId, launchWidth);
-        activeDelegationAgents.set(runId, launchAgents);
         if (deferredWriterLanes.length > 0) deferredWriterLanesByRun.set(runId, deferredWriterLanes);
         activeDelegationHandoffPending = true;
         const currentMission = ensureMission("delegated");
@@ -2162,14 +2215,13 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         settleWriter("completed");
       } else if (writerCall && runId) {
         writerOccupied = true;
-        activeWriterAgent = writerCall.agent;
-        activeWriterRunId = runId;
+        activeWriterRuns.add(runId);
         const currentMission = ensureMission("delegated");
         currentMission.writerActive = true;
         currentMission.wakeAttempts = 0;
         persistMission();
-        const terminalStatus = activeWriterRunId ? terminalWriterRuns.get(activeWriterRunId) : undefined;
-        if (terminalStatus) settleWriter(terminalStatus);
+        const terminalStatus = terminalWriterRuns.get(runId);
+        if (terminalStatus) settleWriter(terminalStatus, runId);
       }
       return;
     }

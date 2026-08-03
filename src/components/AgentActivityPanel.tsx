@@ -640,9 +640,10 @@ export function AgentActivityPanel({
             });
             const stateLabel = needsAttention ? "needs attention" : finalizing ? "finalizing" : run.state;
             const stateClass = needsAttention ? "needs-attention" : finalizing ? "finalizing" : run.state;
+            const displayMode = (run.steps?.length ?? 0) <= 1 ? "single" : run.mode;
             return <section className="agent-run" key={run.runId}>
               <div className="agent-run__header">
-                <span>{run.mode}</span>
+                <span>{displayMode}</span>
                 <code>{run.runId.slice(0, 8)}</code>
                 <span className={`run-state run-state--${stateClass}`}>{stateLabel}</span>
               </div>
