@@ -6,6 +6,7 @@
 
 use super::{
     config::RemoteConfig,
+    policy::{pairing_host_candidates, PairingHostCandidate},
     service::{PairingMaterial, RemoteDevice, RemoteService, RemoteStatus},
 };
 use std::sync::Arc;
@@ -39,6 +40,14 @@ pub(crate) async fn start_remote_pairing(
         .start_pairing(host)
         .await
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub(crate) async fn get_remote_pairing_hosts() -> Result<Vec<PairingHostCandidate>, String> {
+    tauri::async_runtime::spawn_blocking(pairing_host_candidates)
+        .await
+        .map_err(|error| format!("Could not inspect this computer's network addresses: {error}"))?
+        .map_err(|error| format!("Could not inspect this computer's network addresses: {error}"))
 }
 
 #[tauri::command]

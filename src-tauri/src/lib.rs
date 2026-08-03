@@ -3474,6 +3474,7 @@ pub fn run() {
             stop_pi,
             remote::commands::get_remote_config,
             remote::commands::set_remote_config,
+            remote::commands::get_remote_pairing_hosts,
             remote::commands::start_remote_pairing,
             remote::commands::cancel_remote_pairing,
             remote::commands::list_remote_devices,

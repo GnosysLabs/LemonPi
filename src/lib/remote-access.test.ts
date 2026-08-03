@@ -6,12 +6,14 @@ import {
   applyRemoteResponse,
   beginRemoteRequest,
   clearRemotePairing,
+  compatiblePairingHosts,
   completeRemoteConfig,
   describeRemoteStatus,
   disposeRemoteUi,
   initialRemoteUiState,
   pairingExpiry,
   pairingHostError,
+  pairingHostLabel,
   pairingPayload,
   parseRemotePort,
   redactExpiredPairing,
@@ -92,6 +94,17 @@ describe("remote access helpers", () => {
     expect(pairingPayload(material)).not.toContain("expiresAt");
   });
 
+  it("offers only addresses permitted by the selected network mode", () => {
+    const candidates = [
+      { host: "100.76.239.128", network: "tailscale" as const, interfaceName: "utun7" },
+      { host: "192.168.1.20", network: "lan" as const, interfaceName: "en0" },
+    ];
+    expect(compatiblePairingHosts(candidates, "lanAndTailscale")).toEqual(candidates);
+    expect(compatiblePairingHosts(candidates, "tailscaleOnly")).toEqual([candidates[0]]);
+    expect(compatiblePairingHosts(candidates, "lanOnly")).toEqual([candidates[1]]);
+    expect(pairingHostLabel(candidates[0])).toBe("100.76.239.128 — Tailscale (utun7)");
+  });
+
   it("ignores stale and disposed async responses", () => {
     const first = beginRemoteRequest(initialRemoteUiState);
     const second = beginRemoteRequest(first);
@@ -129,12 +142,14 @@ describe("remote command client", () => {
       if (command === "list_remote_devices") return [] as never;
       if (command === "get_remote_config") return config as never;
       if (command === "set_remote_config" || command === "get_remote_status") return running as never;
+      if (command === "get_remote_pairing_hosts") return [] as never;
       if (command === "start_remote_pairing") return material as never;
       return undefined as never;
     });
 
     await client.getRemoteConfig();
     await client.setRemoteConfig(config);
+    await client.getRemotePairingHosts();
     await client.startRemotePairing("macbook.local");
     await client.cancelRemotePairing();
     await client.listRemoteDevices();
@@ -144,6 +159,7 @@ describe("remote command client", () => {
     expect(calls).toEqual([
       { command: "get_remote_config" },
       { command: "set_remote_config", args: { config } },
+      { command: "get_remote_pairing_hosts" },
       { command: "start_remote_pairing", args: { host: "macbook.local" } },
       { command: "cancel_remote_pairing" },
       { command: "list_remote_devices" },

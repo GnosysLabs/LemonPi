@@ -3,12 +3,14 @@ import { QRCodeSVG } from "qrcode.react";
 import {
   cancelRemotePairing,
   getRemoteConfig,
+  getRemotePairingHosts,
   getRemoteStatus,
   listRemoteDevices,
   revokeRemoteDevice,
   setRemoteConfig,
   startRemotePairing,
   type PairingMaterial,
+  type PairingHostCandidate,
   type RemoteConfig,
   type RemoteDevice,
   type RemoteStatus,
@@ -17,18 +19,21 @@ import {
   ACCESS_MODE_LABELS,
   abbreviateHostId,
   completeRemoteConfig,
+  compatiblePairingHosts,
   describeRemoteStatus,
   formatPairedAt,
   formatPairingExpiry,
   pairingExpiry,
   pairingHostError,
+  pairingHostLabel,
   pairingPayload,
   redactExpiredPairing,
-  remotePortError,
   staleDeviceNotice,
   type RemoteConfigDraft,
 } from "../../lib/remote-access";
 import "./remote-access.css";
+
+const REMOTE_ACCESS_PORT = 8787;
 
 interface RemoteAccessSettingsProps {
   onNotice: (message: string, tone?: "info" | "warning" | "error") => void;
@@ -50,6 +55,7 @@ export function RemoteAccessSettings({ onNotice }: RemoteAccessSettingsProps) {
   const [devices, setDevices] = useState<RemoteDevice[]>([]);
   const [draft, setDraft] = useState<RemoteConfigDraft>();
   const [pairing, setPairing] = useState<PairingMaterial>();
+  const [pairingHosts, setPairingHosts] = useState<PairingHostCandidate[]>([]);
   const [pairingHost, setPairingHost] = useState("");
   const [pairingExpired, setPairingExpired] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -83,10 +89,11 @@ export function RemoteAccessSettings({ onNotice }: RemoteAccessSettingsProps) {
     setInitialLoading(true);
     setInitialError(false);
     setCommandError(undefined);
-    const [configResult, statusResult, devicesResult] = await Promise.allSettled([
+    const [configResult, statusResult, devicesResult, pairingHostsResult] = await Promise.allSettled([
       getRemoteConfig(),
       getRemoteStatus(),
       listRemoteDevices(),
+      getRemotePairingHosts(),
     ]);
     if (!isCurrent(generation)) return;
 
@@ -100,7 +107,7 @@ export function RemoteAccessSettings({ onNotice }: RemoteAccessSettingsProps) {
     setStatus(statusResult.value);
     setDraft({
       enabled: configResult.value.enabled,
-      port: String(configResult.value.port),
+      port: REMOTE_ACCESS_PORT,
       accessMode: configResult.value.accessMode,
     });
     setPairing(undefined);
@@ -110,6 +117,13 @@ export function RemoteAccessSettings({ onNotice }: RemoteAccessSettingsProps) {
       setDeviceError(false);
     } else {
       setDeviceError(true);
+    }
+    if (pairingHostsResult.status === "fulfilled") {
+      const candidates = compatiblePairingHosts(pairingHostsResult.value, configResult.value.accessMode);
+      setPairingHosts(pairingHostsResult.value);
+      setPairingHost(candidates[0]?.host || "");
+    } else {
+      setPairingHosts([]);
     }
     setInitialLoading(false);
   }, [isCurrent, issueRequest]);
@@ -174,12 +188,6 @@ export function RemoteAccessSettings({ onNotice }: RemoteAccessSettingsProps) {
 
   const persistConfig = async (nextDraft: RemoteConfigDraft) => {
     if (!config) return;
-    const portError = remotePortError(nextDraft.port);
-    if (portError) {
-      setCommandError(portError);
-      applyButtonRef.current?.focus();
-      return;
-    }
     const generation = issueRequest();
     const shouldCancelPairing = Boolean(pairing || status?.pairingActive);
     setConfigBusy(true);
@@ -188,7 +196,7 @@ export function RemoteAccessSettings({ onNotice }: RemoteAccessSettingsProps) {
     setPairing(undefined);
     setPairingExpired(false);
     try {
-      const nextConfig = completeRemoteConfig(config, nextDraft);
+      const nextConfig = completeRemoteConfig(config, { ...nextDraft, port: REMOTE_ACCESS_PORT });
       const nextStatus = await setRemoteConfig(nextConfig);
       if (!isCurrent(generation)) return;
 
@@ -203,7 +211,12 @@ export function RemoteAccessSettings({ onNotice }: RemoteAccessSettingsProps) {
       }
       setConfig(nextConfig);
       setStatus(currentStatus);
-      setDraft({ enabled: nextConfig.enabled, port: String(nextConfig.port), accessMode: nextConfig.accessMode });
+      setDraft({ enabled: nextConfig.enabled, port: REMOTE_ACCESS_PORT, accessMode: nextConfig.accessMode });
+      const availableHosts = compatiblePairingHosts(pairingHosts, nextConfig.accessMode);
+      const selectedKnownHost = pairingHosts.some((candidate) => candidate.host === pairingHost);
+      if (selectedKnownHost && !availableHosts.some((candidate) => candidate.host === pairingHost)) {
+        setPairingHost(availableHosts[0]?.host ?? "");
+      }
       onNotice(nextConfig.enabled ? "Remote access updated." : "Remote access disabled.");
     } catch {
       if (isCurrent(generation)) setCommandError(safeFailure("update remote access"));
@@ -323,11 +336,15 @@ export function RemoteAccessSettings({ onNotice }: RemoteAccessSettingsProps) {
     [visiblePairing],
   );
   const statusPresentation = status ? describeRemoteStatus(status) : undefined;
-  const portError = draft ? remotePortError(draft.port) : undefined;
+  const availablePairingHosts = useMemo(
+    () => status ? compatiblePairingHosts(pairingHosts, status.accessMode) : [],
+    [pairingHosts, status],
+  );
+  const selectedPairingHost = pairingHosts.find((candidate) => candidate.host === pairingHost);
   const configChanged = Boolean(config && draft && (
     draft.enabled !== config.enabled
     || draft.accessMode !== config.accessMode
-    || String(draft.port).trim() !== String(config.port)
+    || config.port !== REMOTE_ACCESS_PORT
   ));
 
   if (initialLoading) {
@@ -383,21 +400,24 @@ export function RemoteAccessSettings({ onNotice }: RemoteAccessSettingsProps) {
             </label>
             <label>
               <span className="remote-access__field-label">
-                Port
-                <small id="remote-port-hint" data-invalid={portError ? "true" : undefined}>{portError ? "Check range" : "1–65535"}</small>
+                This Mac’s address
+                <small>{selectedPairingHost?.network === "tailscale" ? "Tailscale" : selectedPairingHost ? "Local network" : "Custom"}</small>
               </span>
               <input
-                type="number"
-                inputMode="numeric"
-                min="1"
-                max="65535"
-                step="1"
-                value={draft.port}
-                disabled={configBusy || pairingBusy}
-                onChange={(event) => setDraft({ ...draft, port: event.target.value })}
-                aria-invalid={Boolean(portError)}
-                aria-describedby="remote-port-hint"
+                list="remote-pairing-hosts"
+                value={pairingHost}
+                disabled={pairingBusy || configBusy}
+                onChange={(event) => { setPairingHost(event.target.value); setHostError(undefined); }}
+                placeholder="Tailscale or LAN address"
+                aria-invalid={Boolean(hostError)}
               />
+              <datalist id="remote-pairing-hosts">
+                {availablePairingHosts.map((candidate) => (
+                  <option key={`${candidate.interfaceName}-${candidate.host}`} value={candidate.host}>
+                    {pairingHostLabel(candidate)}
+                  </option>
+                ))}
+              </datalist>
             </label>
           </div>
           <div className="remote-access__actions remote-access__actions--config">
@@ -405,17 +425,17 @@ export function RemoteAccessSettings({ onNotice }: RemoteAccessSettingsProps) {
               ref={applyButtonRef}
               type="button"
               className="remote-access__primary remote-access__save"
-              disabled={configBusy || pairingBusy || Boolean(portError) || !configChanged}
+              disabled={configBusy || pairingBusy || !configChanged}
               onClick={() => void persistConfig(draft)}
             >
               {configBusy ? "Saving…" : "Save changes"}
             </button>
           </div>
         </div>
+        {hostError && <div className="remote-access__field-error remote-access__field-error--host" role="alert">{hostError}</div>}
 
         <dl className="remote-access__metadata">
           <div><dt>Listener</dt><dd>{statusPresentation?.detail}</dd></div>
-          <div><dt>Port</dt><dd>{status.port}</dd></div>
           <div><dt>Networks</dt><dd>{ACCESS_MODE_LABELS[status.accessMode]}</dd></div>
           <div><dt>Host ID</dt><dd title={status.hostId}>{abbreviateHostId(status.hostId)}</dd></div>
         </dl>
@@ -462,19 +482,6 @@ export function RemoteAccessSettings({ onNotice }: RemoteAccessSettingsProps) {
           <div className="remote-access__pairing-form">
             {status.pairingActive && <div className="remote-access__recovery" role="status">A pairing window is already active, but its code cannot be redisplayed after reopening settings. Cancel it or start a new code.</div>}
             {pairingExpired && <div className="remote-access__recovery" role="status">Pairing expired. Start a new code when you are ready.</div>}
-            <label>
-              <span>Address this device will use</span>
-              <input
-                value={pairingHost}
-                disabled={pairingBusy || configBusy}
-                onChange={(event) => { setPairingHost(event.target.value); setHostError(undefined); }}
-                placeholder="macbook.local, 100.x.y.z, or LAN IPv4"
-                aria-invalid={Boolean(hostError)}
-                aria-describedby="remote-pairing-host-hint"
-              />
-              <small id="remote-pairing-host-hint">Enter a hostname, LAN IPv4 address, or plain IPv6 address. Do not enter a URL.</small>
-            </label>
-            {hostError && <div className="remote-access__field-error" role="alert">{hostError}</div>}
             <div className="remote-access__actions">
               <button ref={pairingButtonRef} className="remote-access__primary" type="button" disabled={pairingBusy || configBusy || !pairingHost.trim()} onClick={() => void beginPairing()}>
                 {pairingBusy ? "Starting…" : "Start pairing"}

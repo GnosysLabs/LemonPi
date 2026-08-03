@@ -169,7 +169,7 @@
 .remote-access__fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 12px;
 }
 
 .remote-access__fields label,
@@ -179,6 +179,11 @@
   color: var(--remote-muted);
   font-size: 11px;
   font-weight: 660;
+}
+
+.remote-access__fields label {
+  grid-template-rows: 18px 46px;
+  align-content: start;
 }
 
 .remote-access__field-label {
@@ -204,7 +209,7 @@
 .remote-access input,
 .remote-access select {
   width: 100%;
-  min-height: 38px;
+  min-height: 46px;
   box-sizing: border-box;
   padding: 0 10px;
   border: 1px solid var(--remote-line);
@@ -238,14 +243,14 @@
 }
 
 .remote-access__save {
-  min-height: 38px !important;
-  padding: 0 15px !important;
+  min-height: 46px !important;
+  padding: 0 18px !important;
   white-space: nowrap;
 }
 
 .remote-access__metadata {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0;
   margin: 20px 0 0;
   border-top: 1px solid var(--remote-line);
@@ -285,6 +290,8 @@
   line-height: 1.45;
 }
 
+.remote-access__field-error--host { margin-top: 10px; }
+
 .remote-access__last-error {
   display: grid;
   gap: 2px;
@@ -308,7 +315,11 @@
 .remote-access__recovery { margin-bottom: 14px; }
 .remote-access__device-message { margin-bottom: 10px; color: var(--ink); }
 
-.remote-access__pairing-form { max-width: 560px; }
+.remote-access__pairing-form {
+  display: grid;
+  max-width: 560px;
+  gap: 12px;
+}
 
 .remote-access__pairing-material {
   padding: 16px;

@@ -1,4 +1,4 @@
-import type { PairingMaterial, RemoteAccessMode, RemoteConfig, RemoteDevice, RemoteStatus } from "./remote-client";
+import type { PairingHostCandidate, PairingMaterial, RemoteAccessMode, RemoteConfig, RemoteDevice, RemoteStatus } from "./remote-client";
 
 export const ACCESS_MODE_LABELS: Record<RemoteAccessMode, string> = {
   lanAndTailscale: "LAN & Tailscale",
@@ -91,6 +91,22 @@ export function pairingPayload(material: PairingMaterial): string {
     code: material.code,
     certificatePin: material.certificatePin,
   });
+}
+
+export function compatiblePairingHosts(
+  candidates: PairingHostCandidate[],
+  mode: RemoteAccessMode,
+): PairingHostCandidate[] {
+  return candidates.filter((candidate) => (
+    mode === "lanAndTailscale"
+    || (mode === "tailscaleOnly" && candidate.network === "tailscale")
+    || (mode === "lanOnly" && candidate.network === "lan")
+  ));
+}
+
+export function pairingHostLabel(candidate: PairingHostCandidate): string {
+  const network = candidate.network === "tailscale" ? "Tailscale" : "Local network";
+  return `${candidate.host} — ${network} (${candidate.interfaceName})`;
 }
 
 function isIpv4Segment(value: string): boolean {

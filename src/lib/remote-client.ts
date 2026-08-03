@@ -32,6 +32,12 @@ export interface PairingMaterial {
   expiresAt: string;
 }
 
+export interface PairingHostCandidate {
+  host: string;
+  network: "tailscale" | "lan";
+  interfaceName: string;
+}
+
 export interface RemoteDevice {
   id: string;
   displayName: string;
@@ -43,6 +49,7 @@ export type RemoteInvoke = <T>(command: string, args?: Record<string, unknown>) 
 export interface RemoteClient {
   getRemoteConfig(): Promise<RemoteConfig>;
   setRemoteConfig(config: RemoteConfig): Promise<RemoteStatus>;
+  getRemotePairingHosts(): Promise<PairingHostCandidate[]>;
   startRemotePairing(host: string): Promise<PairingMaterial>;
   cancelRemotePairing(): Promise<void>;
   listRemoteDevices(): Promise<RemoteDevice[]>;
@@ -58,6 +65,7 @@ export function createRemoteClient(invokeCommand: RemoteInvoke = invoke as Remot
   return {
     getRemoteConfig: () => invokeCommand<RemoteConfig>("get_remote_config"),
     setRemoteConfig: (config) => invokeCommand<RemoteStatus>("set_remote_config", { config }),
+    getRemotePairingHosts: () => invokeCommand<PairingHostCandidate[]>("get_remote_pairing_hosts"),
     startRemotePairing: (host) => invokeCommand<PairingMaterial>("start_remote_pairing", { host }),
     cancelRemotePairing: () => invokeCommand<void>("cancel_remote_pairing"),
     listRemoteDevices: () => invokeCommand<RemoteDevice[]>("list_remote_devices"),
@@ -70,6 +78,7 @@ const client = createRemoteClient();
 
 export const getRemoteConfig = client.getRemoteConfig;
 export const setRemoteConfig = client.setRemoteConfig;
+export const getRemotePairingHosts = client.getRemotePairingHosts;
 export const startRemotePairing = client.startRemotePairing;
 export const cancelRemotePairing = client.cancelRemotePairing;
 export const listRemoteDevices = client.listRemoteDevices;

@@ -1,4 +1,7 @@
 use super::config::AccessMode;
+use if_addrs::get_if_addrs;
+use serde::Serialize;
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// The only peer categories the v1 remote bridge will need to distinguish.
@@ -8,6 +11,71 @@ pub(crate) enum PeerKind {
     Lan,
     Tailscale,
     Public,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum PairingHostNetwork {
+    Tailscale,
+    Lan,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PairingHostCandidate {
+    pub(crate) host: String,
+    pub(crate) network: PairingHostNetwork,
+    pub(crate) interface_name: String,
+}
+
+fn pairing_host_candidate(
+    interface_name: String,
+    address: IpAddr,
+    is_operational: bool,
+    is_link_local: bool,
+) -> Option<PairingHostCandidate> {
+    // The v1 listener binds IPv4. Advertising an IPv6 address would create a QR that this
+    // process cannot answer even though the OS reports the interface as reachable.
+    if !is_operational || is_link_local || !address.is_ipv4() {
+        return None;
+    }
+    let network = match classify_peer(address) {
+        PeerKind::Tailscale => PairingHostNetwork::Tailscale,
+        PeerKind::Lan => PairingHostNetwork::Lan,
+        PeerKind::Loopback | PeerKind::Public => return None,
+    };
+    Some(PairingHostCandidate {
+        host: address.to_string(),
+        network,
+        interface_name,
+    })
+}
+
+/// Returns only addresses this IPv4 listener can actually answer. Tailscale is sorted first so
+/// the common remote-device path is the default instead of an arbitrary VM or LAN interface.
+pub(crate) fn pairing_host_candidates() -> std::io::Result<Vec<PairingHostCandidate>> {
+    let mut candidates = get_if_addrs()?
+        .into_iter()
+        .filter_map(|interface| {
+            let address = interface.ip();
+            let is_operational = interface.is_oper_up();
+            let is_link_local = interface.is_link_local();
+            pairing_host_candidate(interface.name, address, is_operational, is_link_local)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        let priority = |network: PairingHostNetwork| match network {
+            PairingHostNetwork::Tailscale => 0,
+            PairingHostNetwork::Lan => 1,
+        };
+        priority(left.network)
+            .cmp(&priority(right.network))
+            .then_with(|| left.interface_name.cmp(&right.interface_name))
+            .then_with(|| left.host.cmp(&right.host))
+    });
+    let mut seen = HashSet::new();
+    candidates.retain(|candidate| seen.insert(candidate.host.clone()));
+    Ok(candidates)
 }
 
 pub(crate) fn classify_peer(address: IpAddr) -> PeerKind {
@@ -160,6 +228,47 @@ mod tests {
         assert!(!allows_peer(AccessMode::TailscaleOnly, lan));
         assert!(allows_peer(AccessMode::TailscaleOnly, tailscale));
         assert!(!allows_peer(AccessMode::TailscaleOnly, public));
+    }
+
+    #[test]
+    fn pairing_candidates_only_advertise_reachable_ipv4_listener_addresses() {
+        let tailscale = pairing_host_candidate(
+            "tailscale0".into(),
+            "100.76.239.128".parse().unwrap(),
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(tailscale.network, PairingHostNetwork::Tailscale);
+        assert_eq!(tailscale.host, "100.76.239.128");
+
+        let lan =
+            pairing_host_candidate("en0".into(), "192.168.1.10".parse().unwrap(), true, false)
+                .unwrap();
+        assert_eq!(lan.network, PairingHostNetwork::Lan);
+
+        assert!(
+            pairing_host_candidate("lo0".into(), "127.0.0.1".parse().unwrap(), true, false)
+                .is_none()
+        );
+        assert!(
+            pairing_host_candidate("en0".into(), "169.254.1.1".parse().unwrap(), true, true)
+                .is_none()
+        );
+        assert!(pairing_host_candidate(
+            "utun7".into(),
+            "fd7a:115c:a1e0::1".parse().unwrap(),
+            true,
+            false
+        )
+        .is_none());
+        assert!(pairing_host_candidate(
+            "en0".into(),
+            "192.168.1.10".parse().unwrap(),
+            false,
+            false
+        )
+        .is_none());
     }
 
     #[test]
