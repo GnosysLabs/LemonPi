@@ -104,6 +104,8 @@ export interface PiProcessInfo {
   version: string;
   pid?: number;
   cwd?: string;
+  controllerBuildId?: string;
+  orchestrationPolicyVersion?: number;
 }
 
 /** Desktop-owned recent-project input used only to refresh the private remote catalog. */

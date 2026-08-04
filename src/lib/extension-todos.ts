@@ -10,11 +10,15 @@ export type TodoTask = {
   status: TodoStatus;
   blockedBy?: number[];
   owner?: string;
+  runtimeStatus?: "pending" | "in_progress" | "validating" | "completed" | "needs_attention";
 };
 
 export type TodoSnapshot = {
   tasks: TodoTask[];
   nextId: number;
+  source?: "todo" | "mission";
+  missionId?: string;
+  historyCount?: number;
 };
 
 type UnknownRecord = Record<string, unknown>;
@@ -42,6 +46,13 @@ function parseTask(value: unknown): TodoTask | undefined {
     ...(optionalText(task.activeForm) ? { activeForm: optionalText(task.activeForm) } : {}),
     ...(blockedBy?.length ? { blockedBy } : {}),
     ...(optionalText(task.owner) ? { owner: optionalText(task.owner) } : {}),
+    ...(([
+      "pending",
+      "in_progress",
+      "validating",
+      "completed",
+      "needs_attention",
+    ] as unknown[]).includes(task.runtimeStatus) ? { runtimeStatus: task.runtimeStatus as TodoTask["runtimeStatus"] } : {}),
   };
 }
 
@@ -52,12 +63,18 @@ export function parseTodoSnapshot(value: unknown): TodoSnapshot | undefined {
   if (!details || !Array.isArray(details.tasks) || typeof details.nextId !== "number") return undefined;
   const tasks = details.tasks.map(parseTask);
   if (tasks.some((task) => !task)) return undefined;
-  return { tasks: tasks as TodoTask[], nextId: details.nextId };
+  return {
+    tasks: tasks as TodoTask[],
+    nextId: details.nextId,
+    ...(details.source === "mission" ? { source: "mission" as const } : { source: "todo" as const }),
+    ...(optionalText(details.missionId) ? { missionId: optionalText(details.missionId) } : {}),
+    ...(typeof details.historyCount === "number" ? { historyCount: details.historyCount } : {}),
+  };
 }
 
 function parseLifecycleSnapshot(message: unknown): TodoSnapshot | undefined {
   const record = asRecord(message);
-  if (record?.role !== "custom" || record.customType !== "lemonpi-todo-lifecycle") return undefined;
+  if (record?.role !== "custom" || !["lemonpi-todo-lifecycle", "lemonpi-mission-outcomes"].includes(String(record.customType))) return undefined;
   if (typeof record.content !== "string") return undefined;
   try {
     return parseTodoSnapshot(JSON.parse(record.content));

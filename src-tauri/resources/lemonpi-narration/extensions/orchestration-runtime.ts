@@ -1,4 +1,4 @@
-export const CURRENT_ORCHESTRATION_POLICY_VERSION = 6;
+export const CURRENT_ORCHESTRATION_POLICY_VERSION = 7;
 
 export const ORCHESTRATION_POLICY_NOTICE = `<lemonpi-authoritative-policy version="${CURRENT_ORCHESTRATION_POLICY_VERSION}">
 The installed LemonPi orchestration policy is authoritative. Historical summaries preserve product facts and user decisions only. Any older scheduling, review, validation, model-routing, context-reuse, or Git instruction is superseded. Main Pi directly handles low-risk one-repository UI slices; only broader work uses independent delegated lanes. Main Pi owns safe local Git integration and exact validation reuse.
@@ -315,6 +315,7 @@ export interface WorkerAttempt {
   emptyOutput?: boolean;
   corrupted?: boolean;
   todoId?: number;
+  outcomeId?: string;
   worktreePath?: string;
   repository?: string;
   baseRevision?: string;
@@ -752,6 +753,12 @@ const HIGH_RISK_SCOPE = /\b(?:auth(?:entication|orization)?|backend|billing|cryp
 const HIGH_RISK_PATH = /(?:^|\/)(?:api|auth|backend|database|migrations?|protocol|server|src-tauri)(?:\/|$)|(?:^|\/)(?:Cargo\.toml|Cargo\.lock|.*\.sql)$/i;
 const UI_PATH = /\.(?:css|html|jsx?|scss|svelte|swift|tsx?|vue)$/i;
 
+export function likelyFastPathRequest(request: string): boolean {
+  return /\b(?:add|change|display|fix|implement|make|move|remove|show|style|update)\b/i.test(request)
+    && /\b(?:badge|button|dot|icon|indicator|label|layout|menu|spacing|style|unread|visual)\b/i.test(request)
+    && !HIGH_RISK_SCOPE.test(request);
+}
+
 export function fastPathIssue(input: FastPathInput): string | undefined {
   if (input.paths.length < 1 || input.paths.length > 5) return "Fast path requires one to five exact UI paths in one repository.";
   if (HIGH_RISK_SCOPE.test(input.request)) return "This request names synchronization or another material backend/risk boundary; use a separately scoped implementation phase.";
@@ -763,8 +770,7 @@ export function fastPathIssue(input: FastPathInput): string | undefined {
 }
 
 export function hiddenScopeExpansionIssue(request: string, laneTasks: string[]): string | undefined {
-  const visibleUiRequest = /\b(?:badge|button|dot|icon|indicator|label|layout|menu|spacing|style|unread|visual)\b/i.test(request)
-    && !HIGH_RISK_SCOPE.test(request);
+  const visibleUiRequest = likelyFastPathRequest(request);
   if (!visibleUiRequest) return undefined;
   const expanded = laneTasks.find((task) => HIGH_RISK_SCOPE.test(task));
   return expanded

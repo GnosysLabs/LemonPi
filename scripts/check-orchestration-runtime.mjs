@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +14,7 @@ import {
   hiddenScopeExpansionIssue,
   internalContractFallback,
   invalidatesValidation,
+  likelyFastPathRequest,
   launchPreflightIssue,
   missionStateContentHash,
   missionProgress,
@@ -33,6 +34,7 @@ import {
   workerStatusMetrics,
 } from "../src-tauri/resources/lemonpi-narration/extensions/orchestration-runtime.ts";
 import {
+  default as lemonPiNarration,
   compileDelegationContracts,
   delegatesImplementation,
   independentSpawnParams,
@@ -63,10 +65,36 @@ const migrated = parsedMissionState({
   updatedAt: Date.now(),
   suppressedRunIds: ["manual-stop-run"],
 });
-assert.equal(migrated?.version, 2);
+assert.equal(migrated?.version, 3);
 assert.equal(migrated?.policyVersion, CURRENT_ORCHESTRATION_POLICY_VERSION);
 assert.equal(migrated?.migratedFromPolicyVersion, 0);
 assert.deepEqual(migrated?.suppressedRunIds, ["manual-stop-run"]);
+const compactedLegacyMission = parsedMissionState({
+  version: 2,
+  policyVersion: 6,
+  id: "legacy-seventeen-step-mission",
+  phase: "integration",
+  request: "Add an unread notification dot",
+  activeRunIds: [],
+  writerActive: false,
+  wakeAttempts: 2,
+  updatedAt: Date.now(),
+  remainingTask: { id: 7, subject: "Validate Apple app behavior", status: "pending" },
+  attempts: Array.from({ length: 4 }, (_, index) => ({
+    runId: `legacy-run-${index}`,
+    purpose: `Finish product slice ${index + 1}`,
+    status: index === 3 ? "failed" : "completed",
+    executionMode: "implementation",
+    completedOrdinal: index + 1,
+    sliceCount: 1,
+    transcriptBytes: 1,
+    tokens: 1,
+    integrationStatus: "pending",
+  })),
+});
+assert.equal(compactedLegacyMission?.outcomes.length, 3);
+assert.equal(compactedLegacyMission?.remainingTask, undefined);
+assert.equal(compactedLegacyMission?.outcomes.some((outcome) => outcome.subject.includes("Validate Apple")), false);
 const staleSummary = "Product decision: keep opaque IDs. Workflow rule: use one writer at a time.";
 const superseded = supersedeHistoricalPolicy(staleSummary);
 assert.match(superseded, /Product decision: keep opaque IDs/);
@@ -129,6 +157,8 @@ assert.equal(preparedSpawn.params.worktree, false);
 assert.equal(independentSpawnParams({ ...structuredWriter, todoId: 7 }).params.tasks[0].todoId, undefined);
 
 assert.equal(fastPathIssue({ request: "Add an unread dot", paths: ["src/Inbox.tsx", "src/inbox.css"] }), undefined);
+assert.equal(likelyFastPathRequest("Add an unread dot"), true);
+assert.equal(likelyFastPathRequest("Review the unread indicator implementation"), false);
 assert.match(fastPathIssue({ request: "Add synchronized unread state", paths: ["src/Inbox.tsx"] }), /separately scoped/);
 assert.match(fastPathIssue({ request: "Add an unread dot", paths: ["src/server/events.ts"] }), /ordinary UI source/);
 assert.match(hiddenScopeExpansionIssue("Add an unread dot", ["Add websocket synchronization protocol"]), /local visible slice first/);
@@ -278,6 +308,122 @@ assert.equal(recommendedReasoning("scout", "Find the router"), "low");
 assert.equal(recommendedReasoning("worker", "Implement routine UI"), "medium");
 assert.equal(recommendedReasoning("reviewer", "Review authentication boundary"), "high");
 
+const transactionRepo = join(root, "transaction-repo");
+mkdirSync(join(transactionRepo, "src"), { recursive: true });
+git(root, "init", transactionRepo);
+git(transactionRepo, "config", "user.email", "lemonpi-tests@example.invalid");
+git(transactionRepo, "config", "user.name", "LemonPi Tests");
+writeFileSync(join(transactionRepo, "src", "indicator.ts"), "export const indicator = 'base';\n");
+commitAll(transactionRepo, "base transaction fixture");
+const transactionBase = git(transactionRepo, "rev-parse", "HEAD");
+const sourceOne = join(root, "transaction-source-one");
+git(transactionRepo, "worktree", "add", "-b", "source-one", sourceOne, transactionBase);
+writeFileSync(join(sourceOne, "src", "indicator.ts"), "export const indicator = 'implemented';\n");
+writeFileSync(join(sourceOne, "src", "badge.ts"), "export const badge = true;\n");
+commitAll(sourceOne, "implement complete visible slice");
+writeFileSync(join(sourceOne, "src", "indicator.ts"), "export const indicator = 'corrected';\n");
+commitAll(sourceOne, "correct visible slice");
+
+const registeredTools = new Map();
+const extensionHandlers = new Map();
+const fakePi = {
+  registerTool(tool) { registeredTools.set(tool.name, tool); },
+  on(event, handler) { extensionHandlers.set(event, handler); },
+  appendEntry() {},
+  sendMessage() {},
+  events: { on() { return () => {}; }, emit() {} },
+  async exec(program, args, options = {}) {
+    const result = spawnSync(program, args, {
+      cwd: options.cwd,
+      encoding: "utf8",
+      env: process.env,
+      timeout: options.timeout,
+    });
+    return {
+      code: result.status ?? 1,
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? result.error?.message ?? "",
+    };
+  },
+};
+lemonPiNarration(fakePi);
+const gitTool = registeredTools.get("lemonpi_git");
+assert.ok(gitTool);
+const integrationResult = await gitTool.execute("transaction-success", {
+  action: "integrate_worktree",
+  cwd: transactionRepo,
+  worktreePath: sourceOne,
+  paths: ["src/indicator.ts", "src/badge.ts"],
+  message: "integrate full parent and correction",
+}, undefined, undefined, { cwd: transactionRepo });
+assert.equal(integrationResult.isError, undefined);
+assert.match(readFileSync(join(transactionRepo, "src", "indicator.ts"), "utf8"), /corrected/);
+assert.match(readFileSync(join(transactionRepo, "src", "badge.ts"), "utf8"), /true/);
+assert.equal(git(transactionRepo, "status", "--porcelain=v1"), "");
+
+const sourceTwo = join(root, "transaction-source-two");
+git(transactionRepo, "worktree", "add", "-b", "source-two", sourceTwo, transactionBase);
+writeFileSync(join(sourceTwo, "src", "indicator.ts"), "export const indicator = 'conflicting-worker';\n");
+commitAll(sourceTwo, "create conflicting worker slice");
+const targetBeforeConflict = git(transactionRepo, "rev-parse", "HEAD");
+const conflictResult = await gitTool.execute("transaction-conflict", {
+  action: "integrate_worktree",
+  cwd: transactionRepo,
+  worktreePath: sourceTwo,
+  paths: ["src/indicator.ts"],
+  message: "reject conflicting worker slice",
+}, undefined, undefined, { cwd: transactionRepo });
+assert.equal(conflictResult.isError, true);
+assert.equal(conflictResult.details?.targetUnchanged, true);
+assert.equal(git(transactionRepo, "rev-parse", "HEAD"), targetBeforeConflict);
+assert.equal(git(transactionRepo, "status", "--porcelain=v1"), "");
+assert.notEqual(spawnSync("git", ["rev-parse", "--verify", "CHERRY_PICK_HEAD"], { cwd: transactionRepo }).status, 0);
+
+const canaryRepo = join(root, "fast-path-canary");
+mkdirSync(join(canaryRepo, "src"), { recursive: true });
+git(root, "init", canaryRepo);
+git(canaryRepo, "config", "user.email", "lemonpi-tests@example.invalid");
+git(canaryRepo, "config", "user.name", "LemonPi Tests");
+writeFileSync(join(canaryRepo, "src", "Inbox.tsx"), "export const Inbox = () => null;\n");
+commitAll(canaryRepo, "base fast-path canary");
+await extensionHandlers.get("message_start")?.({ message: { role: "user", content: "Add an unread notification dot" } });
+const dispatchTool = registeredTools.get("lemonpi_dispatch");
+const fastPathTool = registeredTools.get("lemonpi_fast_path");
+const validationTool = registeredTools.get("lemonpi_validate");
+const canaryContext = { cwd: canaryRepo, sessionManager: { getSessionId: () => "canary-session" } };
+const dispatchedCanary = await dispatchTool.execute("fast-path-dispatch", {
+  lanes: [{
+    agent: "worker",
+    summary: "Add unread notification dot",
+    task: "Add the local visible unread notification dot.",
+    cwd: canaryRepo,
+    executionMode: "implementation",
+    ownedPaths: ["src/Inbox.tsx"],
+  }],
+}, undefined, undefined, canaryContext);
+assert.equal(dispatchedCanary.isError, undefined);
+assert.equal(dispatchedCanary.details?.mode, "fast-path");
+const mutationGuard = await extensionHandlers.get("tool_call")?.({ toolName: "edit", toolCallId: "canary-edit", input: { path: "src/Inbox.tsx" } }, { ui: { notify() {} } });
+assert.equal(mutationGuard, undefined);
+writeFileSync(join(canaryRepo, "src", "Inbox.tsx"), "export const Inbox = () => <i data-unread />;\n");
+const canaryValidation = await validationTool.execute("canary-validation", {
+  cwd: canaryRepo,
+  program: "node",
+  args: ["-e", "process.exit(0)"],
+  relevantPaths: ["src/Inbox.tsx"],
+  scope: "focused",
+}, undefined, undefined, canaryContext);
+assert.equal(canaryValidation.isError, undefined);
+const finishedCanary = await fastPathTool.execute("canary-finish", {
+  action: "finish",
+  cwd: canaryRepo,
+  paths: ["src/Inbox.tsx"],
+  summary: "Add unread notification dot",
+}, undefined, undefined, canaryContext);
+assert.equal(finishedCanary.isError, undefined);
+assert.equal(finishedCanary.details?.validationCount, 1);
+await extensionHandlers.get("session_shutdown")?.();
+
 const oldMetrics = reducedIncidentReplay("old");
 const currentMetrics = reducedIncidentReplay("current");
 assert.ok(currentMetrics.criticalPathMinutes < oldMetrics.criticalPathMinutes);
@@ -298,7 +444,7 @@ assert.doesNotMatch(readFileSync(new URL("../src-tauri/resources/lemonpi-narrati
 
 console.log(JSON.stringify({
   policyVersion: CURRENT_ORCHESTRATION_POLICY_VERSION,
-  scenarios: 16,
+  scenarios: 18,
   oldPolicy: oldMetrics,
   currentPolicy: currentMetrics,
   deltas: {

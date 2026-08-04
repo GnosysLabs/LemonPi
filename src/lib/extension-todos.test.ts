@@ -13,7 +13,7 @@ const details = {
 
 describe("rpiv-todo snapshots", () => {
   it("reads the structured tool result envelope", () => {
-    expect(parseTodoSnapshot({ details })).toEqual({ tasks: details.tasks, nextId: 3 });
+    expect(parseTodoSnapshot({ details })).toEqual({ tasks: details.tasks, nextId: 3, source: "todo" });
   });
 
   it("restores the latest valid todo snapshot from session messages", () => {
@@ -22,7 +22,7 @@ describe("rpiv-todo snapshots", () => {
       { role: "toolResult", toolName: "todo", details: first },
       { role: "toolResult", toolName: "bash", details: { tasks: [] } },
       { role: "toolResult", toolName: "todo", details },
-    ])).toEqual({ tasks: details.tasks, nextId: 3 });
+    ])).toEqual({ tasks: details.tasks, nextId: 3, source: "todo" });
   });
 
   it("restores LemonPi-owned worker lifecycle transitions", () => {
@@ -30,7 +30,24 @@ describe("rpiv-todo snapshots", () => {
     expect(todoSnapshotFromMessages([
       { role: "toolResult", toolName: "todo", details },
       { role: "custom", customType: "lemonpi-todo-lifecycle", content: JSON.stringify(completed) },
-    ])).toEqual({ tasks: completed.tasks, nextId: 3 });
+    ])).toEqual({ tasks: completed.tasks, nextId: 3, source: "todo" });
+  });
+
+  it("prefers the controller-owned compact outcome projection", () => {
+    const outcomes = {
+      source: "mission",
+      missionId: "mission-1",
+      historyCount: 17,
+      tasks: [
+        { id: 1, subject: "Finish Apple unread UI", status: "in_progress", runtimeStatus: "validating" },
+        { id: 2, subject: "Verify desktop unread UI", status: "pending", runtimeStatus: "pending" },
+      ],
+      nextId: 3,
+    };
+    expect(todoSnapshotFromMessages([
+      { role: "toolResult", toolName: "todo", details },
+      { role: "custom", customType: "lemonpi-mission-outcomes", content: JSON.stringify(outcomes) },
+    ])).toEqual({ ...outcomes, source: "mission" });
   });
 
   it("rejects malformed snapshots instead of partially rendering them", () => {

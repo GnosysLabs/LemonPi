@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   MAIN_PI_OPERATING_MANUAL,
   authoritativeRuntimeWorkerState,
@@ -22,7 +23,6 @@ import {
   shouldSuppressStatusPoll,
   shouldWakeForPlanContinuation,
   subagentStatusDisposition,
-  upfrontRoadmapIssue,
   workerSummaryFromTask,
 } from "../src-tauri/resources/lemonpi-narration/extensions/narration.ts";
 
@@ -113,6 +113,14 @@ assert.equal(missionHasActiveOwnership({ activeDelegationCount: 0, recordedRunCo
 assert.equal(missionWakeIsBlocked({ mainAgentRunning: false, activeToolExecutions: 0, wakeQueued: false }), false);
 assert.equal(missionWakeIsBlocked({ mainAgentRunning: true, activeToolExecutions: 0, wakeQueued: false }), true);
 assert.equal(missionWakeIsBlocked({ mainAgentRunning: false, activeToolExecutions: 0, wakeQueued: false, turnSettled: false }), true);
+assert.deepEqual([
+  missionWakeIsBlocked({ mainAgentRunning: true, activeToolExecutions: 1, wakeQueued: false, turnSettled: false }),
+  missionWakeIsBlocked({ mainAgentRunning: true, activeToolExecutions: 0, wakeQueued: false, turnSettled: false }),
+  missionWakeIsBlocked({ mainAgentRunning: false, activeToolExecutions: 0, wakeQueued: false, turnSettled: true }),
+  missionWakeIsBlocked({ mainAgentRunning: false, activeToolExecutions: 0, wakeQueued: true, turnSettled: true }),
+], [true, true, false, true]);
+const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+assert.doesNotMatch(appSource, /__lemonpi_subagent_terminal_v1__/);
 
 assert.deepEqual(remainingPlanFromTodoResult({
   details: {
@@ -124,68 +132,6 @@ assert.deepEqual(remainingPlanFromTodoResult({
   },
 }), { task: { id: 2, subject: "Integrate first result", status: "in_progress" } });
 
-const completeRoadmap = [
-  { id: 1, subject: "Map affected surfaces", description: "Confirm the exact runtime and UI boundaries.", activeForm: "mapping affected surfaces", status: "in_progress" },
-  { id: 2, subject: "Implement runtime guard", description: "Enforce the new dispatch invariant.", status: "pending", blockedBy: [1] },
-  { id: 3, subject: "Integrate visible feedback", description: "Connect the guard result to user-facing progress.", status: "pending", blockedBy: [2] },
-  { id: 4, subject: "Validate roadmap behavior", description: "Run focused contract and build checks.", status: "pending", blockedBy: [3] },
-];
-assert.equal(upfrontRoadmapIssue({
-  tasks: completeRoadmap,
-  freshForRequest: false,
-  establishedForMission: false,
-  laneCount: 2,
-}), undefined);
-assert.equal(upfrontRoadmapIssue({
-  tasks: completeRoadmap,
-  freshForRequest: true,
-  establishedForMission: false,
-  laneCount: 2,
-}), undefined);
-assert.match(upfrontRoadmapIssue({
-  tasks: completeRoadmap.map((task, index) => index === 0 ? { ...task, subject: "Complete delegated outcome" } : task),
-  freshForRequest: true,
-  establishedForMission: false,
-  laneCount: 2,
-}), /generic placeholder/);
-assert.match(upfrontRoadmapIssue({
-  tasks: completeRoadmap.map((task, index) => index === 1 ? { ...task, description: undefined } : task),
-  freshForRequest: true,
-  establishedForMission: false,
-  laneCount: 2,
-}), /concrete description/);
-assert.equal(upfrontRoadmapIssue({
-  tasks: completeRoadmap.map((task) => ({ ...task, blockedBy: [] })),
-  freshForRequest: true,
-  establishedForMission: false,
-  laneCount: 2,
-}), undefined);
-assert.equal(upfrontRoadmapIssue({
-  tasks: completeRoadmap.map((task, index) => index === 3
-    ? { ...task, subject: "Polish roadmap behavior", description: "Confirm the final presentation." }
-    : task),
-  freshForRequest: true,
-  establishedForMission: false,
-  laneCount: 2,
-}), undefined);
-assert.equal(upfrontRoadmapIssue({
-  tasks: [{ id: 1, subject: "Add unread dot", status: "pending" }],
-  freshForRequest: false,
-  establishedForMission: false,
-  laneCount: 1,
-}), undefined);
-assert.equal(upfrontRoadmapIssue({
-  tasks: [{ ...completeRoadmap[3], status: "in_progress" }],
-  freshForRequest: false,
-  establishedForMission: true,
-  laneCount: 1,
-}), undefined);
-assert.match(upfrontRoadmapIssue({
-  tasks: completeRoadmap.map((task) => ({ ...task, status: "completed" })),
-  freshForRequest: true,
-  establishedForMission: true,
-  laneCount: 1,
-}), /no unfinished milestone/);
 assert.equal(shouldWakeForPlanContinuation({ hasRemainingTask: true, activeDelegationCount: 0, writerOccupied: false, intentionallyStopped: false, attempts: 0 }), true);
 assert.equal(shouldWakeForPlanContinuation({ hasRemainingTask: true, activeDelegationCount: 1, writerOccupied: false, intentionallyStopped: false, attempts: 0 }), false);
 
@@ -208,6 +154,9 @@ const restored = replayMissionState([
 ]);
 assert.deepEqual(restored.activeRunIds, ["run-a", "run-b"]);
 assert.deepEqual(restored.activeRunWidths, { "run-a": 1, "run-b": 1 });
+assert.equal(restored.version, 3);
+assert.equal(restored.policyVersion, 7);
+assert.deepEqual(restored.outcomes, []);
 
 assert.equal(isManagedWorktreePatchCommand({ command: "git apply --check .pi-subagents/artifacts/worktree-diffs/run.patch" }), true);
 assert.equal(isManagedWorktreePatchCommand({ command: "git apply /tmp/untrusted.patch" }), false);
@@ -218,7 +167,8 @@ assert.match(MAIN_PI_OPERATING_MANUAL, /lemonpi_fast_path\(\{ action: "start", c
 assert.match(MAIN_PI_OPERATING_MANUAL, /lemonpi_validate\(\{ cwd, program, args, relevantPaths: paths, scope: "focused" \}\)/);
 assert.match(MAIN_PI_OPERATING_MANUAL, /ONE READ-ONLY CHILD:[\s\S]*exactly one bounded read-only investigation/);
 assert.match(MAIN_PI_OPERATING_MANUAL, /DISPATCH:[\s\S]*every implementation outside the fast path/);
-assert.match(MAIN_PI_OPERATING_MANUAL, /subagent\(\{ action: "list" \}\)/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /never a dispatch prerequisite/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /do not perform a ceremonial roster lookup/);
 assert.match(MAIN_PI_OPERATING_MANUAL, /Do not supply model, provider, thinking[\s\S]*usage budget[\s\S]*acceptance metadata/);
 assert.match(MAIN_PI_OPERATING_MANUAL, /subagents\.agentOverrides\[agent\]\.model[\s\S]*\.thinking/);
 assert.match(MAIN_PI_OPERATING_MANUAL, /subagent\(\{ action: "resume", id, message \}\)[\s\S]*Correction for previous slice:[\s\S]*Worker summary:/);
@@ -232,9 +182,9 @@ assert.match(MAIN_PI_OPERATING_MANUAL, /Never rerun an unchanged suite/);
 assert.doesNotMatch(MAIN_PI_OPERATING_MANUAL, /Create the whole known roadmap before|complete visible roadmap/);
 const injectedPrompt = buildMainPiSystemPrompt("BASE SYSTEM PROMPT", { runId: "run-attention", index: 2 });
 assert.match(injectedPrompt, /^BASE SYSTEM PROMPT/);
-assert.match(injectedPrompt, /lemonpi-authoritative-policy version="6"/);
+assert.match(injectedPrompt, /lemonpi-authoritative-policy version="7"/);
 assert.match(injectedPrompt, /lemonpi-visible-narration/);
-assert.match(injectedPrompt, /lemonpi-main-pi-operating-manual version="1"/);
+assert.match(injectedPrompt, /lemonpi-main-pi-operating-manual version="2"/);
 assert.match(injectedPrompt, /Run run-attention child 2 needs intervention now/);
 assert.equal(shouldInjectMainPiOperatingManual({}), true);
 assert.equal(shouldInjectMainPiOperatingManual({ PI_SUBAGENT_CHILD: "0" }), true);

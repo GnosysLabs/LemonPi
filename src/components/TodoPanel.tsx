@@ -50,6 +50,7 @@ export function TodoPanel({
   if (!snapshot || tasks.length === 0) return null;
   const allVisibleTasks = snapshot.tasks.filter((task) => task.status !== "deleted");
   const completedCount = allVisibleTasks.filter((task) => task.status === "completed").length;
+  const remainingCount = allVisibleTasks.length - completedCount;
   const active = tasks.find(({ task }) => task.status === "in_progress")?.task;
   const planInterrupted = interrupted && Boolean(active);
   const planPaused = Boolean(pauseReason) && Boolean(active) && !planInterrupted;
@@ -64,8 +65,8 @@ export function TodoPanel({
   return (
     <section className={`todo-panel${collapsed ? " todo-panel--collapsed" : ""}${planInterrupted ? " todo-panel--interrupted" : ""}${planPaused ? " todo-panel--paused" : ""}`} aria-label="Task plan">
       <button className={`todo-panel__header${hasRuntimeStatus ? " todo-panel__header--runtime" : ""}`} type="button" onClick={() => setCollapsed((value) => !value)} aria-expanded={!collapsed}>
-        <span className="todo-panel__title"><ListChecks size={16} /><strong>{allVisibleTasks.length > 1 ? "Mission" : "Task"}</strong></span>
-        <span className="todo-panel__summary">{planInterrupted ? "Stopped · " : planPaused ? `${pausedLabel} · ` : ""}{completedCount} of {allVisibleTasks.length} accepted · {progressPercent}%</span>
+        <span className="todo-panel__title"><ListChecks size={16} /><strong>{snapshot.source === "mission" ? (allVisibleTasks.length > 1 ? "Outcomes" : "Outcome") : allVisibleTasks.length > 1 ? "Mission" : "Task"}</strong></span>
+        <span className="todo-panel__summary">{planInterrupted ? "Stopped · " : planPaused ? `${pausedLabel} · ` : ""}{snapshot.source === "mission" ? `${remainingCount} remaining · ${progressPercent}%` : `${completedCount} of ${allVisibleTasks.length} accepted · ${progressPercent}%`}</span>
         {hasRuntimeStatus && <span className="todo-panel__runtime" aria-label="Mission runtime status">
           {activeWorkers > 0 && <em><i />{activeWorkers} worker{activeWorkers === 1 ? "" : "s"}</em>}
           {validationActive && <em><CircleNotch className="spin" size={10} />Validating</em>}

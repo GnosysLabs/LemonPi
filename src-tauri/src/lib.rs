@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     env, fs,
@@ -44,6 +45,7 @@ const SUBAGENT_PROMPT_MAX_CHARS: usize = 256 * 1024;
 const SUBAGENT_ACTIVITY_EVENTS: usize = 12;
 const MAX_SETTINGS_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_AGENT_FILE_BYTES: u64 = 256 * 1024;
+const LEMONPI_ORCHESTRATION_POLICY_VERSION: u32 = 7;
 
 #[derive(Default)]
 pub(crate) struct PiManager {
@@ -172,6 +174,8 @@ struct ManagedPi {
     generation: u64,
     trusted: bool,
     info: PiProcessInfo,
+    controller_path: PathBuf,
+    controller_build_id: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -181,6 +185,8 @@ struct PiProcessInfo {
     version: String,
     pid: Option<u32>,
     cwd: Option<String>,
+    controller_build_id: Option<String>,
+    orchestration_policy_version: Option<u32>,
 }
 
 #[derive(Clone, Serialize)]
@@ -544,6 +550,8 @@ async fn detect_pi() -> Result<PiProcessInfo, String> {
         version,
         pid: None,
         cwd: None,
+        controller_build_id: None,
+        orchestration_policy_version: None,
     })
 }
 
@@ -1462,6 +1470,28 @@ fn narration_extension_path(app: &AppHandle) -> Result<PathBuf, String> {
     }
 }
 
+fn orchestration_controller_build_id(narration_extension: &Path) -> Result<String, String> {
+    let runtime = narration_extension.with_file_name("orchestration-runtime.ts");
+    let mut hasher = Sha256::new();
+    for path in [narration_extension, runtime.as_path()] {
+        let bytes = fs::read(path).map_err(|error| {
+            format!(
+                "Could not read LemonPi orchestration controller {}: {error}",
+                path.display()
+            )
+        })?;
+        hasher.update(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default(),
+        );
+        hasher.update([0]);
+        hasher.update(bytes);
+        hasher.update([0]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 #[tauri::command]
 async fn start_pi(
     app: AppHandle,
@@ -1476,23 +1506,44 @@ async fn start_pi(
         return Err("The selected project path is not a directory.".to_string());
     }
 
-    {
+    let narration_extension = narration_extension_path(&app)?;
+    let controller_build_id = orchestration_controller_build_id(&narration_extension)?;
+    let stale_process = {
         let mut registry = manager.registry.lock().await;
-        if let Some((info, generation, process_trusted)) = registry
-            .processes
-            .get(&cwd_path)
-            .map(|process| (process.info.clone(), process.generation, process.trusted))
+        let existing = registry.processes.get(&cwd_path).map(|process| {
+            (
+                process.info.clone(),
+                process.generation,
+                process.trusted,
+                process.controller_build_id.clone(),
+            )
+        });
+        if let Some((info, generation, process_trusted, running_build_id)) = existing {
+            if running_build_id != controller_build_id {
+                registry.processes.remove(&cwd_path)
+            } else {
+                registry.active_project = Some(cwd_path.clone());
+                registry.active_trusted = Some(process_trusted);
+                registry.active_generation = Some(generation);
+                return Ok(info);
+            }
+        } else {
+            None
+        }
+    };
+    if let Some(process) = stale_process {
+        clear_hydration_for_process_state(&manager.hydration, &cwd_path, "controller-updated");
+        let _ = process.stop.send(());
         {
+            let mut registry = manager.registry.lock().await;
             registry.active_project = Some(cwd_path.clone());
-            registry.active_trusted = Some(process_trusted);
-            registry.active_generation = Some(generation);
-            return Ok(info);
+            registry.active_trusted = Some(trusted);
+            registry.active_generation = None;
         }
     }
 
     let executable = find_pi()?;
     let version = pi_version(&executable).await?;
-    let narration_extension = narration_extension_path(&app)?;
     let child_todo_bridge = narration_extension.with_file_name("child-todo-bridge.ts");
     ensure_required_pi_packages(&executable).await?;
     let agent_dir = pi_agent_dir()?;
@@ -1503,7 +1554,7 @@ async fn start_pi(
     command
         .args(["--mode", "rpc", project_trust_arg(trusted)])
         .arg("--extension")
-        .arg(narration_extension)
+        .arg(&narration_extension)
         .current_dir(&cwd_path)
         .env("PI_SKIP_VERSION_CHECK", "1")
         .stdin(Stdio::piped())
@@ -1536,6 +1587,8 @@ async fn start_pi(
         version,
         pid: Some(pid),
         cwd: Some(path_for_frontend(&cwd_path)),
+        controller_build_id: Some(controller_build_id.clone()),
+        orchestration_policy_version: Some(LEMONPI_ORCHESTRATION_POLICY_VERSION),
     };
 
     clear_hydration_for_process_state(&manager.hydration, &cwd_path, "started");
@@ -1558,6 +1611,8 @@ async fn start_pi(
                 generation,
                 trusted,
                 info: info.clone(),
+                controller_path: narration_extension.clone(),
+                controller_build_id: controller_build_id.clone(),
             },
         );
         generation
@@ -1675,14 +1730,24 @@ async fn send_validated_pi_command_to_project(
     command: &Value,
 ) -> Result<(), String> {
     let payload = encode_validated_pi_command(command)?;
-    let stdin = {
+    let (stdin, controller_path, controller_build_id) = {
         let registry = manager.registry.lock().await;
         registry
             .processes
             .get(project)
-            .map(|process| Arc::clone(&process.stdin))
+            .map(|process| {
+                (
+                    Arc::clone(&process.stdin),
+                    process.controller_path.clone(),
+                    process.controller_build_id.clone(),
+                )
+            })
             .ok_or_else(|| "Pi is not running.".to_string())?
     };
+    let current_build_id = orchestration_controller_build_id(&controller_path)?;
+    if current_build_id != controller_build_id {
+        return Err("LemonPi's orchestration controller changed while this Pi process was running. Reopen the project to restart Pi with the new controller; the saved task and mission state are preserved.".to_string());
+    }
 
     let mut stdin = stdin.lock().await;
     stdin
@@ -3820,6 +3885,24 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controller_identity_changes_with_either_runtime_source() {
+        let root = env::temp_dir().join(format!(
+            "lemonpi-controller-identity-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let narration = root.join("narration.ts");
+        let runtime = root.join("orchestration-runtime.ts");
+        fs::write(&narration, "export const narration = 1;\n").unwrap();
+        fs::write(&runtime, "export const policy = 7;\n").unwrap();
+        let first = orchestration_controller_build_id(&narration).unwrap();
+        fs::write(&runtime, "export const policy = 8;\n").unwrap();
+        let second = orchestration_controller_build_id(&narration).unwrap();
+        assert_ne!(first, second);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn trust_decision_maps_to_explicit_cli_flag() {
