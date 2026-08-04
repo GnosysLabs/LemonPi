@@ -1,4 +1,4 @@
-export const CURRENT_ORCHESTRATION_POLICY_VERSION = 8;
+export const CURRENT_ORCHESTRATION_POLICY_VERSION = 9;
 
 export const ORCHESTRATION_POLICY_NOTICE = `<lemonpi-authoritative-policy version="${CURRENT_ORCHESTRATION_POLICY_VERSION}">
 The installed LemonPi orchestration policy is authoritative. Historical summaries preserve product facts and user decisions only. Any older scheduling, review, validation, model-routing, context-reuse, or Git instruction is superseded. Main Pi directly handles low-risk one-repository UI slices; only broader work uses independent delegated lanes. Main Pi owns safe local Git integration and exact validation reuse.
@@ -76,6 +76,7 @@ export function trustedWorkerPatchPath(
     || normalized.includes("/.pi-subagents/artifacts/worktree-diffs/")) return true;
   if (!artifactRunId || !missionRunIds.includes(artifactRunId)) return false;
   const escaped = artifactRunId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (new RegExp(`/\\.pi/lemonpi/preserved-patches/[^/]*${escaped}[^/]*\\.patch$`).test(normalized)) return true;
   return new RegExp(`/async-subagent-runs/${escaped}/worktree-diffs/step-\\d+/task-\\d+-[^/]+\\.patch$`).test(normalized);
 }
 
@@ -116,11 +117,57 @@ export function scheduleOwnedLanes(lanes: OwnedLane[], completed = new Set<strin
 
 export type ExecutionMode = "read-only" | "implementation";
 
+export const SUBAGENT_RPC_PROTOCOL_VERSION = 1;
+export const SUBAGENT_LIFECYCLE_ARTIFACT_VERSION = 3;
+export const REQUIRED_SUBAGENT_RPC_METHODS = ["ping", "status", "spawn", "steer", "stop"] as const;
+
+export type WorkerStopCause = "user" | "budget" | "runtime_shutdown" | "superseded" | "main_agent" | "operator" | "dependency_failure" | "unknown";
+
+export interface WorkerStopProvenance {
+  cause: WorkerStopCause;
+  initiator: string;
+  initiatingRunId?: string;
+  reason: string;
+  requestedAt: number;
+}
+
+export interface SubagentRpcHandshake {
+  protocolVersion: typeof SUBAGENT_RPC_PROTOCOL_VERSION;
+  lifecycleArtifactVersion: typeof SUBAGENT_LIFECYCLE_ARTIFACT_VERSION;
+  methods: string[];
+  capabilities: Record<string, unknown>;
+}
+
+export function validateSubagentRpcHandshake(value: unknown): SubagentRpcHandshake {
+  const root = objectRecord(value);
+  const capabilities = objectRecord(root?.capabilities);
+  const terminalProof = objectRecord(capabilities?.processTerminalProof);
+  const methods = Array.isArray(root?.methods)
+    ? root.methods.filter((method): method is string => typeof method === "string")
+    : [];
+  if (root?.version !== SUBAGENT_RPC_PROTOCOL_VERSION) {
+    throw new Error(`Incompatible pi-subagents RPC protocol: expected ${SUBAGENT_RPC_PROTOCOL_VERSION}, received ${String(root?.version ?? "missing")}.`);
+  }
+  const missingMethod = REQUIRED_SUBAGENT_RPC_METHODS.find((method) => !methods.includes(method));
+  if (missingMethod) throw new Error(`Incompatible pi-subagents RPC implementation: missing '${missingMethod}' capability.`);
+  if (terminalProof?.lifecycleArtifactVersion !== SUBAGENT_LIFECYCLE_ARTIFACT_VERSION) {
+    throw new Error(`Incompatible pi-subagents lifecycle artifacts: expected ${SUBAGENT_LIFECYCLE_ARTIFACT_VERSION}, received ${String(terminalProof?.lifecycleArtifactVersion ?? "missing")}.`);
+  }
+  return {
+    protocolVersion: SUBAGENT_RPC_PROTOCOL_VERSION,
+    lifecycleArtifactVersion: SUBAGENT_LIFECYCLE_ARTIFACT_VERSION,
+    methods,
+    capabilities: capabilities ?? {},
+  };
+}
+
 export const LEMONPI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type LemonPiThinkingLevel = typeof LEMONPI_THINKING_LEVELS[number];
 
 export interface AgentLaunchBinding {
   agent: string;
+  provider: string;
+  modelId: string;
   model: string;
   thinking: LemonPiThinkingLevel;
   source: "user-agent-override" | "user-agent-override+project-opt-in" | "project-opt-in";
@@ -215,9 +262,15 @@ export function resolveAgentLaunchBinding(input: {
     user: { model: userModel, thinking: userThinking, allowProjectAgentRouting: allowProject },
     ...(allowProject ? { project: { model: projectModel, thinking: projectThinking } } : {}),
   };
+  const separator = model.indexOf("/");
+  if (separator <= 0 || separator === model.length - 1) {
+    return { error: `LemonPi settings error for agent '${input.agent}': model '${model}' must include an exact provider/model identifier. No child was launched.` };
+  }
   return {
     binding: {
       agent: input.agent,
+      provider: model.slice(0, separator),
+      modelId: model.slice(separator + 1),
       model,
       thinking: thinking as LemonPiThinkingLevel,
       source,
@@ -294,6 +347,8 @@ export interface WorkerAttempt {
   status: "running" | "completed" | "partial" | "budget_exhausted" | "failed" | "stopped";
   executionMode: ExecutionMode;
   model?: string;
+  provider?: string;
+  modelId?: string;
   thinking?: LemonPiThinkingLevel;
   settingsSource?: AgentLaunchBinding["source"];
   settingsHash?: string;
@@ -309,6 +364,17 @@ export interface WorkerAttempt {
   budgetStopReason?: string;
   budgetPhase?: "work" | "warning" | "finalizing";
   budgetWarningSent?: boolean;
+  finalizationInstructionSent?: boolean;
+  finalizationMarkerPath?: string;
+  preservedPatchPath?: string;
+  stopProvenance?: WorkerStopProvenance;
+  telemetryObservedAt?: number;
+  telemetrySequence?: number;
+  continuationOf?: string;
+  continuationDepth?: number;
+  progressFingerprint?: string;
+  primaryValidation?: PrimaryValidationTarget;
+  checkpoint?: string;
   terminalCommittedAt?: number;
   usableOutput?: boolean;
   partialHandoffPath?: string;
@@ -335,10 +401,22 @@ export interface WorkerExecutionBudget {
   spawn: {
     timeoutMs: number;
     turnBudget: { maxTurns: number; graceTurns: number };
-    toolBudget: { soft: number; hard: number; block: "*" };
+    toolBudget: { soft: number; hard: number; block: string[] };
     usageBudget: { tokens: { soft: number; hard: number } };
   };
 }
+
+export interface PrimaryValidationTarget {
+  program: string;
+  args: string[];
+  cwd?: string;
+}
+
+export const FINALIZATION_BLOCKED_TOOLS = [
+  "grep", "find", "ls", "glob", "search", "web_search", "fetch", "fetch_content",
+  "browser", "subagent", "subagent_wait", "todo", "edit", "write", "apply_patch", "patch",
+  "write_file", "edit_file", "create_file", "delete_file", "move_file",
+] as const;
 
 export function workerExecutionBudget(
   agent: string,
@@ -387,7 +465,7 @@ export function workerExecutionBudget(
     spawn: {
       timeoutMs: hard.runtimeMs,
       turnBudget: { maxTurns: work.turns, graceTurns: finalization.turns },
-      toolBudget: { soft: warning.toolCalls, hard: work.toolCalls, block: "*" },
+      toolBudget: { soft: warning.toolCalls, hard: work.toolCalls, block: [...FINALIZATION_BLOCKED_TOOLS] },
       usageBudget: { tokens: { soft: warning.tokens, hard: hard.tokens } },
     },
   };
@@ -413,6 +491,78 @@ export function workerBudgetPhase(
     || metrics.toolCalls >= budget.warning.toolCalls
     || metrics.elapsedMs >= budget.warning.runtimeMs;
   return { phase: finalizing ? "finalizing" : warning ? "warning" : "work", ...(hardStopReason ? { hardStopReason } : {}) };
+}
+
+export function finalizationInstructionNeeded(
+  attempt: Pick<WorkerAttempt, "finalizationInstructionSent">,
+  phase: "work" | "warning" | "finalizing",
+): boolean {
+  return phase === "finalizing" && attempt.finalizationInstructionSent !== true;
+}
+
+function normalizedOwnedPath(value: string): string {
+  return value.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, "");
+}
+
+function exactCommand(program: string, args: string[]): string {
+  return [program, ...args].join(" ").replace(/\s+/g, " ").trim();
+}
+
+export function finalizationToolIssue(input: {
+  toolName: string;
+  toolInput: unknown;
+  ownedPaths: string[];
+  root?: string;
+  primaryValidation?: PrimaryValidationTarget;
+}): string | undefined {
+  const toolName = input.toolName.trim().toLowerCase();
+  const toolInput = objectRecord(input.toolInput) ?? {};
+  const ownedPaths = input.ownedPaths.map(normalizedOwnedPath);
+  if (toolName === "read") {
+    let path = typeof toolInput.path === "string" ? normalizedOwnedPath(toolInput.path) : "";
+    const root = input.root ? normalizedOwnedPath(input.root) : "";
+    if (root && (path === root || path.startsWith(`${root}/`))) path = path.slice(root.length).replace(/^\//, "");
+    return path && ownedPaths.some((owned) => path === owned || path.startsWith(`${owned}/`))
+      ? undefined
+      : "Finalization permits reads only inside the lane's exact owned paths.";
+  }
+  if (toolName === "bash" || toolName === "shell" || toolName === "shell_command") {
+    const command = typeof toolInput.command === "string" ? toolInput.command.replace(/\s+/g, " ").trim() : "";
+    if (!command || /(?:&&|\|\||;|\n|\r|`|\$\()/.test(command)) {
+      return "Finalization permits one bounded command at a time; command chaining and substitution are blocked.";
+    }
+    if (/^git (?:status(?: --(?:short|porcelain(?:=v1)?))?|diff(?: --(?:cached|check|stat|name-only|binary))*|rev-parse HEAD)(?: |$)/.test(command)) return undefined;
+    const validation = input.primaryValidation ? exactCommand(input.primaryValidation.program, input.primaryValidation.args) : "";
+    if (validation && command === validation) return undefined;
+    return "Finalization permits only Git status/diff inspection or the lane's one declared validation command.";
+  }
+  return "LemonPi finalization-only mode blocks new exploration, scope expansion, delegation, and edits. Return the preserved result or handoff now.";
+}
+
+export function implementationLaneIssue(input: {
+  ownedPaths: string[];
+  primaryValidation?: PrimaryValidationTarget;
+  checkpoint?: string;
+}): string | undefined {
+  const paths = [...new Set(input.ownedPaths.map(normalizedOwnedPath).filter(Boolean))];
+  if (paths.length === 0) return "Implementation lanes require a small explicit owned-path set.";
+  if (paths.length > 8) return `Implementation lane owns ${paths.length} paths; split it into independently checkpointable slices of at most 8 paths.`;
+  if (paths.some((path) => path === "." || /^(?:src|src-tauri|app|packages|tests?)$/.test(path))) {
+    return "Implementation ownership must name exact files or narrow component directories, not a repository-wide root.";
+  }
+  const boundaries = new Set(paths.map((path) => {
+    const parts = path.split("/");
+    return parts[0] === "src-tauri" && parts.length > 1 ? `${parts[0]}/${parts[1]}` : parts[0];
+  }));
+  if (boundaries.size > 2) {
+    return `Implementation lane crosses ${boundaries.size} ownership boundaries (${[...boundaries].join(", ")}); split it into dependent slices before launch.`;
+  }
+  const validation = input.primaryValidation;
+  if (!validation || !validation.program.trim() || !Array.isArray(validation.args) || validation.args.some((arg) => typeof arg !== "string")) {
+    return "Implementation lanes require one primaryValidation target with an executable and argument array.";
+  }
+  if (!input.checkpoint?.trim()) return "Implementation lanes require one independently meaningful checkpoint description.";
+  return undefined;
 }
 
 export type WorkerTerminalStatus = Exclude<WorkerAttempt["status"], "running">;
@@ -470,13 +620,13 @@ export function terminalOutcome(input: {
   reportedStatus: "completed" | "failed" | "stopped";
   evidence?: unknown;
   budgetStopReason?: string;
-  manuallyStopped?: boolean;
+  stopCause?: WorkerStopCause;
 }): { status: WorkerTerminalStatus; usableOutput: boolean; summary: ReturnType<typeof terminalEvidenceSummary> } {
   const summary = terminalEvidenceSummary(input.evidence);
   const usableOutput = !summary.corrupt && Boolean(summary.usefulOutput || summary.hasStructuredOutput || summary.artifactPaths.length > 0);
   const budgetReached = Boolean(input.budgetStopReason) || summary.budgetReached;
-  if (input.manuallyStopped) return { status: usableOutput ? "partial" : "stopped", usableOutput, summary };
   if (usableOutput && (input.reportedStatus === "completed" || summary.cleanExit)) return { status: "completed", usableOutput, summary };
+  if (input.stopCause === "user") return { status: usableOutput ? "partial" : "stopped", usableOutput, summary };
   if (usableOutput) return { status: "partial", usableOutput, summary };
   if (budgetReached) return { status: "budget_exhausted", usableOutput, summary };
   return { status: input.reportedStatus === "completed" ? "failed" : input.reportedStatus, usableOutput, summary };
@@ -490,8 +640,12 @@ export function preferredTerminalStatus(previous: WorkerAttempt["status"], next:
 
 export function immutableResumeBinding(attempt: WorkerAttempt): AgentLaunchBinding | undefined {
   if (!attempt.agent || !attempt.model || !attempt.thinking || !attempt.settingsSource || !attempt.settingsHash) return undefined;
+  const separator = attempt.model.indexOf("/");
+  if (separator <= 0 || separator === attempt.model.length - 1) return undefined;
   return {
     agent: attempt.agent,
+    provider: attempt.model.slice(0, separator),
+    modelId: attempt.model.slice(separator + 1),
     model: attempt.model,
     thinking: attempt.thinking,
     source: attempt.settingsSource,
@@ -500,7 +654,8 @@ export function immutableResumeBinding(attempt: WorkerAttempt): AgentLaunchBindi
 }
 
 export interface PartialWorkerHandoff {
-  version: 1;
+  version: 2;
+  originalObjective: string;
   originalTask: string;
   agent: string;
   model: string;
@@ -510,9 +665,18 @@ export interface PartialWorkerHandoff {
   inspectedResources: string[];
   latestUsefulOutput?: string;
   artifacts: string[];
+  ownedPaths: string[];
+  completedWork: string[];
+  unresolvedWork: string[];
+  currentDiff?: { patchPath: string };
+  validations: Array<{ program: string; args: string[]; status: "not_run" | "passed" | "failed" }>;
+  remainingRisks: string[];
   completedConditions: string[];
   unresolvedConditions: string[];
   stopReason: string;
+  stop: WorkerStopProvenance;
+  continuationOf: string;
+  progressFingerprint: string;
   continuationTask: string;
   continuation: { priorRunId: string; mode: "fresh"; unresolvedOnly: true };
 }
@@ -533,8 +697,25 @@ export function buildPartialWorkerHandoff(input: {
   const unresolvedConditions = declaredConditions.length > 0
     ? declaredConditions
     : [`Complete only the unresolved scope from the original task after '${input.stopReason}'.`];
+  const artifacts = [...new Set([...(attempt.artifactPath ? [attempt.artifactPath] : []), ...(attempt.preservedPatchPath ? [attempt.preservedPatchPath] : []), ...evidence.artifactPaths])];
+  const completedWork = evidence.usefulOutput ? [evidence.usefulOutput] : artifacts.length > 0 ? ["A durable implementation patch was preserved."] : [];
+  const unresolvedWork = [...unresolvedConditions];
+  const stop = attempt.stopProvenance ?? {
+    cause: attempt.budgetStopReason ? "budget" : "unknown",
+    initiator: "lemonpi-runtime",
+    initiatingRunId: attempt.runId,
+    reason: input.stopReason,
+    requestedAt: attempt.terminalCommittedAt ?? Date.now(),
+  } satisfies WorkerStopProvenance;
+  const progressFingerprint = contentHash(JSON.stringify({
+    completedWork,
+    artifacts,
+    ownedPaths: attempt.ownedPaths ?? [],
+    unresolvedWork,
+  }));
   return {
-    version: 1,
+    version: 2,
+    originalObjective: attempt.purpose,
     originalTask: attempt.task,
     agent: attempt.agent,
     model: attempt.model,
@@ -543,13 +724,39 @@ export function buildPartialWorkerHandoff(input: {
     settingsHash: attempt.settingsHash,
     inspectedResources: evidence.inspectedResources,
     ...(evidence.usefulOutput ? { latestUsefulOutput: evidence.usefulOutput } : {}),
-    artifacts: [...new Set([...(attempt.artifactPath ? [attempt.artifactPath] : []), ...evidence.artifactPaths])],
+    artifacts,
+    ownedPaths: [...(attempt.ownedPaths ?? [])],
+    completedWork,
+    unresolvedWork,
+    ...(attempt.preservedPatchPath ? { currentDiff: { patchPath: attempt.preservedPatchPath } } : {}),
+    validations: attempt.primaryValidation
+      ? [{ ...attempt.primaryValidation, status: "not_run" }]
+      : [],
+    remainingRisks: ["Validate and integrate only the preserved owned-path change before continuing unresolved work."],
     completedConditions,
     unresolvedConditions,
     stopReason: input.stopReason,
-    continuationTask: `Continue only the unresolved portion of this task. Do not repeat completed investigation or overwrite preserved artifacts.\n\nOriginal task:\n${attempt.task}\n\nPreserved findings:\n${evidence.usefulOutput ?? "No reliable final output was returned before the limit."}\n\nUnresolved condition:\n${unresolvedConditions[0]}`,
+    stop,
+    continuationOf: attempt.runId,
+    progressFingerprint,
+    continuationTask: `Continue only the unresolved portion of this task. Do not repeat completed investigation or overwrite preserved artifacts.${attempt.preservedPatchPath ? ` LemonPi must restore the preserved patch at ${attempt.preservedPatchPath} from the exact prior base before work resumes.` : ""}\n\nOriginal task:\n${attempt.task}\n\nPreserved findings:\n${evidence.usefulOutput ?? "No reliable final output was returned before the limit."}\n\nUnresolved condition:\n${unresolvedConditions[0]}`,
     continuation: { priorRunId: attempt.runId, mode: "fresh", unresolvedOnly: true },
   };
+}
+
+export function continuationIssue(input: {
+  previous: WorkerAttempt;
+  handoff: PartialWorkerHandoff;
+  maxDepth?: number;
+  priorFingerprints?: string[];
+}): string | undefined {
+  const maxDepth = input.maxDepth ?? 2;
+  if (input.previous.status !== "partial" && input.previous.status !== "budget_exhausted") return "Only partial or budget-exhausted work may continue automatically.";
+  if (input.previous.stopProvenance?.cause === "user") return "Explicitly user-stopped work must not continue automatically.";
+  if ((input.previous.continuationDepth ?? 0) >= maxDepth) return `Automatic continuation limit reached (${maxDepth}).`;
+  if (input.handoff.continuationOf !== input.previous.runId) return "Continuation handoff does not match the exact prior run.";
+  if (input.priorFingerprints?.includes(input.handoff.progressFingerprint)) return "Continuation made no measurable progress; another automatic retry is blocked.";
+  return undefined;
 }
 
 export interface ResumeRequest {
@@ -577,6 +784,7 @@ export function workerContextLimits(environment: Record<string, string | undefin
 }
 
 export interface WorkerStatusMetrics {
+  runId: string;
   tokens: number;
   turns: number;
   toolCalls: number;
@@ -585,69 +793,145 @@ export interface WorkerStatusMetrics {
   activityState?: string;
   terminal: boolean;
   transcriptPaths: string[];
+  observedAt: number;
+  sequence?: number;
 }
 
-export function workerStatusMetrics(value: unknown, now = Date.now()): WorkerStatusMetrics {
-  let tokens = 0;
-  let turns = 0;
-  let toolCalls = 0;
-  let startedAt: number | undefined;
-  let elapsedMs = 0;
-  let activityState: string | undefined;
-  let terminal = false;
-  const transcriptPaths = new Set<string>();
-  const seen = new Set<object>();
-  const visit = (candidate: unknown, depth: number, parentKey = "") => {
-    if (depth > 8 || !candidate || typeof candidate !== "object") return;
-    if (seen.has(candidate as object)) return;
-    seen.add(candidate as object);
-    if (Array.isArray(candidate)) {
-      candidate.slice(0, 256).forEach((entry) => visit(entry, depth + 1, parentKey));
-      return;
-    }
-    for (const [key, entry] of Object.entries(candidate as Record<string, unknown>).slice(0, 256)) {
-      if ((key === "sessionFile" || key === "transcriptPath") && typeof entry === "string" && entry.trim()) {
-        transcriptPaths.add(entry.trim());
-      }
-      if ((key === "totalTokens" || key === "tokens" || (key === "total" && /tokens?|usage/i.test(parentKey)))
-        && typeof entry === "number" && Number.isFinite(entry)) {
-        tokens = Math.max(tokens, Math.floor(entry));
-      }
-      if ((key === "turnCount" || key === "totalTurns" || key === "turns") && typeof entry === "number" && Number.isFinite(entry)) {
-        turns = Math.max(turns, Math.floor(entry));
-      }
-      if ((key === "toolCount" || key === "toolCalls" || key === "totalToolCalls") && typeof entry === "number" && Number.isFinite(entry)) {
-        toolCalls = Math.max(toolCalls, Math.floor(entry));
-      }
-      if (key === "startedAt" && typeof entry === "number" && Number.isFinite(entry)) {
-        startedAt = startedAt === undefined ? entry : Math.min(startedAt, entry);
-      }
-      if ((key === "durationMs" || key === "elapsedMs") && typeof entry === "number" && Number.isFinite(entry)) {
-        elapsedMs = Math.max(elapsedMs, Math.floor(entry));
-      }
-      if ((key === "activityState" || key === "status") && typeof entry === "string") {
-        const normalized = entry.toLowerCase();
-        if (key === "activityState" || !activityState) activityState = normalized;
-        if (/^(?:complete|completed|failed|rejected|stopped|cancelled|canceled)$/.test(normalized)) terminal = true;
-      }
-      visit(entry, depth + 1, key);
-    }
+export function typedTargetStatusFromRunStatus(value: unknown, requestedRunId: string, now = Date.now()): Record<string, unknown> {
+  const status = objectRecord(value);
+  if (!status) throw new Error(`Malformed status artifact for '${requestedRunId}'.`);
+  const runId = typeof status.runId === "string" ? status.runId.trim() : "";
+  if (!runId || runId !== requestedRunId) throw new Error(`Status artifact mismatch: requested '${requestedRunId}', received '${runId || "missing"}'.`);
+  const state = typeof status.state === "string" ? status.state.trim().toLowerCase() : "";
+  if (!state) throw new Error(`Status artifact is missing state for '${requestedRunId}'.`);
+  const totals = objectRecord(status.totalTokens) ?? {};
+  const finite = (candidate: unknown, field: string) => {
+    if (candidate === undefined) return 0;
+    if (typeof candidate !== "number" || !Number.isSafeInteger(candidate) || candidate < 0) throw new Error(`Malformed ${field} in status artifact for '${requestedRunId}'.`);
+    return candidate;
   };
-  visit(value, 0);
-  let text = typeof value === "string" ? value : "";
-  if (!text) {
-    try {
-      text = JSON.stringify(value) ?? "";
-    } catch {
-      text = "";
+  const inputTokens = finite(totals.input ?? status.inputTokens, "inputTokens");
+  const outputTokens = finite(totals.output ?? status.outputTokens, "outputTokens");
+  const totalTokens = finite(totals.total ?? (typeof status.totalTokens === "number" ? status.totalTokens : undefined), "totalTokens");
+  const startedAt = status.startedAt === undefined ? undefined : finite(status.startedAt, "startedAt");
+  const explicitRuntime = finite(status.durationMs ?? status.runtimeMs, "runtimeMs");
+  const runtimeMs = startedAt === undefined ? explicitRuntime : Math.max(explicitRuntime, Math.max(0, now - startedAt));
+  const observedAt = finite(status.lastUpdate ?? status.observedAt ?? now, "observedAt");
+  return {
+    protocolVersion: 2,
+    target: {
+      runId,
+      state,
+      metrics: {
+        inputTokens,
+        outputTokens,
+        totalTokens,
+        turns: finite(status.turnCount, "turns"),
+        toolCalls: finite(status.toolCount, "toolCalls"),
+        runtimeMs,
+        ...(startedAt !== undefined ? { startedAt } : {}),
+      },
+      terminal: !/^(?:queued|pending|running)$/.test(state),
+      observedAt,
+      ...(typeof status.sequence === "number" ? { sequence: finite(status.sequence, "sequence") } : {}),
+      ...(typeof status.sessionFile === "string" ? { sessionFile: status.sessionFile } : {}),
+      ...(typeof status.activityState === "string" ? { activityState: status.activityState } : {}),
+    },
+  };
+}
+
+export function workerStatusMetrics(value: unknown, requestedRunId: string, now = Date.now()): WorkerStatusMetrics {
+  if (!requestedRunId.trim()) throw new Error("Targeted worker status requires an exact requested run ID.");
+  const root = objectRecord(value);
+  if (!root) throw new Error(`Malformed targeted status for '${requestedRunId}': expected an object.`);
+  if (root.protocolVersion !== 2) {
+    throw new Error(`Incompatible targeted status protocol for '${requestedRunId}': ${String(root.protocolVersion)}.`);
+  }
+  if (Array.isArray(root.target) || root.targets !== undefined) {
+    throw new Error(`Ambiguous targeted status for '${requestedRunId}': exactly one target object is required.`);
+  }
+  const versionedTarget = objectRecord(root.target);
+  const target = versionedTarget;
+  if (!target) throw new Error(`Missing targeted status object for '${requestedRunId}'.`);
+  const runId = typeof target.runId === "string"
+    ? target.runId.trim()
+    : typeof target.id === "string"
+      ? target.id.trim()
+      : "";
+  if (!runId) throw new Error(`Targeted status is missing target.runId for requested run '${requestedRunId}'.`);
+  if (runId !== requestedRunId) throw new Error(`Targeted status mismatch: requested '${requestedRunId}', received '${runId}'.`);
+
+  const metrics = versionedTarget ? objectRecord(target.metrics) : target;
+  if (!metrics) throw new Error(`Targeted status metrics are missing for '${requestedRunId}'.`);
+  const finiteCount = (candidate: unknown, field: string, fallback = 0) => {
+    if (candidate === undefined) return fallback;
+    if (typeof candidate !== "number" || !Number.isSafeInteger(candidate) || candidate < 0) {
+      throw new Error(`Malformed ${field} in targeted status for '${requestedRunId}'.`);
     }
+    return candidate;
+  };
+  if (metrics.totalTokens !== undefined && typeof metrics.totalTokens !== "number" && !objectRecord(metrics.totalTokens)) {
+    throw new Error(`Malformed totalTokens in targeted status for '${requestedRunId}'.`);
   }
-  for (const match of text.matchAll(/([\d,.]+)\s*(?:tok|tokens?)\b/gi)) {
-    const parsed = Number(match[1]!.replace(/,/g, ""));
-    if (Number.isFinite(parsed)) tokens = Math.max(tokens, Math.floor(parsed));
+  if (metrics.tokens !== undefined && !objectRecord(metrics.tokens)) {
+    throw new Error(`Malformed tokens in targeted status for '${requestedRunId}'.`);
   }
-  if (startedAt !== undefined) elapsedMs = Math.max(elapsedMs, Math.max(0, now - startedAt));
-  return { tokens, turns, toolCalls, ...(startedAt !== undefined ? { startedAt } : {}), elapsedMs, ...(activityState ? { activityState } : {}), terminal, transcriptPaths: [...transcriptPaths] };
+  const tokenRecord = objectRecord(metrics.totalTokens) ?? objectRecord(metrics.tokens);
+  const tokens = finiteCount(
+    typeof metrics.totalTokens === "number"
+      ? metrics.totalTokens
+      : tokenRecord?.total,
+    "totalTokens",
+  );
+  const turns = finiteCount(metrics.turns ?? metrics.turnCount ?? metrics.totalTurns, "turns");
+  const toolCalls = finiteCount(metrics.toolCalls ?? metrics.toolCount ?? metrics.totalToolCalls, "toolCalls");
+  const startedAt = metrics.startedAt === undefined ? undefined : finiteCount(metrics.startedAt, "startedAt");
+  const explicitElapsed = finiteCount(metrics.runtimeMs ?? metrics.durationMs ?? metrics.elapsedMs, "runtimeMs");
+  const elapsedMs = startedAt === undefined ? explicitElapsed : Math.max(explicitElapsed, Math.max(0, now - startedAt));
+  const rawState = typeof target.state === "string"
+    ? target.state
+    : typeof target.status === "string"
+      ? target.status
+      : typeof metrics.activityState === "string"
+        ? metrics.activityState
+        : "";
+  if (!rawState.trim()) throw new Error(`Targeted status is missing state for '${requestedRunId}'.`);
+  const state = rawState.trim().toLowerCase();
+  const activityState = typeof target.activityState === "string"
+    ? target.activityState.trim().toLowerCase()
+    : typeof metrics.activityState === "string"
+      ? metrics.activityState.trim().toLowerCase()
+      : state;
+  const terminal = typeof target.terminal === "boolean"
+    ? target.terminal
+    : /^(?:complete|completed|failed|rejected|stopped|cancelled|canceled|partial|budget_exhausted)$/.test(state);
+  const transcriptPaths = [target.sessionFile, target.transcriptPath, metrics.sessionFile, metrics.transcriptPath]
+    .filter((path): path is string => typeof path === "string" && Boolean(path.trim()))
+    .map((path) => path.trim());
+  const observedAt = finiteCount(target.observedAt ?? target.lastUpdate, "observedAt", now);
+  const sequence = target.sequence === undefined ? undefined : finiteCount(target.sequence, "sequence");
+  return {
+    runId,
+    tokens,
+    turns,
+    toolCalls,
+    ...(startedAt !== undefined ? { startedAt } : {}),
+    elapsedMs,
+    activityState,
+    terminal,
+    transcriptPaths: [...new Set(transcriptPaths)],
+    observedAt,
+    ...(sequence !== undefined ? { sequence } : {}),
+  };
+}
+
+export function telemetryUpdateIssue(
+  previous: Pick<WorkerAttempt, "telemetryObservedAt" | "telemetrySequence">,
+  next: Pick<WorkerStatusMetrics, "observedAt" | "sequence">,
+): string | undefined {
+  if (next.sequence !== undefined && previous.telemetrySequence !== undefined && next.sequence < previous.telemetrySequence) return "stale telemetry sequence";
+  if (next.sequence === undefined && previous.telemetryObservedAt !== undefined && next.observedAt < previous.telemetryObservedAt) return "stale telemetry observation";
+  return undefined;
 }
 
 export function resumeWorkerIssue(input: ResumeRequest): string | undefined {
@@ -715,6 +999,10 @@ export interface ValidationRecord {
   repository: string;
   baseRevision: string;
   diffHash: string;
+  executable: string;
+  args: string[];
+  cwd: string;
+  environmentHash: string;
   command: string;
   relevantPaths: string[];
   dependencyState: string;
@@ -724,8 +1012,8 @@ export interface ValidationRecord {
 }
 
 export function validationLedgerKey(value: Omit<ValidationRecord, "passed" | "elapsedMs">): string {
-  const { repository, baseRevision, diffHash, command, relevantPaths, dependencyState } = value as ValidationRecord;
-  return contentHash(JSON.stringify({ repository, baseRevision, diffHash, command, relevantPaths: [...relevantPaths].sort(), dependencyState }));
+  const { repository, baseRevision, diffHash, executable, args, cwd, environmentHash, relevantPaths, dependencyState, scope } = value as ValidationRecord;
+  return contentHash(JSON.stringify({ repository, baseRevision, diffHash, executable, args, cwd, environmentHash, relevantPaths: [...relevantPaths].sort(), dependencyState, scope }));
 }
 
 export function validationDeduplicationIssue(records: ValidationRecord[], candidate: Omit<ValidationRecord, "passed" | "elapsedMs">): string | undefined {
@@ -733,6 +1021,10 @@ export function validationDeduplicationIssue(records: ValidationRecord[], candid
   return records.some((record) => record.passed && validationLedgerKey(record) === key)
     ? "Identical validation already passed for the same revision, inputs, paths, and dependency state."
     : undefined;
+}
+
+export function validationLaunchFailure(code: number, stderr: string): boolean {
+  return code < 0 || /(?:\bENOENT\b|not recognized as an internal or external command|cannot find (?:the )?(?:file|executable)|failed to (?:launch|spawn)|no such file or directory)/i.test(stderr);
 }
 
 export function validationActivityLabel(command: string, startedAt: number, now: number): string {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   buildPartialWorkerHandoff,
+  FINALIZATION_BLOCKED_TOOLS,
   immutableResumeBinding,
   launchOverridePath,
   preferredTerminalStatus,
@@ -81,7 +82,7 @@ test("7 resume preserves immutable original binding", () => {
     settingsSource: "user-agent-override", settingsHash: "abc123",
   };
   assert.deepEqual(immutableResumeBinding(original), {
-    agent: "explorer", model: "openai-codex/gpt-5.6-luna", thinking: "xhigh",
+    agent: "explorer", provider: "openai-codex", modelId: "gpt-5.6-luna", model: "openai-codex/gpt-5.6-luna", thinking: "xhigh",
     source: "user-agent-override", settingsHash: "abc123",
   });
 });
@@ -97,7 +98,7 @@ test("9 binding metadata is persisted before spawn", () => {
   const persistIndex = narration.indexOf("persistPendingLaunch({", narration.indexOf("const launched = await Promise.all"));
   const spawnIndex = narration.indexOf("await requestSubagentSpawn(pi, spawn)", persistIndex);
   assert.ok(persistIndex > 0 && spawnIndex > persistIndex);
-  for (const field of ["model", "thinking", "settingsSource", "settingsHash"]) assert.match(narration, new RegExp(`${field}: candidate\\.binding`));
+  for (const field of ["provider", "modelId", "model", "thinking", "settingsSource", "settingsHash"]) assert.match(narration, new RegExp(`${field}: candidate\\.binding`));
 });
 
 test("10 warning threshold activates deterministic instructions", () => {
@@ -109,7 +110,7 @@ test("10 warning threshold activates deterministic instructions", () => {
 test("11 work limit blocks tools but reserves final response turns", () => {
   const budget = workerExecutionBudget("explorer", "read-only", {});
   assert.deepEqual(budget.spawn.turnBudget, { maxTurns: 10, graceTurns: 2 });
-  assert.deepEqual(budget.spawn.toolBudget, { soft: 25, hard: 30, block: "*" });
+  assert.deepEqual(budget.spawn.toolBudget, { soft: 25, hard: 30, block: FINALIZATION_BLOCKED_TOOLS });
   assert.equal(workerBudgetPhase({ tokens: 0, turns: 10, toolCalls: 0, elapsedMs: 0 }, budget).phase, "finalizing");
 });
 
@@ -163,7 +164,7 @@ test("17 genuine crash with no useful output remains failed", () => {
 
 test("18 mission terminal status UI and artifacts use one authoritative attempt", () => {
   assert.match(rust, /lemonPiState/);
-  for (const field of ["model", "thinking", "settingsSource", "settingsHash", "budgetPhase", "budgetStopReason", "partialHandoffPath"]) assert.match(rust, new RegExp(`"${field}"`));
+  for (const field of ["provider", "modelId", "model", "thinking", "settingsSource", "settingsHash", "budgetPhase", "budgetStopReason", "partialHandoffPath", "stopProvenance"]) assert.match(rust, new RegExp(`"${field}"`));
   assert.match(narration, /terminalAttempt\?\.status/);
   assert.match(narration, /continuation handoff/);
 });

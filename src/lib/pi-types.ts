@@ -211,6 +211,15 @@ export interface SubagentRunStatus {
   budgetPhase?: "work" | "warning" | "finalizing";
   budgetStopReason?: string;
   partialHandoffPath?: string;
+  stopProvenance?: {
+    cause: "user" | "budget" | "runtime_shutdown" | "superseded" | "main_agent" | "operator" | "dependency_failure" | "unknown";
+    initiator: string;
+    initiatingRunId?: string;
+    reason: string;
+    requestedAt: number;
+  };
+  provider?: string;
+  modelId?: string;
 }
 
 export type SubagentActivityKind = "reasoning" | "message" | "tool" | "result" | "error";

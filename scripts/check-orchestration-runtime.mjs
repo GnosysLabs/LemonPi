@@ -5,13 +5,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CURRENT_ORCHESTRATION_POLICY_VERSION,
+  FINALIZATION_BLOCKED_TOOLS,
   checkpointBlocker,
   checkpointBlockersForSelection,
   classifyDirtyTree,
   classifyFailure,
   contentHash,
+  buildPartialWorkerHandoff,
+  continuationIssue,
   fastPathIssue,
   hiddenScopeExpansionIssue,
+  finalizationToolIssue,
+  finalizationInstructionNeeded,
+  implementationLaneIssue,
+  immutableResumeBinding,
   internalContractFallback,
   invalidatesValidation,
   likelyFastPathRequest,
@@ -20,18 +27,25 @@ import {
   missionProgress,
   recoveryAction,
   recommendedReasoning,
+  resolveAgentLaunchBinding,
   reducedIncidentReplay,
   resumeWorkerIssue,
   reviewDeduplicationIssue,
   scheduleOwnedLanes,
   supersedeHistoricalPolicy,
+  telemetryUpdateIssue,
+  terminalOutcome,
   trustedWorkerPatchPath,
   uniqueArtifactPath,
   validationActivityLabel,
   validationDeduplicationIssue,
+  validationLaunchFailure,
+  validateSubagentRpcHandshake,
   workerContextLimits,
+  workerBudgetPhase,
   workerExecutionBudget,
   workerStatusMetrics,
+  typedTargetStatusFromRunStatus,
 } from "../src-tauri/resources/lemonpi-narration/extensions/orchestration-runtime.ts";
 import {
   default as lemonPiNarration,
@@ -65,7 +79,7 @@ const migrated = parsedMissionState({
   updatedAt: Date.now(),
   suppressedRunIds: ["manual-stop-run"],
 });
-assert.equal(migrated?.version, 3);
+assert.equal(migrated?.version, 4);
 assert.equal(migrated?.policyVersion, CURRENT_ORCHESTRATION_POLICY_VERSION);
 assert.equal(migrated?.migratedFromPolicyVersion, 0);
 assert.deepEqual(migrated?.suppressedRunIds, ["manual-stop-run"]);
@@ -95,6 +109,20 @@ const compactedLegacyMission = parsedMissionState({
 assert.equal(compactedLegacyMission?.outcomes.length, 3);
 assert.equal(compactedLegacyMission?.remainingTask, undefined);
 assert.equal(compactedLegacyMission?.outcomes.some((outcome) => outcome.subject.includes("Validate Apple")), false);
+const terminalPartialMission = parsedMissionState({
+  version: 4,
+  policyVersion: CURRENT_ORCHESTRATION_POLICY_VERSION,
+  id: "terminal-partial",
+  phase: "integration",
+  request: "Implement bounded UI",
+  activeRunIds: [],
+  writerActive: false,
+  wakeAttempts: 0,
+  updatedAt: Date.now(),
+  attempts: [{ runId: "partial-run", purpose: "Implement bounded UI", status: "partial", executionMode: "implementation", completedOrdinal: 1, sliceCount: 1, transcriptBytes: 1, tokens: 1 }],
+});
+assert.equal(terminalPartialMission?.attempts[0].status, "partial");
+assert.equal(terminalPartialMission?.outcomes[0].status, "pending");
 const staleSummary = "Product decision: keep opaque IDs. Workflow rule: use one writer at a time.";
 const superseded = supersedeHistoricalPolicy(staleSummary);
 assert.match(superseded, /Product decision: keep opaque IDs/);
@@ -218,15 +246,28 @@ assert.deepEqual(workerContextLimits({ LEMONPI_WORKER_MAX_TRANSCRIPT_BYTES: "500
   maxTokens: 30_000,
   maxSlices: 1,
 });
-assert.deepEqual(workerStatusMetrics({ details: { tokens: { total: 42_000 }, sessionFile: "/tmp/child.jsonl" } }), {
+const typedLegacyStatus = typedTargetStatusFromRunStatus({
+  runId: "run-1",
+  state: "running",
+  totalTokens: { input: 40_000, output: 2_000, total: 42_000 },
+  turnCount: 3,
+  toolCount: 7,
+  sessionFile: "/tmp/child.jsonl",
+  lastUpdate: 49_000,
+}, "run-1", 50_000);
+assert.deepEqual(workerStatusMetrics(typedLegacyStatus, "run-1", 50_000), {
+  runId: "run-1",
   tokens: 42_000,
-  turns: 0,
-  toolCalls: 0,
+  turns: 3,
+  toolCalls: 7,
   elapsedMs: 0,
+  activityState: "running",
   terminal: false,
   transcriptPaths: ["/tmp/child.jsonl"],
+  observedAt: 49_000,
 });
-assert.deepEqual(workerStatusMetrics({ totalTokens: 275_603, turnCount: 19, toolCount: 75, startedAt: 1_000, durationMs: 45_000, activityState: "running" }, 51_000), {
+assert.deepEqual(workerStatusMetrics(typedTargetStatusFromRunStatus({ runId: "run-2", state: "running", totalTokens: 275_603, turnCount: 19, toolCount: 75, startedAt: 1_000, durationMs: 45_000, activityState: "running", lastUpdate: 50_000 }, "run-2", 51_000), "run-2", 51_000), {
+  runId: "run-2",
   tokens: 275_603,
   turns: 19,
   toolCalls: 75,
@@ -235,7 +276,51 @@ assert.deepEqual(workerStatusMetrics({ totalTokens: 275_603, turnCount: 19, tool
   activityState: "running",
   terminal: false,
   transcriptPaths: [],
+  observedAt: 50_000,
 });
+/* Target metrics are the only budget input; fleet order and fleet maxima are irrelevant. */
+const fleet = [
+  { runId: "run-a", metrics: { totalTokens: 128_168, turns: 17, toolCalls: 61 } },
+  { runId: "run-b", metrics: { totalTokens: 39_319, turns: 4, toolCalls: 12 } },
+  { runId: "run-c", metrics: { totalTokens: 85_663, turns: 9, toolCalls: 31 } },
+  { runId: "run-d", metrics: { totalTokens: 61_547, turns: 7, toolCalls: 22 } },
+];
+function permutations(values) {
+  if (values.length < 2) return [values];
+  return values.flatMap((value, index) => permutations(values.filter((_, candidate) => candidate !== index)).map((rest) => [value, ...rest]));
+}
+const contaminatedFleetStatus = {
+  protocolVersion: 2,
+  target: {
+    runId: "run-b",
+    state: "running",
+    metrics: { inputTokens: 30_000, outputTokens: 9_319, totalTokens: 39_319, turns: 4, toolCalls: 12, runtimeMs: 41_000 },
+    terminal: false,
+    observedAt: 49_000,
+  },
+  fleet,
+};
+for (const orderedFleet of permutations(fleet)) {
+  assert.deepEqual(workerStatusMetrics({ ...contaminatedFleetStatus, fleet: orderedFleet }, "run-b", 50_000), {
+    runId: "run-b",
+    tokens: 39_319,
+    turns: 4,
+    toolCalls: 12,
+    elapsedMs: 41_000,
+    activityState: "running",
+    terminal: false,
+    transcriptPaths: [],
+    observedAt: 49_000,
+  });
+}
+assert.throws(() => workerStatusMetrics({ protocolVersion: 2, fleet }, "run-b"), /missing target|missing target\.runId/i);
+assert.throws(() => workerStatusMetrics({ protocolVersion: 2, target: [{ runId: "run-b" }, { runId: "run-b" }] }, "run-b"), /ambiguous/i);
+assert.throws(() => workerStatusMetrics({ ...contaminatedFleetStatus, targets: [contaminatedFleetStatus.target] }, "run-b"), /ambiguous/i);
+assert.throws(() => workerStatusMetrics({ protocolVersion: 2, target: { runId: "run-b", state: "running", metrics: { totalTokens: "39319" } } }, "run-b"), /malformed totalTokens/i);
+assert.throws(() => workerStatusMetrics({ ...contaminatedFleetStatus, target: { ...contaminatedFleetStatus.target, runId: "run-a" } }, "run-b"), /mismatch/i);
+assert.equal(telemetryUpdateIssue({ telemetryObservedAt: 50_000 }, { observedAt: 49_000 }), "stale telemetry observation");
+assert.equal(telemetryUpdateIssue({ telemetrySequence: 10 }, { observedAt: 51_000, sequence: 9 }), "stale telemetry sequence");
+assert.equal(telemetryUpdateIssue({ telemetrySequence: 10 }, { observedAt: 51_000, sequence: 10 }), undefined);
 assert.deepEqual(workerExecutionBudget("scout", "read-only", {}), {
   warning: { tokens: 48_000, turns: 8, toolCalls: 25, runtimeMs: 480_000 },
   work: { tokens: 60_000, turns: 10, toolCalls: 30, runtimeMs: 600_000 },
@@ -244,10 +329,124 @@ assert.deepEqual(workerExecutionBudget("scout", "read-only", {}), {
   spawn: {
     timeoutMs: 720_000,
     turnBudget: { maxTurns: 10, graceTurns: 2 },
-    toolBudget: { soft: 25, hard: 30, block: "*" },
+    toolBudget: { soft: 25, hard: 30, block: FINALIZATION_BLOCKED_TOOLS },
     usageBudget: { tokens: { soft: 48_000, hard: 66_000 } },
   },
 });
+
+const implementationBudget = workerExecutionBudget("worker", "implementation", {});
+const workerTotals = new Map([["run-a", 128_168], ["run-b", 39_319], ["run-c", 85_663], ["run-d", 61_547]]);
+const stoppedByBudget = [];
+for (const [runId, tokens] of workerTotals) {
+  const phase = workerBudgetPhase({ tokens, turns: 1, toolCalls: 1, elapsedMs: 1_000 }, implementationBudget);
+  if (phase.hardStopReason) stoppedByBudget.push(runId);
+}
+assert.deepEqual(stoppedByBudget, ["run-a"]);
+const finalizingAtBoundary = workerBudgetPhase({ tokens: implementationBudget.work.tokens, turns: 1, toolCalls: 1, elapsedMs: 1_000 }, implementationBudget);
+assert.equal(finalizingAtBoundary.phase, "finalizing");
+assert.equal(finalizingAtBoundary.hardStopReason, undefined);
+const finalizationAttempt = { finalizationInstructionSent: false };
+assert.equal(finalizationInstructionNeeded(finalizationAttempt, "finalizing"), true);
+finalizationAttempt.finalizationInstructionSent = true;
+assert.equal(finalizationInstructionNeeded(finalizationAttempt, "finalizing"), false);
+assert.equal(finalizationToolIssue({ toolName: "read", toolInput: { path: "/repo/src/ui.tsx" }, root: "/repo", ownedPaths: ["src/ui.tsx"] }), undefined);
+assert.equal(finalizationToolIssue({ toolName: "bash", toolInput: { command: "git diff -- src/ui.tsx" }, ownedPaths: ["src/ui.tsx"] }), undefined);
+assert.equal(finalizationToolIssue({ toolName: "bash", toolInput: { command: "pnpm test -- ui" }, ownedPaths: ["src/ui.tsx"], primaryValidation: { program: "pnpm", args: ["test", "--", "ui"] } }), undefined);
+assert.match(finalizationToolIssue({ toolName: "edit", toolInput: { path: "src/ui.tsx" }, ownedPaths: ["src/ui.tsx"] }), /blocks new exploration/i);
+assert.match(finalizationToolIssue({ toolName: "read", toolInput: { path: "/repo/src/backend.ts" }, root: "/repo", ownedPaths: ["src/ui.tsx"] }), /only inside/i);
+assert.match(implementationLaneIssue({ ownedPaths: Array.from({ length: 9 }, (_, index) => `src/file-${index}.ts`), primaryValidation: { program: "pnpm", args: ["check"] }, checkpoint: "Runtime slice" }), /split/i);
+assert.match(implementationLaneIssue({ ownedPaths: ["src-tauri/src/lib.rs", "src/App.tsx", "scripts/check.mjs"], primaryValidation: { program: "pnpm", args: ["check"] }, checkpoint: "Everything" }), /ownership boundaries/i);
+assert.equal(implementationLaneIssue({ ownedPaths: ["src/ui/Inbox.tsx"], primaryValidation: { program: "pnpm", args: ["test", "Inbox"] }, checkpoint: "Unread indicator renders" }), undefined);
+
+const bindingResolution = resolveAgentLaunchBinding({
+  agent: "worker",
+  userSettings: { subagents: { agentOverrides: { worker: { model: "openai/gpt-5.6", thinking: "high" } } } },
+  availableModels: ["openai/gpt-5.6"],
+});
+assert.ok(bindingResolution.binding);
+const boundAttempt = {
+  runId: "budget-run",
+  agent: "worker",
+  task: "Implement the bounded UI slice.\nDone when: unread dot renders.",
+  purpose: "Render unread dot",
+  status: "budget_exhausted",
+  executionMode: "implementation",
+  model: bindingResolution.binding.model,
+  provider: bindingResolution.binding.provider,
+  modelId: bindingResolution.binding.modelId,
+  thinking: bindingResolution.binding.thinking,
+  settingsSource: bindingResolution.binding.source,
+  settingsHash: bindingResolution.binding.settingsHash,
+  completedOrdinal: 1,
+  sliceCount: 1,
+  transcriptBytes: 10,
+  tokens: 128_168,
+  ownedPaths: ["src/ui/Inbox.tsx"],
+  preservedPatchPath: "/tmp/budget-run.patch",
+  primaryValidation: { program: "pnpm", args: ["test", "Inbox"] },
+  checkpoint: "Unread indicator renders",
+  stopProvenance: { cause: "budget", initiator: "lemonpi-budget-controller", reason: "token budget exhausted", requestedAt: 5_000 },
+};
+const partialHandoff = buildPartialWorkerHandoff({ attempt: boundAttempt, evidence: { output: "Unread component implemented; integration remains." }, stopReason: "token budget exhausted" });
+assert.ok(partialHandoff);
+assert.equal(partialHandoff.stop.cause, "budget");
+assert.equal(partialHandoff.currentDiff.patchPath, "/tmp/budget-run.patch");
+assert.equal(partialHandoff.continuationOf, "budget-run");
+assert.doesNotMatch(partialHandoff.continuationTask, /repeat discovery/i);
+assert.match(partialHandoff.continuationTask, /restore the preserved patch at \/tmp\/budget-run\.patch from the exact prior base/i);
+assert.equal(continuationIssue({ previous: boundAttempt, handoff: partialHandoff, priorFingerprints: [] }), undefined);
+assert.match(continuationIssue({ previous: { ...boundAttempt, continuationDepth: 2 }, handoff: partialHandoff, priorFingerprints: [] }), /limit reached/i);
+assert.match(continuationIssue({ previous: boundAttempt, handoff: partialHandoff, priorFingerprints: [partialHandoff.progressFingerprint] }), /no measurable progress/i);
+assert.deepEqual(immutableResumeBinding(boundAttempt), bindingResolution.binding);
+
+const continuationRepo = join(root, "continuation-repo");
+mkdirSync(join(continuationRepo, "src"), { recursive: true });
+git(root, "init", continuationRepo);
+git(continuationRepo, "config", "user.email", "lemonpi-tests@example.invalid");
+git(continuationRepo, "config", "user.name", "LemonPi Tests");
+writeFileSync(join(continuationRepo, "src", "Inbox.tsx"), "export const unread = false;\n");
+commitAll(continuationRepo, "base continuation fixture");
+const continuationBase = git(continuationRepo, "rev-parse", "HEAD");
+const interruptedWorktree = join(root, "interrupted-worker");
+git(continuationRepo, "worktree", "add", "--detach", interruptedWorktree, continuationBase);
+writeFileSync(join(interruptedWorktree, "src", "Inbox.tsx"), "export const unread = true; // preserved partial slice\n");
+const preservedPatch = join(root, "budget-run.patch");
+writeFileSync(preservedPatch, gitRaw(interruptedWorktree, "diff", "--binary", continuationBase, "--", "src/Inbox.tsx"));
+git(continuationRepo, "worktree", "remove", "--force", interruptedWorktree);
+const resumedWorktree = join(root, "resumed-worker");
+git(continuationRepo, "worktree", "add", "--detach", resumedWorktree, continuationBase);
+git(resumedWorktree, "apply", "--3way", preservedPatch);
+assert.match(readFileSync(join(resumedWorktree, "src", "Inbox.tsx"), "utf8"), /preserved partial slice/);
+assert.equal(git(resumedWorktree, "diff", "--name-only", continuationBase), "src/Inbox.tsx");
+assert.equal(terminalOutcome({ reportedStatus: "stopped", budgetStopReason: "token budget exhausted", stopCause: "budget" }).status, "budget_exhausted");
+assert.equal(terminalOutcome({ reportedStatus: "stopped", stopCause: "user" }).status, "stopped");
+assert.equal(terminalOutcome({ reportedStatus: "stopped", stopCause: "user", evidence: { output: "Completed before stop", exitCode: 0 } }).status, "completed");
+assert.equal(terminalOutcome({ reportedStatus: "stopped", budgetStopReason: "token budget exhausted", stopCause: "budget", evidence: { output: "Completed bounded slice", exitCode: 0 } }).status, "completed");
+
+const simulatedFourWorkerMission = [...workerTotals].map(([runId, tokens]) => {
+  const budgetState = workerBudgetPhase({ tokens, turns: 1, toolCalls: 1, elapsedMs: 1_000 }, implementationBudget);
+  if (!budgetState.hardStopReason) return { runId, state: "running", tokens, stop: undefined };
+  const attempt = { ...boundAttempt, runId, tokens, stopProvenance: { ...boundAttempt.stopProvenance, reason: budgetState.hardStopReason } };
+  const handoff = buildPartialWorkerHandoff({ attempt, evidence: { patchPath: attempt.preservedPatchPath, output: "Bounded partial implementation preserved." }, stopReason: budgetState.hardStopReason });
+  return { runId, state: "budget_exhausted", tokens, stop: attempt.stopProvenance, handoff, continuationAllowed: continuationIssue({ previous: attempt, handoff, priorFingerprints: [] }) === undefined };
+});
+assert.deepEqual(simulatedFourWorkerMission.map(({ runId, state }) => [runId, state]), [
+  ["run-a", "budget_exhausted"],
+  ["run-b", "running"],
+  ["run-c", "running"],
+  ["run-d", "running"],
+]);
+assert.equal(simulatedFourWorkerMission[0].stop.cause, "budget");
+assert.equal(simulatedFourWorkerMission[0].continuationAllowed, true);
+assert.equal(JSON.stringify(simulatedFourWorkerMission).includes("stopped by user"), false);
+
+assert.doesNotThrow(() => validateSubagentRpcHandshake({
+  version: 1,
+  methods: ["ping", "status", "spawn", "steer", "stop"],
+  capabilities: { processTerminalProof: { lifecycleArtifactVersion: 3 } },
+}));
+assert.throws(() => validateSubagentRpcHandshake({ version: 2, methods: [], capabilities: {} }), /expected 1/i);
+assert.throws(() => validateSubagentRpcHandshake({ version: 1, methods: ["ping"], capabilities: { processTerminalProof: { lifecycleArtifactVersion: 3 } } }), /missing 'status'/i);
 assert.equal(
   missionStateContentHash({ id: "mission", updatedAt: 1, attempts: [] }),
   missionStateContentHash({ attempts: [], updatedAt: 999, id: "mission" }),
@@ -279,11 +478,14 @@ assert.match(reviewDeduplicationIssue([{ ...review, accepted: true }], review), 
 assert.match(reviewDeduplicationIssue([{ ...review, accepted: true }], { ...review, riskBoundary: "rewritten security rationale" }), /already has an accepted review/);
 assert.equal(reviewDeduplicationIssue([{ ...review, accepted: true }], { ...review, diffHash: "diff-2" }), undefined);
 
-const validation = { repository: repo, baseRevision: review.revision, diffHash: "diff-1", command: "pnpm test", relevantPaths: ["src/auth"], dependencyState: "deps-1", scope: "wave" };
+const validation = { repository: repo, baseRevision: review.revision, diffHash: "diff-1", executable: "/usr/local/bin/pnpm", args: ["test"], cwd: repo, environmentHash: "env-1", command: "pnpm test", relevantPaths: ["src/auth"], dependencyState: "deps-1", scope: "wave" };
 const validationRecord = { ...validation, passed: true, elapsedMs: 2_000 };
 assert.match(validationDeduplicationIssue([validationRecord], validation), /already passed/);
-assert.match(validationDeduplicationIssue([validationRecord], { ...validation, scope: "final" }), /already passed/);
+assert.equal(validationDeduplicationIssue([validationRecord], { ...validation, scope: "final" }), undefined);
 assert.equal(validationDeduplicationIssue([validationRecord], { ...validation, diffHash: "diff-2" }), undefined);
+assert.equal(validationDeduplicationIssue([validationRecord], { ...validation, executable: "C:/tools/pnpm.cmd" }), undefined);
+assert.equal(validationLaunchFailure(-1, "spawn pnpm ENOENT"), true);
+assert.equal(validationLaunchFailure(1, "Tests failed: assertion mismatch"), false);
 assert.equal(invalidatesValidation(validationRecord, ["src/ui/button.tsx"], "deps-1"), false);
 assert.equal(invalidatesValidation(validationRecord, ["src/auth/token.ts"], "deps-1"), true);
 assert.equal(invalidatesValidation(validationRecord, [], "deps-2"), true);
@@ -323,17 +525,23 @@ writeFileSync(join(sourceOne, "src", "badge.ts"), "export const badge = true;\n"
 commitAll(sourceOne, "implement complete visible slice");
 writeFileSync(join(sourceOne, "src", "indicator.ts"), "export const indicator = 'corrected';\n");
 commitAll(sourceOne, "correct visible slice");
+writeFileSync(join(transactionRepo, "local-notes.txt"), "unrelated baseline change\n");
 
 const registeredTools = new Map();
 const extensionHandlers = new Map();
 const sentMessages = [];
+const appendedEntries = [];
+let simulatePnpmLaunchFailure = false;
+let simulatePnpmCmdSuccess = false;
 const fakePi = {
   registerTool(tool) { registeredTools.set(tool.name, tool); },
   on(event, handler) { extensionHandlers.set(event, handler); },
-  appendEntry() {},
+  appendEntry(customType, data) { appendedEntries.push({ customType, data: structuredClone(data) }); },
   sendMessage(message, options) { sentMessages.push({ message, options }); },
   events: { on() { return () => {}; }, emit() {} },
   async exec(program, args, options = {}) {
+    if (program === "pnpm" && simulatePnpmLaunchFailure) return { code: -1, stdout: "", stderr: "spawn pnpm ENOENT" };
+    if (program === "pnpm.cmd" && simulatePnpmCmdSuccess) return { code: 0, stdout: "corrected validation launched", stderr: "" };
     const result = spawnSync(program, args, {
       cwd: options.cwd,
       encoding: "utf8",
@@ -360,6 +568,9 @@ const integrationResult = await gitTool.execute("transaction-success", {
 assert.equal(integrationResult.isError, undefined);
 assert.match(readFileSync(join(transactionRepo, "src", "indicator.ts"), "utf8"), /corrected/);
 assert.match(readFileSync(join(transactionRepo, "src", "badge.ts"), "utf8"), /true/);
+assert.equal(git(transactionRepo, "status", "--porcelain=v1"), "?? local-notes.txt");
+assert.match(readFileSync(join(transactionRepo, "local-notes.txt"), "utf8"), /unrelated baseline/);
+rmSync(join(transactionRepo, "local-notes.txt"));
 assert.equal(git(transactionRepo, "status", "--porcelain=v1"), "");
 
 const sourceTwo = join(root, "transaction-source-two");
@@ -422,6 +633,7 @@ git(canaryRepo, "config", "user.email", "lemonpi-tests@example.invalid");
 git(canaryRepo, "config", "user.name", "LemonPi Tests");
 writeFileSync(join(canaryRepo, "src", "Inbox.tsx"), "export const Inbox = () => null;\n");
 commitAll(canaryRepo, "base fast-path canary");
+writeFileSync(join(canaryRepo, "user-notes.txt"), "pre-existing unrelated user work\n");
 await extensionHandlers.get("message_start")?.({ message: { role: "user", content: "Add an unread notification dot" } });
 await extensionHandlers.get("before_agent_start")?.({ prompt: "Add an unread notification dot", systemPrompt: "base" });
 const dispatchTool = registeredTools.get("lemonpi_dispatch");
@@ -443,14 +655,28 @@ assert.equal(dispatchedCanary.details?.mode, "fast-path");
 const mutationGuard = await extensionHandlers.get("tool_call")?.({ toolName: "edit", toolCallId: "canary-edit", input: { path: "src/Inbox.tsx" } }, { ui: { notify() {} } });
 assert.equal(mutationGuard, undefined);
 writeFileSync(join(canaryRepo, "src", "Inbox.tsx"), "export const Inbox = () => <i data-unread />;\n");
-const canaryValidation = await validationTool.execute("canary-validation", {
+simulatePnpmLaunchFailure = true;
+const failedPnpmValidation = await validationTool.execute("canary-validation-pnpm", {
   cwd: canaryRepo,
-  program: "node",
-  args: ["-e", "process.exit(0)"],
+  program: "pnpm",
+  args: ["check"],
+  relevantPaths: ["src/Inbox.tsx"],
+  scope: "focused",
+}, undefined, undefined, canaryContext);
+assert.equal(failedPnpmValidation.isError, true);
+assert.equal(failedPnpmValidation.details?.infrastructureFailure, true);
+simulatePnpmLaunchFailure = false;
+simulatePnpmCmdSuccess = true;
+const canaryValidation = await validationTool.execute("canary-validation-pnpm-cmd", {
+  cwd: canaryRepo,
+  program: "pnpm.cmd",
+  args: ["check"],
   relevantPaths: ["src/Inbox.tsx"],
   scope: "focused",
 }, undefined, undefined, canaryContext);
 assert.equal(canaryValidation.isError, undefined);
+assert.notEqual(failedPnpmValidation.details?.candidate.executable, canaryValidation.details?.candidate.executable);
+simulatePnpmCmdSuccess = false;
 const finishedCanary = await fastPathTool.execute("canary-finish", {
   action: "finish",
   cwd: canaryRepo,
@@ -460,6 +686,9 @@ const finishedCanary = await fastPathTool.execute("canary-finish", {
 assert.equal(finishedCanary.isError, undefined);
 assert.equal(finishedCanary.details?.validationCount, 1);
 await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
+const fastPathMission = [...appendedEntries].reverse().find((entry) => entry.customType === "lemonpi-mission-state")?.data;
+assert.equal(fastPathMission?.pathProvenance?.some((item) => item.path === "src/Inbox.tsx" && item.source === "fast-path"), true);
+assert.equal(fastPathMission?.pathProvenance?.some((item) => item.path === "user-notes.txt" && item.source === "baseline"), true);
 assert.equal(sentMessages.some((entry) => entry.message?.customType === "lemonpi-mission-outcomes"), false);
 const repeatedFastPath = await fastPathTool.execute("canary-repeat", {
   action: "start",
@@ -490,6 +719,9 @@ const committedCanary = await gitTool.execute("canary-finalize", {
   message: "feat: add unread indicator",
 }, undefined, undefined, canaryContext);
 assert.equal(committedCanary.isError, undefined);
+assert.equal(git(canaryRepo, "status", "--porcelain=v1"), "?? user-notes.txt");
+assert.match(readFileSync(join(canaryRepo, "user-notes.txt"), "utf8"), /pre-existing unrelated/);
+rmSync(join(canaryRepo, "user-notes.txt"));
 assert.equal(git(canaryRepo, "status", "--porcelain=v1"), "");
 await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
 assert.equal(sentMessages.some((entry) => entry.message?.customType === "lemonpi-mission-outcomes"), false);
@@ -519,13 +751,20 @@ assert.ok(currentMetrics.integrationCommits > 0);
 writeFileSync(join(repo, "logical.txt"), `${contentHash(JSON.stringify(currentMetrics))}\n`);
 commitAll(repo, "feat: logical final integration");
 assert.equal(git(repo, "status", "--porcelain=v1"), "");
-assert.doesNotMatch(readFileSync(new URL("../src-tauri/resources/lemonpi-narration/extensions/narration.ts", import.meta.url), "utf8"), /git\s+reset\s+--hard|git\s+clean\s+-|force-push/);
-assert.match(readFileSync(new URL("../src-tauri/resources/lemonpi-narration/extensions/narration.ts", import.meta.url), "utf8"), /Refusing to commit.*classified as/);
-assert.doesNotMatch(readFileSync(new URL("../src-tauri/resources/lemonpi-narration/extensions/narration.ts", import.meta.url), "utf8"), /branches must use codex|Recovery branches must use codex/i);
+const narrationSource = readFileSync(new URL("../src-tauri/resources/lemonpi-narration/extensions/narration.ts", import.meta.url), "utf8");
+assert.doesNotMatch(narrationSource, /git\s+reset\s+--hard|git\s+clean\s+-|force-push/);
+assert.match(narrationSource, /Refusing to commit.*classified as/);
+assert.doesNotMatch(narrationSource, /branches must use codex|Recovery branches must use codex/i);
+assert.match(narrationSource, /subagentOnlyExtensions = \[FINALIZATION_GUARD_PATH\]/);
+assert.match(narrationSource, /worktree", "add", "--detach", continuationWorktree/);
+assert.match(narrationSource, /"apply", "--3way", canonicalPatch/);
+assert.match(narrationSource, /Continue from the existing diff; do not recreate completed work/);
+const hardStopBlock = narrationSource.slice(narrationSource.indexOf("if (!state.hardStopReason) return"), narrationSource.indexOf("const recordTerminalAttempt"));
+assert.ok(hardStopBlock.indexOf("preserveAttemptPatch") < hardStopBlock.indexOf("requestSubagentStop"));
 
 console.log(JSON.stringify({
   policyVersion: CURRENT_ORCHESTRATION_POLICY_VERSION,
-  scenarios: 20,
+  scenarios: 29,
   oldPolicy: oldMetrics,
   currentPolicy: currentMetrics,
   deltas: {

@@ -45,7 +45,7 @@ const SUBAGENT_PROMPT_MAX_CHARS: usize = 256 * 1024;
 const SUBAGENT_ACTIVITY_EVENTS: usize = 12;
 const MAX_SETTINGS_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_AGENT_FILE_BYTES: u64 = 256 * 1024;
-const LEMONPI_ORCHESTRATION_POLICY_VERSION: u32 = 8;
+const LEMONPI_ORCHESTRATION_POLICY_VERSION: u32 = 9;
 
 #[derive(Default)]
 pub(crate) struct PiManager {
@@ -203,28 +203,33 @@ struct RequiredPiPackage {
     source: &'static str,
     npm_name: &'static str,
     display_name: &'static str,
+    expected_version: Option<&'static str>,
 }
 
 const REQUIRED_PI_PACKAGES: &[RequiredPiPackage] = &[
     RequiredPiPackage {
-        source: "npm:pi-subagents",
+        source: "npm:pi-subagents@0.40.0",
         npm_name: "pi-subagents",
         display_name: "pi-subagents",
+        expected_version: Some("0.40.0"),
     },
     RequiredPiPackage {
         source: "npm:pi-web-access",
         npm_name: "pi-web-access",
         display_name: "pi-web-access",
+        expected_version: None,
     },
     RequiredPiPackage {
         source: "npm:@juicesharp/rpiv-ask-user-question",
         npm_name: "@juicesharp/rpiv-ask-user-question",
         display_name: "@juicesharp/rpiv-ask-user-question",
+        expected_version: None,
     },
     RequiredPiPackage {
         source: "npm:@juicesharp/rpiv-todo",
         npm_name: "@juicesharp/rpiv-todo",
         display_name: "@juicesharp/rpiv-todo",
+        expected_version: None,
     },
 ];
 
@@ -472,11 +477,20 @@ fn required_pi_package(source: &str) -> Option<&'static RequiredPiPackage> {
 }
 
 fn required_pi_package_installed(agent_dir: &Path, package: &RequiredPiPackage) -> bool {
-    agent_dir
+    let manifest_path = agent_dir
         .join("npm/node_modules")
         .join(package.npm_name)
-        .join("package.json")
-        .is_file()
+        .join("package.json");
+    let Ok(contents) = fs::read_to_string(manifest_path) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_str::<Value>(&contents) else {
+        return false;
+    };
+    manifest.get("name").and_then(Value::as_str) == Some(package.npm_name)
+        && package.expected_version.map_or(true, |expected| {
+            manifest.get("version").and_then(Value::as_str) == Some(expected)
+        })
 }
 
 async fn ensure_required_pi_packages(executable: &PathBuf) -> Result<(), String> {
@@ -486,8 +500,12 @@ async fn ensure_required_pi_packages(executable: &PathBuf) -> Result<(), String>
     let configured_sources = configured_package_sources(&settings);
     for package in REQUIRED_PI_PACKAGES {
         let configured = configured_sources.iter().any(|source| {
-            required_pi_package(source)
-                .is_some_and(|candidate| candidate.npm_name == package.npm_name)
+            if package.expected_version.is_some() {
+                source == package.source
+            } else {
+                required_pi_package(source)
+                    .is_some_and(|candidate| candidate.npm_name == package.npm_name)
+            }
         });
         if configured && required_pi_package_installed(&agent_dir, package) {
             continue;
@@ -3756,6 +3774,9 @@ async fn get_subagent_runs(session_file: String) -> Result<Vec<Value>, String> {
                     "budgetPhase",
                     "budgetStopReason",
                     "partialHandoffPath",
+                    "stopProvenance",
+                    "provider",
+                    "modelId",
                 ] {
                     if let Some(value) = attempt.get(key) {
                         fields.insert(key.to_string(), value.clone());
@@ -4005,6 +4026,26 @@ mod tests {
             npm_package_name("npm:@scope/tools@2.0.0"),
             Some("@scope/tools")
         );
+    }
+
+    #[test]
+    fn required_pi_subagents_install_requires_the_pinned_manifest_version() {
+        let root = tempfile::tempdir().unwrap();
+        let package_dir = root.path().join("npm/node_modules/pi-subagents");
+        fs::create_dir_all(&package_dir).unwrap();
+        let package = required_pi_package("npm:pi-subagents@0.40.0").unwrap();
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"pi-subagents","version":"0.39.0"}"#,
+        )
+        .unwrap();
+        assert!(!required_pi_package_installed(root.path(), package));
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"pi-subagents","version":"0.40.0"}"#,
+        )
+        .unwrap();
+        assert!(required_pi_package_installed(root.path(), package));
     }
 
     #[test]

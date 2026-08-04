@@ -237,6 +237,9 @@ function AgentCard({
   const model = shortModel(step.model ?? run.model);
   const thinking = step.thinking ?? run.thinking;
   const budgetPhase = step.budgetPhase ?? run.budgetPhase;
+  const stop = step.status === "partial" || step.status === "budget_exhausted" || step.status === "stopped" || step.status === "failed"
+    ? run.stopProvenance
+    : undefined;
   const activityEvents = activity?.events ?? [];
   const newestActivityEvents = [...activityEvents].reverse();
   const healthState = step.activityState ?? ((run.steps?.length ?? 0) <= 1 ? run.activityState : undefined);
@@ -316,6 +319,7 @@ function AgentCard({
             {model && <span><Robot size={11} />{model}</span>}
             {thinking && <span><Brain size={11} />{thinking}</span>}
             {budgetPhase && budgetPhase !== "work" && <span>Budget: {budgetPhase}</span>}
+            {stop && <span title={stop.reason}>Stopped by {stop.cause === "user" ? "user" : stop.cause.replaceAll("_", " ")}</span>}
             {step.tokens && <span>{step.tokens.total.toLocaleString()} tok</span>}
             {step.turnCount != null && <span>{step.turnCount} turn{step.turnCount === 1 ? "" : "s"}</span>}
           </div>

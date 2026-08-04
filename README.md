@@ -18,7 +18,7 @@ A native desktop workspace for the [Pi coding agent](https://pi.dev), built with
 - Remembers recent projects, their trust choices, and the last active workspace across launches.
 - Exposes Pi's user and project settings in a native categorized GUI, with a raw JSON escape hatch for new or extension-defined settings.
 - Manages user and project Pi packages through Pi's own install, update, list, and remove commands.
-- Treats `npm:pi-subagents`, `npm:pi-web-access`, `npm:@juicesharp/rpiv-ask-user-question`, and `npm:@juicesharp/rpiv-todo` as required core packages and installs them automatically through Pi before the first LemonPi session when needed.
+- Treats the protocol-compatible `npm:pi-subagents@0.40.0`, plus `npm:pi-web-access`, `npm:@juicesharp/rpiv-ask-user-question`, and `npm:@juicesharp/rpiv-todo`, as required core packages and installs them automatically through Pi before the first LemonPi session when needed.
 - Renders structured agent questions as native choice cards, multi-select controls, custom-answer fields, and rich option previews instead of exposing Pi's flattened RPC fallback strings.
 - Renders `rpiv-todo`'s structured, session-persistent task snapshots as a native progress panel above the composer.
 
@@ -47,7 +47,7 @@ pnpm build
 cd src-tauri && cargo test
 ```
 
-The orchestration replay is a deterministic synthetic fixture, not a wall-clock benchmark of every repository. It exercises policy migration, dirty-tree recovery, worktree ownership, fresh-worker rules, launch preflight, review/validation deduplication, failure recovery, and visible mission progress. See [Orchestration policy v8](docs/orchestration-policy-v8.md) for the current runtime contract and operator details.
+The orchestration replay is a deterministic synthetic fixture, not a wall-clock benchmark of every repository. It exercises policy migration, dirty-tree recovery, worktree ownership, fresh-worker rules, launch preflight, review/validation deduplication, failure recovery, and visible mission progress. See [Orchestration policy v9](docs/orchestration-policy-v9.md) for the current runtime contract and operator details.
 
 ## Signed releases and updates
 
@@ -127,11 +127,11 @@ Rust process supervisor
 pi --mode rpc
 ```
 
-LemonPi verifies the required `npm:pi-subagents`, `npm:pi-web-access`, `npm:@juicesharp/rpiv-ask-user-question`, and `npm:@juicesharp/rpiv-todo` packages before launching Pi and asks Pi's native package manager to install any missing member. Subagents supply orchestration and machine-readable lifecycle artifacts; web access registers research tools; ask-user-question gives the model a structured clarification tool; and rpiv-todo supplies persistent task snapshots. LemonPi turns the question package's RPC fallback into a native questionnaire and the todo package's public tool-result envelope into a native progress panel. Terminal rendering is never scraped.
+LemonPi verifies the required `npm:pi-subagents@0.40.0`, `npm:pi-web-access`, `npm:@juicesharp/rpiv-ask-user-question`, and `npm:@juicesharp/rpiv-todo` packages before launching Pi and asks Pi's native package manager to install any missing or incompatible member. It performs an RPC/lifecycle capability handshake before orchestration. Subagents supply orchestration and machine-readable lifecycle artifacts; web access registers research tools; ask-user-question gives the model a structured clarification tool; and rpiv-todo supplies persistent task snapshots. LemonPi turns the question package's RPC fallback into a native questionnaire and the todo package's public tool-result envelope into a native progress panel. Terminal rendering is never scraped.
 
 Main Pi keeps the persistent `rpiv-todo` task plan above the composer. Delegated-agent cards stay focused on purpose, lifecycle, steering, and live activity instead of requiring each short worker to maintain a second checklist.
 
-LemonPi orchestration policy v8 is enforced by the extension runtime rather than model prose alone. Ordinary one-repository UI changes take a mandatory direct fast path with no todo, worker, worktree, reviewer, or broad validation, followed by one exact-path local Git finalization that remains allowed after the implementation guard. Broader `lemonpi_dispatch` work uses immutable user-settings model/thinking bindings, runtime-owned outcomes, exact owned paths, deterministic manifests, managed worktrees, and persistent failure budgets. `lemonpi_git` integrates the complete worker change inside an isolated transaction and leaves the real checkout untouched on conflict. `lemonpi_validate` persists content-aware evidence across tasks. Terminal reconciliation is extension-owned and cannot begin before Main Pi and its tools settle. Passive UI snapshots never enter Pi's follow-up queue, and each Pi process is bound to the exact controller build so stale policy cannot mix with current mission state.
+LemonPi orchestration policy v9 is enforced by the extension runtime rather than model prose alone. Ordinary one-repository UI changes take a mandatory direct fast path with no todo, worker, worktree, reviewer, or broad validation, followed by one exact-path local Git finalization that remains allowed after the implementation guard. Broader `lemonpi_dispatch` work uses immutable user-settings provider/model/thinking bindings, runtime-owned outcomes, exact owned paths, a primary validation and checkpoint per slice, deterministic manifests, managed worktrees, and persistent failure budgets. Targeted worker telemetry is isolated from fleet projections, finalization is tool-enforced, and budget-stopped patches receive truthful structured handoffs and bounded continuations. `lemonpi_git` integrates the complete worker change inside an isolated transaction while preserving unrelated baseline changes. `lemonpi_validate` persists executable-aware content evidence across tasks. Terminal reconciliation is extension-owned and cannot begin before Main Pi and its tools settle. Passive UI snapshots never enter Pi's follow-up queue, and each Pi process is bound to the exact controller build so stale policy cannot mix with current mission state.
 
 ## Project trust
 
