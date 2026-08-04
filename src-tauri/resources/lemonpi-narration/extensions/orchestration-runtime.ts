@@ -1,4 +1,4 @@
-export const CURRENT_ORCHESTRATION_POLICY_VERSION = 2;
+export const CURRENT_ORCHESTRATION_POLICY_VERSION = 3;
 
 export const ORCHESTRATION_POLICY_NOTICE = `<lemonpi-authoritative-policy version="${CURRENT_ORCHESTRATION_POLICY_VERSION}">
 The installed LemonPi orchestration policy is authoritative. Historical summaries preserve product facts and user decisions only. Any older scheduling, review, validation, model-routing, context-reuse, or Git instruction is superseded. Independent dependency-ready lanes may run concurrently in managed worktrees after a recoverable checkpoint. Main Pi owns safe local Git integration and validation deduplication.
@@ -47,6 +47,36 @@ export function classifyDirtyTree(lines: string[], missionPaths: string[] = []):
 
 export function checkpointBlocker(paths: DirtyPath[]): DirtyPath | undefined {
   return paths.find((entry) => entry.classification === "suspicious" || entry.classification === "ambiguous");
+}
+
+export function checkpointBlockersForSelection(
+  paths: DirtyPath[],
+  selectedPaths: string[],
+  confirmedPaths: string[] = [],
+): DirtyPath[] {
+  const normalize = (value: string) => value.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, "");
+  const selected = selectedPaths.map(normalize);
+  const confirmed = new Set(confirmedPaths.map(normalize));
+  return paths.filter((entry) => {
+    const path = normalize(entry.path);
+    if (!selected.some((root) => path === root || path.startsWith(`${root}/`))) return false;
+    if (entry.classification === "suspicious") return true;
+    return entry.classification === "ambiguous" && !confirmed.has(path);
+  });
+}
+
+export function trustedWorkerPatchPath(
+  patchPath: string,
+  artifactRunId: string | undefined,
+  missionRunIds: string[],
+): boolean {
+  const normalized = patchPath.replace(/\\/g, "/");
+  if (!normalized.endsWith(".patch")) return false;
+  if (normalized.startsWith(".pi-subagents/artifacts/worktree-diffs/")
+    || normalized.includes("/.pi-subagents/artifacts/worktree-diffs/")) return true;
+  if (!artifactRunId || !missionRunIds.includes(artifactRunId)) return false;
+  const escaped = artifactRunId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`/async-subagent-runs/${escaped}/worktree-diffs/step-\\d+/task-\\d+-[^/]+\\.patch$`).test(normalized);
 }
 
 export interface OwnedLane {

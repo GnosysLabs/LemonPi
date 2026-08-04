@@ -255,6 +255,7 @@ export default function App() {
   const mainStopPendingRef = useRef(false);
   const mainPlanInterruptedRef = useRef(false);
   const todoResumeEligibleRef = useRef(false);
+  const manuallyStoppedSubagentRunsRef = useRef(new Set<string>());
 
   const appUpdater = useAppUpdater();
   const finishStartup = useCallback(() => setStartupReady(true), []);
@@ -690,9 +691,11 @@ export default function App() {
     };
 
     const scheduleTerminalWake = (run: SubagentRunStatus, status: TerminalSubagentState) => {
+      if (manuallyStoppedSubagentRunsRef.current.has(run.runId)) return;
       if (pendingWakeTimers.has(run.runId) || notifiedTerminalRuns.has(run.runId)) return;
       const wakeTimer = window.setTimeout(() => {
         pendingWakeTimers.delete(run.runId);
+        if (manuallyStoppedSubagentRunsRef.current.has(run.runId)) return;
         if (disposed || lifecycleByRun.get(run.runId) !== "terminal" || notifiedTerminalRuns.has(run.runId)) return;
         const controlMessage = `__lemonpi_subagent_terminal_v1__:${JSON.stringify({
           runId: run.runId,
@@ -775,6 +778,7 @@ export default function App() {
     pendingRef.current.clear();
     mainPlanInterruptedRef.current = false;
     todoResumeEligibleRef.current = false;
+    manuallyStoppedSubagentRunsRef.current.clear();
     setMainTodoInterrupted(false);
     setConnection("launching");
     setDetectionError(undefined);
@@ -844,9 +848,10 @@ export default function App() {
   }
 
   function submitMessage(text: string, behavior: ComposerBehavior, attachments: ComposerAttachment[]) {
-    mainPlanInterruptedRef.current = false;
-    todoResumeEligibleRef.current = false;
-    setMainTodoInterrupted(false);
+    // A stopped plan remains visibly paused until Pi actually mutates its todo state.
+    // Merely accepting a new prompt is not evidence that the prior in-progress item resumed.
+    todoResumeEligibleRef.current = mainPlanInterruptedRef.current;
+    if (!mainPlanInterruptedRef.current) setMainTodoInterrupted(false);
     const pendingId = `pending-user-${crypto.randomUUID()}`;
     dispatchTranscript({
       type: "lemonpi_queue_user",
@@ -890,6 +895,10 @@ export default function App() {
 
   const stopSubagent = useCallback((runId: string) => new Promise<void>((resolve, reject) => {
     const controlMessage = `__lemonpi_subagent_stop_v1__:${JSON.stringify({ runId })}`;
+    manuallyStoppedSubagentRunsRef.current.add(runId);
+    if (manuallyStoppedSubagentRunsRef.current.size > 256) {
+      manuallyStoppedSubagentRunsRef.current.delete(manuallyStoppedSubagentRunsRef.current.values().next().value!);
+    }
     void rpc(
       {
         type: "prompt",
@@ -898,7 +907,10 @@ export default function App() {
       },
       {
         onSuccess: () => resolve(),
-        onError: (error) => reject(new Error(error)),
+        onError: (error) => {
+          manuallyStoppedSubagentRunsRef.current.delete(runId);
+          reject(new Error(error));
+        },
       },
     );
   }), [rpc, subagentSteerWhileStreaming]);

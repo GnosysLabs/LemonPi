@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   CURRENT_ORCHESTRATION_POLICY_VERSION,
   checkpointBlocker,
+  checkpointBlockersForSelection,
   classifyDirtyTree,
   classifyFailure,
   contentHash,
@@ -19,13 +20,19 @@ import {
   reviewDeduplicationIssue,
   scheduleOwnedLanes,
   supersedeHistoricalPolicy,
+  trustedWorkerPatchPath,
   uniqueArtifactPath,
   validationActivityLabel,
   validationDeduplicationIssue,
   workerContextLimits,
   workerStatusMetrics,
 } from "../src-tauri/resources/lemonpi-narration/extensions/orchestration-runtime.ts";
-import { parsedMissionState } from "../src-tauri/resources/lemonpi-narration/extensions/narration.ts";
+import {
+  compileDelegationContracts,
+  delegatesImplementation,
+  independentSpawnParams,
+  parsedMissionState,
+} from "../src-tauri/resources/lemonpi-narration/extensions/narration.ts";
 
 function git(cwd, ...args) {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -49,14 +56,16 @@ const migrated = parsedMissionState({
   writerActive: false,
   wakeAttempts: 0,
   updatedAt: Date.now(),
+  suppressedRunIds: ["manual-stop-run"],
 });
 assert.equal(migrated?.version, 2);
 assert.equal(migrated?.policyVersion, CURRENT_ORCHESTRATION_POLICY_VERSION);
 assert.equal(migrated?.migratedFromPolicyVersion, 0);
+assert.deepEqual(migrated?.suppressedRunIds, ["manual-stop-run"]);
 const staleSummary = "Product decision: keep opaque IDs. Workflow rule: use one writer at a time.";
 const superseded = supersedeHistoricalPolicy(staleSummary);
 assert.match(superseded, /Product decision: keep opaque IDs/);
-assert.match(superseded, /superseded by LemonPi orchestration policy v2/);
+assert.match(superseded, new RegExp(`superseded by LemonPi orchestration policy v${CURRENT_ORCHESTRATION_POLICY_VERSION}`));
 
 const root = mkdtempSync(join(tmpdir(), "lemonpi-orchestration-"));
 const repo = join(root, "repo");
@@ -85,6 +94,39 @@ assert.equal(git(repo, "status", "--porcelain=v1", "--untracked-files=all").incl
 rmSync(join(repo, ".env"));
 const generated = classifyDirtyTree(["?? dist/bundle.js"]);
 assert.equal(generated[0]?.classification, "generated");
+const ambiguous = classifyDirtyTree(["?? notes.noextension", "?? another.unknown"]);
+assert.deepEqual(
+  checkpointBlockersForSelection(ambiguous, ["notes.noextension"], []),
+  [ambiguous[0]],
+);
+const suspicious = classifyDirtyTree(["?? .env"]);
+assert.equal(
+  checkpointBlockersForSelection(suspicious, [".env"], [".env"])[0]?.classification,
+  "suspicious",
+);
+assert.deepEqual(
+  checkpointBlockersForSelection(ambiguous, ["notes.noextension"], ["notes.noextension"]),
+  [],
+);
+
+const structuredWriter = {
+  agent: "worker",
+  summary: "Repair authenticated session catalogue",
+  executionMode: "implementation",
+  task: "Implement the session catalogue.\nDo not edit App/**.",
+};
+compileDelegationContracts(structuredWriter);
+assert.equal(delegatesImplementation({ agent: "worker", task: structuredWriter.task }), true);
+assert.match(structuredWriter.task, /Execution mode: implementation/);
+const preparedSpawn = independentSpawnParams({ ...structuredWriter, cwd: "/tmp/prepared", reusePreparedWorktree: true });
+assert.equal(preparedSpawn.implementation, true);
+assert.equal(preparedSpawn.params.worktree, false);
+
+const asyncRunId = "1e9cba46-2055-40b7-9a89-a35a5e2934be";
+const asyncPatch = `/tmp/pi-subagents/async-subagent-runs/${asyncRunId}/worktree-diffs/step-0/task-0-worker.patch`;
+assert.equal(trustedWorkerPatchPath(asyncPatch, asyncRunId, [asyncRunId]), true);
+assert.equal(trustedWorkerPatchPath(asyncPatch, "another-run", [asyncRunId]), false);
+assert.equal(trustedWorkerPatchPath(".pi-subagents/artifacts/worktree-diffs/task.patch", undefined, []), true);
 
 const disjoint = scheduleOwnedLanes([
   { id: "contracts", paths: ["src/contracts"] },
@@ -206,6 +248,7 @@ commitAll(repo, "feat: logical final integration");
 assert.equal(git(repo, "status", "--porcelain=v1"), "");
 assert.doesNotMatch(readFileSync(new URL("../src-tauri/resources/lemonpi-narration/extensions/narration.ts", import.meta.url), "utf8"), /git\s+reset\s+--hard|git\s+clean\s+-|force-push/);
 assert.match(readFileSync(new URL("../src-tauri/resources/lemonpi-narration/extensions/narration.ts", import.meta.url), "utf8"), /Refusing to commit.*classified as/);
+assert.doesNotMatch(readFileSync(new URL("../src-tauri/resources/lemonpi-narration/extensions/narration.ts", import.meta.url), "utf8"), /branches must use codex|Recovery branches must use codex/i);
 
 console.log(JSON.stringify({
   policyVersion: CURRENT_ORCHESTRATION_POLICY_VERSION,
