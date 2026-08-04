@@ -326,11 +326,12 @@ commitAll(sourceOne, "correct visible slice");
 
 const registeredTools = new Map();
 const extensionHandlers = new Map();
+const sentMessages = [];
 const fakePi = {
   registerTool(tool) { registeredTools.set(tool.name, tool); },
   on(event, handler) { extensionHandlers.set(event, handler); },
   appendEntry() {},
-  sendMessage() {},
+  sendMessage(message, options) { sentMessages.push({ message, options }); },
   events: { on() { return () => {}; }, emit() {} },
   async exec(program, args, options = {}) {
     const result = spawnSync(program, args, {
@@ -379,6 +380,41 @@ assert.equal(git(transactionRepo, "rev-parse", "HEAD"), targetBeforeConflict);
 assert.equal(git(transactionRepo, "status", "--porcelain=v1"), "");
 assert.notEqual(spawnSync("git", ["rev-parse", "--verify", "CHERRY_PICK_HEAD"], { cwd: transactionRepo }).status, 0);
 
+const conflictRecoveryRepo = join(root, "conflict-recovery");
+mkdirSync(join(conflictRecoveryRepo, "src"), { recursive: true });
+git(root, "init", conflictRecoveryRepo);
+git(conflictRecoveryRepo, "config", "user.email", "lemonpi-tests@example.invalid");
+git(conflictRecoveryRepo, "config", "user.name", "LemonPi Tests");
+writeFileSync(join(conflictRecoveryRepo, "src", "conflict.ts"), "export const side = 'base';\n");
+commitAll(conflictRecoveryRepo, "base conflict fixture");
+const conflictBaseBranch = git(conflictRecoveryRepo, "branch", "--show-current");
+git(conflictRecoveryRepo, "switch", "-c", "incoming-conflict");
+writeFileSync(join(conflictRecoveryRepo, "src", "conflict.ts"), "export const side = 'incoming';\n");
+commitAll(conflictRecoveryRepo, "incoming conflict");
+const incomingConflict = git(conflictRecoveryRepo, "rev-parse", "HEAD");
+git(conflictRecoveryRepo, "switch", conflictBaseBranch);
+writeFileSync(join(conflictRecoveryRepo, "src", "conflict.ts"), "export const side = 'current';\n");
+commitAll(conflictRecoveryRepo, "current conflict");
+assert.notEqual(spawnSync("git", ["cherry-pick", incomingConflict], { cwd: conflictRecoveryRepo, encoding: "utf8" }).status, 0);
+const incompleteConflictConfirmation = await gitTool.execute("conflict-confirmation-incomplete", {
+  action: "resolve_conflicts_to_head",
+  cwd: conflictRecoveryRepo,
+  paths: ["src/conflict.ts"],
+  confirmedPaths: [],
+}, undefined, undefined, { cwd: conflictRecoveryRepo });
+assert.equal(incompleteConflictConfirmation.isError, true);
+assert.equal(git(conflictRecoveryRepo, "diff", "--name-only", "--diff-filter=U"), "src/conflict.ts");
+const recoveredConflict = await gitTool.execute("conflict-confirmation-complete", {
+  action: "resolve_conflicts_to_head",
+  cwd: conflictRecoveryRepo,
+  paths: ["src/conflict.ts"],
+  confirmedPaths: ["src/conflict.ts"],
+}, undefined, undefined, { cwd: conflictRecoveryRepo });
+assert.equal(recoveredConflict.isError, undefined);
+assert.equal(git(conflictRecoveryRepo, "diff", "--name-only", "--diff-filter=U"), "");
+assert.match(readFileSync(join(conflictRecoveryRepo, "src", "conflict.ts"), "utf8"), /current/);
+assert.equal(spawnSync("git", ["cherry-pick", "--skip"], { cwd: conflictRecoveryRepo }).status, 0);
+
 const canaryRepo = join(root, "fast-path-canary");
 mkdirSync(join(canaryRepo, "src"), { recursive: true });
 git(root, "init", canaryRepo);
@@ -387,6 +423,7 @@ git(canaryRepo, "config", "user.name", "LemonPi Tests");
 writeFileSync(join(canaryRepo, "src", "Inbox.tsx"), "export const Inbox = () => null;\n");
 commitAll(canaryRepo, "base fast-path canary");
 await extensionHandlers.get("message_start")?.({ message: { role: "user", content: "Add an unread notification dot" } });
+await extensionHandlers.get("before_agent_start")?.({ prompt: "Add an unread notification dot", systemPrompt: "base" });
 const dispatchTool = registeredTools.get("lemonpi_dispatch");
 const fastPathTool = registeredTools.get("lemonpi_fast_path");
 const validationTool = registeredTools.get("lemonpi_validate");
@@ -422,6 +459,50 @@ const finishedCanary = await fastPathTool.execute("canary-finish", {
 }, undefined, undefined, canaryContext);
 assert.equal(finishedCanary.isError, undefined);
 assert.equal(finishedCanary.details?.validationCount, 1);
+await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
+assert.equal(sentMessages.some((entry) => entry.message?.customType === "lemonpi-mission-outcomes"), false);
+const repeatedFastPath = await fastPathTool.execute("canary-repeat", {
+  action: "start",
+  cwd: canaryRepo,
+  paths: ["src/Inbox.tsx"],
+  summary: "Add unread notification dot",
+}, undefined, undefined, canaryContext);
+assert.equal(repeatedFastPath.isError, true);
+assert.match(repeatedFastPath.content[0].text, /already implemented and validated/);
+for (let index = 0; index < 13; index += 1) {
+  const readGuard = await extensionHandlers.get("tool_call")?.({
+    toolName: "read",
+    toolCallId: `post-finish-read-${index}`,
+    input: { path: "src/Inbox.tsx" },
+  }, { ui: { notify() {} } });
+  assert.equal(readGuard, undefined);
+}
+const commitGuard = await extensionHandlers.get("tool_call")?.({
+  toolName: "lemonpi_git",
+  toolCallId: "canary-finalize",
+  input: { action: "commit", paths: ["src/Inbox.tsx"] },
+}, { cwd: canaryRepo, ui: { notify() {} } });
+assert.equal(commitGuard, undefined);
+const committedCanary = await gitTool.execute("canary-finalize", {
+  action: "commit",
+  cwd: canaryRepo,
+  paths: ["src/Inbox.tsx"],
+  message: "feat: add unread indicator",
+}, undefined, undefined, canaryContext);
+assert.equal(committedCanary.isError, undefined);
+assert.equal(git(canaryRepo, "status", "--porcelain=v1"), "");
+await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
+assert.equal(sentMessages.some((entry) => entry.message?.customType === "lemonpi-mission-outcomes"), false);
+await extensionHandlers.get("message_end")?.({ message: { role: "assistant", content: "Unread dot implemented, checked, and committed.", stopReason: "stop" } });
+await extensionHandlers.get("agent_settled")?.({}, {
+  getContextUsage: () => ({ percent: 0 }),
+  hasPendingMessages: () => false,
+  compact() {},
+});
+const outcomePublications = sentMessages.filter((entry) => entry.message?.customType === "lemonpi-mission-outcomes");
+assert.equal(outcomePublications.length, 1);
+assert.equal(outcomePublications[0].options?.triggerTurn, false);
+assert.equal(Object.hasOwn(outcomePublications[0].options ?? {}, "deliverAs"), false);
 await extensionHandlers.get("session_shutdown")?.();
 
 const oldMetrics = reducedIncidentReplay("old");
@@ -444,7 +525,7 @@ assert.doesNotMatch(readFileSync(new URL("../src-tauri/resources/lemonpi-narrati
 
 console.log(JSON.stringify({
   policyVersion: CURRENT_ORCHESTRATION_POLICY_VERSION,
-  scenarios: 18,
+  scenarios: 20,
   oldPolicy: oldMetrics,
   currentPolicy: currentMetrics,
   deltas: {

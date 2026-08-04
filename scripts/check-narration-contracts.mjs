@@ -155,7 +155,7 @@ const restored = replayMissionState([
 assert.deepEqual(restored.activeRunIds, ["run-a", "run-b"]);
 assert.deepEqual(restored.activeRunWidths, { "run-a": 1, "run-b": 1 });
 assert.equal(restored.version, 3);
-assert.equal(restored.policyVersion, 7);
+assert.equal(restored.policyVersion, 8);
 assert.deepEqual(restored.outcomes, []);
 
 assert.equal(isManagedWorktreePatchCommand({ command: "git apply --check .pi-subagents/artifacts/worktree-diffs/run.patch" }), true);
@@ -182,9 +182,9 @@ assert.match(MAIN_PI_OPERATING_MANUAL, /Never rerun an unchanged suite/);
 assert.doesNotMatch(MAIN_PI_OPERATING_MANUAL, /Create the whole known roadmap before|complete visible roadmap/);
 const injectedPrompt = buildMainPiSystemPrompt("BASE SYSTEM PROMPT", { runId: "run-attention", index: 2 });
 assert.match(injectedPrompt, /^BASE SYSTEM PROMPT/);
-assert.match(injectedPrompt, /lemonpi-authoritative-policy version="7"/);
+assert.match(injectedPrompt, /lemonpi-authoritative-policy version="8"/);
 assert.match(injectedPrompt, /lemonpi-visible-narration/);
-assert.match(injectedPrompt, /lemonpi-main-pi-operating-manual version="2"/);
+assert.match(injectedPrompt, /lemonpi-main-pi-operating-manual version="3"/);
 assert.match(injectedPrompt, /Run run-attention child 2 needs intervention now/);
 assert.equal(shouldInjectMainPiOperatingManual({}), true);
 assert.equal(shouldInjectMainPiOperatingManual({ PI_SUBAGENT_CHILD: "0" }), true);

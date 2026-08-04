@@ -47,7 +47,7 @@ pnpm build
 cd src-tauri && cargo test
 ```
 
-The orchestration replay is a deterministic synthetic fixture, not a wall-clock benchmark of every repository. It exercises policy migration, dirty-tree recovery, worktree ownership, fresh-worker rules, launch preflight, review/validation deduplication, failure recovery, and visible mission progress. See [Orchestration policy v7](docs/orchestration-policy-v7.md) for the current runtime contract and operator details.
+The orchestration replay is a deterministic synthetic fixture, not a wall-clock benchmark of every repository. It exercises policy migration, dirty-tree recovery, worktree ownership, fresh-worker rules, launch preflight, review/validation deduplication, failure recovery, and visible mission progress. See [Orchestration policy v8](docs/orchestration-policy-v8.md) for the current runtime contract and operator details.
 
 ## Signed releases and updates
 
@@ -131,7 +131,7 @@ LemonPi verifies the required `npm:pi-subagents`, `npm:pi-web-access`, `npm:@jui
 
 Main Pi keeps the persistent `rpiv-todo` task plan above the composer. Delegated-agent cards stay focused on purpose, lifecycle, steering, and live activity instead of requiring each short worker to maintain a second checklist.
 
-LemonPi orchestration policy v7 is enforced by the extension runtime rather than model prose alone. Ordinary one-repository UI changes take a mandatory direct fast path with no todo, worker, worktree, reviewer, or broad validation. Broader `lemonpi_dispatch` work uses immutable user-settings model/thinking bindings, runtime-owned outcomes, exact owned paths, deterministic manifests, managed worktrees, and persistent failure budgets. `lemonpi_git` integrates the complete worker change inside an isolated transaction and leaves the real checkout untouched on conflict. `lemonpi_validate` persists content-aware evidence across tasks. Terminal reconciliation is extension-owned and cannot begin before Main Pi and its tools settle. Each Pi process is bound to the exact controller build so stale policy cannot mix with current mission state.
+LemonPi orchestration policy v8 is enforced by the extension runtime rather than model prose alone. Ordinary one-repository UI changes take a mandatory direct fast path with no todo, worker, worktree, reviewer, or broad validation, followed by one exact-path local Git finalization that remains allowed after the implementation guard. Broader `lemonpi_dispatch` work uses immutable user-settings model/thinking bindings, runtime-owned outcomes, exact owned paths, deterministic manifests, managed worktrees, and persistent failure budgets. `lemonpi_git` integrates the complete worker change inside an isolated transaction and leaves the real checkout untouched on conflict. `lemonpi_validate` persists content-aware evidence across tasks. Terminal reconciliation is extension-owned and cannot begin before Main Pi and its tools settle. Passive UI snapshots never enter Pi's follow-up queue, and each Pi process is bound to the exact controller build so stale policy cannot mix with current mission state.
 
 ## Project trust
 
