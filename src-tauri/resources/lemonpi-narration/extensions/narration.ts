@@ -32,8 +32,6 @@ const SUBAGENT_RPC_REPLY_PREFIX = "subagents:rpc:v1:reply:";
 const SUBAGENT_RPC_TIMEOUT_MS = 6_000;
 const RESTORE_STATUS_RPC_TIMEOUT_MS = 2_000;
 const RESTORE_RECONCILE_DELAYS_MS = [500, 1_500, 3_000] as const;
-const CHILD_TODO_SEED_TAG = "lemonpi-child-todo-seed";
-const CURRENT_CHILD_OWNER = "__lemonpi_current_child__";
 
 const IndependentDispatchSchema = {
   type: "object",
@@ -93,63 +91,6 @@ const ValidationSchema = {
   additionalProperties: false,
 } as const;
 
-interface InitialChildTodo {
-  id: number;
-  subject: string;
-  description?: string;
-  activeForm: string;
-  status: "in_progress" | "pending";
-  blockedBy: number[];
-  owner: string;
-}
-
-function parseChildChecklist(task: string, agent: string): InitialChildTodo[] {
-  const heading = /(?:^|\n)\s*Child checklist:\s*\n/i.exec(task);
-  if (!heading) return [];
-  const lines = task.slice((heading.index ?? 0) + heading[0].length).split("\n");
-  const parsed: Array<{ subject: string; description?: string }> = [];
-  for (const line of lines) {
-    const item = /^\s*(?:[-*]|\d+[.)])\s+(?:\[[ xX]\]\s*)?(.+?)\s*$/.exec(line);
-    if (!item) {
-      if (parsed.length > 0 && line.trim()) break;
-      continue;
-    }
-    const [subjectPart, ...descriptionParts] = item[1].split(/\s+::\s+/);
-    const subject = subjectPart.trim().slice(0, 180);
-    const description = descriptionParts.join(" :: ").trim().slice(0, 1_200);
-    if (!subject) continue;
-    parsed.push({ subject, ...(description ? { description } : {}) });
-    if (parsed.length === 5) break;
-  }
-  return parsed.map((item, index) => ({
-    id: index + 1,
-    subject: item.subject,
-    ...(item.description ? { description: item.description } : {}),
-    activeForm: item.description ?? item.subject,
-    status: index === 0 ? "in_progress" : "pending",
-    blockedBy: index === 0 ? [] : [index],
-    owner: agent,
-  }));
-}
-
-function childTodoGuidance(agent: string, tasks: InitialChildTodo[]): string {
-  const owner = agent === CURRENT_CHILD_OWNER ? "your current agent identity" : JSON.stringify(agent);
-  const seed = JSON.stringify({
-    version: 1,
-    seedId: globalThis.crypto.randomUUID(),
-    seededAt: Date.now(),
-    owner: agent,
-    tasks,
-    nextId: tasks.length + 1,
-  });
-  return `
-
-<lemonpi-child-checklist>
-Main Pi authored your checklist and LemonPi initialized it in this child session before your first model request. The seeded tasks are owned by ${owner}; do not clear or recreate them. Begin with the existing in-progress item. Complete each item immediately when its concrete outcome is actually verified, then move the next item into progress; never save several status changes to submit together near the end. Do not mark an item complete because you intend to produce its result later. The closing response itself is not a checklist item. Use \`child_todo({ action: "list" })\` only if you need to inspect the initialized details, then update the existing task ids through \`child_todo\` as work progresses. You may add or revise a task only when execution reveals genuinely new work within the delegated scope.
-</lemonpi-child-checklist>
-<${CHILD_TODO_SEED_TAG}>${seed}</${CHILD_TODO_SEED_TAG}>`;
-}
-
 const NARRATION_CONTRACT = `
 <lemonpi-visible-narration>
 The user is watching this work in LemonPi. Hidden reasoning and tool activity are not substitutes for communication.
@@ -174,7 +115,7 @@ Independent dispatch is the default:
 3. A direct single read-only delegation is appropriate only when exactly one useful read-only lane is ready. There is no numerical quota: never manufacture agents, but never serialize independent work for convenience, superficial file overlap, a dirty checkout, or because the first lane is easiest to describe.
 4. Grouped \`subagent.tasks\` and chains are exceptional. Use them only when the user needs one atomic aggregate result whose partial child results are not independently actionable. Ordinary parallel research, implementation, review, and validation are independent lanes.
 5. Choose agents from the live roster by capability, including custom user agents. Call \`subagent({ action: "list" })\` once when the roster is not already known and role choice matters, then reuse it. Use planners, designers, scouts, context builders, reviewers, or other specialists when their output changes a real decision; do not create ceremonial diversity or default every task to worker/planner/reviewer.
-6. Give each lane one coherent checkpoint outcome, its scope, its done condition, and exact \`Owned paths:\` for implementation. LemonPi compiles execution mode, safety, acceptance, and an initial child checklist. Keep assignments concise; five minutes is a decomposition aspiration, not a timeout or a mechanical prompt-length gate.
+6. Give each lane one coherent checkpoint outcome, its scope, its done condition, and exact \`Owned paths:\` for implementation. LemonPi compiles execution mode, safety, and acceptance. Keep assignments concise; five minutes is a decomposition aspiration, not a timeout or a mechanical prompt-length gate.
 7. Main Pi owns local Git through \`lemonpi_git\`. Inspect and classify every dirty path; checkpoint safe intentional work on a local recovery branch; ask one focused question for suspicious or ambiguous paths; never discard user data, force an operation, alter a remote, or push. Once clean and recoverable, use managed worktrees for disjoint writers, apply accepted artifacts, verify exact staged paths, and create logical local integration commits as slices land.
 8. Independent review is reserved for explicit review requests or material security, privacy, money, migration, cryptography, concurrency, public-protocol, or release risk. Include one concrete \`Review justification:\` boundary. LemonPi deduplicates accepted reviews by repository, revision, diff, scope, and risk. Routine chunks and post-correction checks are reviewed directly by Main Pi.
 9. Run tests through \`lemonpi_validate\`: focused validation per slice, one broader run per integration wave, and one final holistic run. Its persistent ledger prevents identical unchanged commands and emits heartbeat progress for long-running checks. Never set model-authored timeout, turn, tool, or usage budgets and never call \`subagent_wait\`.
@@ -359,25 +300,6 @@ function stripPerDispatchBudgets(value: unknown): void {
   visit(value);
 }
 
-function addChildTodoGuidance(value: unknown): void {
-  const visit = (candidate: unknown) => {
-    const record = asRecord(candidate);
-    if (!record) return;
-    if (typeof record.agent === "string") {
-      const task = typeof record.task === "string" ? record.task.trimEnd() : "";
-      if (!task.includes("<lemonpi-child-checklist>")) {
-        record.task = `${task}${childTodoGuidance(record.agent, parseChildChecklist(task, record.agent))}`.trimStart();
-      }
-    }
-    for (const key of ["tasks", "chain", "parallel"] as const) {
-      const nested = record[key];
-      if (Array.isArray(nested)) nested.forEach(visit);
-      else if (nested !== undefined) visit(nested);
-    }
-  };
-  visit(value);
-}
-
 function hasBoundedChunkContract(task: string): boolean {
   return CHUNK_OUTCOME.test(task)
     && CHUNK_IN_SCOPE.test(task)
@@ -454,69 +376,6 @@ function sectionLead(task: string, wantedHeading: string): string | undefined {
   return undefined;
 }
 
-interface ChecklistDraft {
-  subject: string;
-  description?: string;
-}
-
-const NON_WORK_SECTION = /^(?:execution mode|single-writer reason|single-writer detail|review justification|chunk outcome|owned paths|depends on|normative contract|shared .+ rules|in scope|done when|out of scope|acceptance contract|criteria|required evidence|output)$/i;
-const WORK_SECTION = /(?:endpoint|implementation|integration|migration|projection|catalog|tests?|validation|verification|frontend|backend|interface|security|storage|database|\bapi\b|\bui\b|\bstate\b|\bmessages?\b)/i;
-
-function checklistSubjectForSection(value: string): string {
-  const heading = cleanChecklistText(value).replace(/\s*\([^)]*\)\s*$/, "");
-  const lower = heading.charAt(0).toLowerCase() + heading.slice(1);
-  if (/^(?:implement|add|build|create|repair|update|migrate|integrate|validate|verify|test|harden|secure|wire|refine|remove)\b/i.test(heading)) {
-    return heading.slice(0, 180);
-  }
-  if (/\btests?\b/i.test(heading)) return "Add focused tests";
-  if (/\bvalidation\b|\bverification\b/i.test(heading)) return "Run focused validation";
-  if (/\bsecurity\b/i.test(heading)) return `Harden ${lower}`.slice(0, 180);
-  return `Implement ${lower}`.slice(0, 180);
-}
-
-function derivedChildChecklist(task: string, summary: string): ChecklistDraft[] {
-  const lines = task.replace(/\r\n/g, "\n").split("\n");
-  const sections: ChecklistDraft[] = [];
-  const headingPattern = /^\s*(?:#{1,6}\s*)?([^:\n]{2,80})\s*:\s*$/;
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const headingMatch = headingPattern.exec(lines[index]);
-    if (!headingMatch) continue;
-    const heading = cleanChecklistText(headingMatch[1]);
-    if (!WORK_SECTION.test(heading) || NON_WORK_SECTION.test(heading)) continue;
-
-    let description: string | undefined;
-    for (let offset = index + 1; offset < lines.length; offset += 1) {
-      if (headingPattern.test(lines[offset])) break;
-      const candidate = cleanChecklistText(lines[offset]);
-      if (candidate) {
-        description = candidate.slice(0, 1_200);
-        break;
-      }
-    }
-    sections.push({
-      subject: checklistSubjectForSection(heading),
-      ...(description ? { description } : {}),
-    });
-  }
-
-  const unique = sections.filter((item, index, all) =>
-    all.findIndex((candidate) => candidate.subject.toLowerCase() === item.subject.toLowerCase()) === index
-  );
-  if (unique.length >= 2) {
-    if (unique.length <= 5) return unique;
-    const validation = unique.findLast((item) => /validation|tests?/i.test(item.subject));
-    const first = unique.filter((item) => item !== validation).slice(0, validation ? 4 : 5);
-    return validation ? [...first, validation] : first;
-  }
-
-  const doneWhen = sectionLead(task, "done when");
-  return [{
-    subject: summary,
-    ...(doneWhen && doneWhen !== summary ? { description: doneWhen.slice(0, 1_200) } : {}),
-  }];
-}
-
 function inferredExecutionMode(agent: string, task: string): "read-only" | "implementation" {
   const declared = declaredExecutionMode(task);
   if (declared) return declared;
@@ -532,14 +391,6 @@ function appendMissingImplementationContract(task: string, summary: string): str
   if (!CHUNK_DONE_WHEN.test(task)) fields.push("Done when: The outcome works and focused validation evidence is reported.");
   if (!CHUNK_OUT_OF_SCOPE.test(task)) fields.push("Out of scope: Unrelated cleanup, later backlog items, and unapproved product or architecture changes.");
   return fields.length > 0 ? `${task.trimEnd()}\n${fields.join("\n")}` : task;
-}
-
-function appendDefaultChecklist(task: string, summary: string): string {
-  if (parseChildChecklist(task, "worker").length > 0) return task;
-  const checklist = derivedChildChecklist(task, summary)
-    .map((item) => `- ${item.subject}${item.description ? ` :: ${item.description}` : ""}`)
-    .join("\n");
-  return `${task.trimEnd()}\nChild checklist:\n${checklist}`;
 }
 
 export function compileDelegationContracts(input: Record<string, unknown>): void {
@@ -576,7 +427,7 @@ export function compileDelegationContracts(input: Record<string, unknown>): void
       }
       if (!SLICE_TARGET.test(task)) task = `${task.trimEnd()}\nSlice target: under 5 minutes`;
       if (!WORKER_SUMMARY.test(task)) task = `${task.trimEnd()}\nWorker summary: ${summary}`;
-      record.task = appendDefaultChecklist(task, summary);
+      record.task = task;
     }
     for (const key of ["tasks", "chain", "parallel"] as const) {
       const nested = record[key];
@@ -2001,7 +1852,6 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           };
         }
         applyDelegationSafetyContracts(candidate.lane);
-        addChildTodoGuidance(candidate.lane);
       }
 
       const launched = await Promise.all(prepared.map(async (candidate) => {
@@ -2350,11 +2200,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         `Worker summary: ${summary}`,
       );
       const targetedMessage = SLICE_TARGET.test(canonicalMessage) ? canonicalMessage : `${canonicalMessage}\nSlice target: under 5 minutes`.trimStart();
-      const compiledMessage = appendDefaultChecklist(targetedMessage, summary);
-      const resumedTasks = parseChildChecklist(compiledMessage, CURRENT_CHILD_OWNER);
-      if (!message.includes("<lemonpi-child-checklist>")) {
-        input.message = `${compiledMessage}${childTodoGuidance(CURRENT_CHILD_OWNER, resumedTasks)}`;
-      }
+      const compiledMessage = targetedMessage;
+      input.message = compiledMessage;
       resumeToolCalls.set(event.toolCallId, {
         implementation: declaredExecutionMode(compiledMessage) === "implementation",
         previousRunId,
@@ -2487,7 +2334,6 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         };
       }
       applyDelegationSafetyContracts(input);
-      addChildTodoGuidance(input);
     }
 
     // pi-subagents supports async natively. LemonPi supplies the product-level

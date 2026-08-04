@@ -206,16 +206,6 @@ export interface SubagentLiveActivity {
   headlineKind?: SubagentActivityKind;
   lastActivityAt?: number;
   events: SubagentActivityEvent[];
-  todosUpdatedAt?: number;
-  todos?: Array<{
-    id: number;
-    subject: string;
-    description?: string;
-    activeForm?: string;
-    status: "pending" | "in_progress" | "completed" | "deleted";
-    blockedBy: number[];
-    owner?: string;
-  }>;
 }
 
 export interface SubagentActivityTarget {

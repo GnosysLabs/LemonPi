@@ -4,8 +4,6 @@ import {
   Circle,
   CircleNotch,
   Clock,
-  ListChecks,
-  LockSimple,
   Pause,
   Robot,
   Signpost,
@@ -14,7 +12,7 @@ import {
   Warning,
   X,
 } from "@phosphor-icons/react";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import { describeToolActivity } from "../lib/activity-narration";
@@ -211,153 +209,6 @@ function AgentPromptModal({ agent, prompt, onClose }: { agent: string; prompt: s
   );
 }
 
-type AgentTodoItem = NonNullable<SubagentLiveActivity["todos"]>[number];
-
-function AgentTaskPreview({
-  id,
-  task,
-  anchor,
-  blocked,
-  terminalLabel,
-  onMouseEnter,
-  onMouseLeave,
-}: {
-  id: string;
-  task: AgentTodoItem;
-  anchor: DOMRect;
-  blocked: boolean;
-  terminalLabel?: string;
-  onMouseEnter: () => void;
-  onMouseLeave: () => void;
-}) {
-  const viewportWidth = window.innerWidth;
-  const viewportHeight = window.innerHeight;
-  const width = Math.min(380, viewportWidth - 24);
-  const placeLeft = anchor.left >= width + 22;
-  const left = placeLeft
-    ? Math.max(12, anchor.left - width - 10)
-    : Math.max(12, Math.min(anchor.left, viewportWidth - width - 12));
-  const top = Math.max(12, Math.min(anchor.top, viewportHeight - Math.min(360, viewportHeight - 24) - 12));
-  const status = terminalLabel && task.status === "in_progress"
-    ? terminalLabel
-    : blocked
-      ? "Blocked"
-      : task.status.replace("_", " ");
-  const description = task.description?.trim();
-
-  return createPortal(
-    <aside
-      id={id}
-      className={`agent-task-preview agent-task-preview--${blocked ? "blocked" : task.status}`}
-      role="tooltip"
-      style={{ left, top, width, maxHeight: Math.max(180, Math.min(360, viewportHeight - 24)) }}
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
-    >
-      <header className="agent-task-preview__header">
-        <span>Delegated task</span>
-        <em>{status}</em>
-      </header>
-      <h4>{task.subject}</h4>
-      {description && <p>{description}</p>}
-    </aside>,
-    document.body,
-  );
-}
-
-function AgentTodos({
-  todos,
-  active,
-  terminalStatus,
-  emptyLabel = "Waiting for this agent to outline its work…",
-}: {
-  todos: NonNullable<SubagentLiveActivity["todos"]>;
-  active: boolean;
-  terminalStatus?: SubagentStepStatus["status"];
-  emptyLabel?: string;
-}) {
-  const tooltipPrefix = useId();
-  const hideTimer = useRef<number | undefined>(undefined);
-  const [preview, setPreview] = useState<{ task: AgentTodoItem; anchor: DOMRect; blocked: boolean } | null>(null);
-  useEffect(() => () => {
-    if (hideTimer.current !== undefined) window.clearTimeout(hideTimer.current);
-  }, []);
-  const visible = todos.filter((task) => task.status !== "deleted");
-  if (visible.length === 0 && !active) return null;
-  const completed = new Set(visible.filter((task) => task.status === "completed").map((task) => task.id));
-  const ordered = [...visible].sort((left, right) => {
-    const rank = { in_progress: 0, pending: 1, completed: 2, deleted: 3 };
-    return rank[left.status] - rank[right.status] || left.id - right.id;
-  });
-  const completedCount = completed.size;
-  const interrupted = !active && visible.some((task) => task.status === "in_progress");
-  const terminalLabel = terminalStatus === "failed" || terminalStatus === "rejected"
-    ? "Failed"
-    : terminalStatus === "stopped"
-      ? "Stopped"
-      : interrupted
-        ? "Interrupted"
-        : undefined;
-  const progress = visible.length > 0 ? Math.round((completedCount / visible.length) * 100) : 0;
-  const cancelHide = () => {
-    if (hideTimer.current !== undefined) window.clearTimeout(hideTimer.current);
-    hideTimer.current = undefined;
-  };
-  const hidePreview = () => {
-    cancelHide();
-    hideTimer.current = window.setTimeout(() => setPreview(null), 100);
-  };
-  const showPreview = (task: AgentTodoItem, target: HTMLElement, blocked: boolean) => {
-    cancelHide();
-    setPreview({ task, anchor: target.getBoundingClientRect(), blocked });
-  };
-  return (
-    <section className={`agent-todos${visible.length === 0 ? " agent-todos--empty" : ""}${interrupted ? " agent-todos--interrupted" : ""}`} aria-label="Agent tasks">
-      <header>
-        <span><ListChecks size={15} />Tasks</span>
-        {visible.length > 0 && <small>{terminalLabel ? `${terminalLabel} · ` : ""}{completedCount} of {visible.length}</small>}
-      </header>
-      {visible.length > 0 && <div className="agent-todos__progress" aria-hidden="true"><i style={{ width: `${progress}%` }} /></div>}
-      {visible.length === 0 ? (
-        <div className="agent-todos__empty"><CircleNotch className="spin" size={13} /><span>{emptyLabel}</span></div>
-      ) : <div className="agent-todos__list">
-        {ordered.map((task) => {
-          const blocked = task.status === "pending" && task.blockedBy.some((id) => !completed.has(id));
-          const detailId = `${tooltipPrefix}-task-${task.id}`;
-          return (
-            <div
-              className={`agent-todo agent-todo--${task.status}${blocked ? " agent-todo--blocked" : ""}${interrupted && task.status === "in_progress" ? " agent-todo--interrupted" : ""}`}
-              key={task.id}
-              tabIndex={0}
-              aria-describedby={preview?.task.id === task.id ? detailId : undefined}
-              onMouseEnter={(event) => showPreview(task, event.currentTarget, blocked)}
-              onMouseLeave={hidePreview}
-              onFocus={(event) => showPreview(task, event.currentTarget, blocked)}
-              onBlur={hidePreview}
-            >
-              <span className="agent-todo__status">
-                {task.status === "completed" ? <Check size={11} weight="bold" /> : task.status === "in_progress" ? interrupted ? terminalStatus === "failed" || terminalStatus === "rejected" ? <Warning size={11} /> : <Stop size={10} weight="fill" /> : <CircleNotch className="spin" size={12} /> : blocked ? <LockSimple size={10} /> : <Circle size={10} />}
-              </span>
-              <span><strong>{task.subject}</strong>{(task.activeForm || task.description || (interrupted && task.status === "in_progress")) && <small>{interrupted && task.status === "in_progress" ? `${terminalLabel ?? "Interrupted"} before this task completed` : task.status === "in_progress" ? task.activeForm ?? task.description : task.description}</small>}</span>
-            </div>
-          );
-        })}
-      </div>}
-      {preview && (
-        <AgentTaskPreview
-          id={`${tooltipPrefix}-task-${preview.task.id}`}
-          task={preview.task}
-          anchor={preview.anchor}
-          blocked={preview.blocked}
-          terminalLabel={interrupted ? terminalLabel : undefined}
-          onMouseEnter={cancelHide}
-          onMouseLeave={hidePreview}
-        />
-      )}
-    </section>
-  );
-}
-
 function AgentCard({
   run,
   step,
@@ -387,11 +238,6 @@ function AgentCard({
   const activityEvents = activity?.events ?? [];
   const newestActivityEvents = [...activityEvents].reverse();
   const healthState = step.activityState ?? ((run.steps?.length ?? 0) <= 1 ? run.activityState : undefined);
-  const visibleTodos = activity?.todos?.filter((task) => task.status !== "deleted") ?? [];
-  const attemptStartedAt = step.startedAt ?? run.startedAt;
-  const todoSnapshotFresh = activity?.todosUpdatedAt != null && activity.todosUpdatedAt >= attemptStartedAt;
-  const restoringTodos = active && visibleTodos.length > 0 && !todoSnapshotFresh;
-  const finalizing = active && todoSnapshotFresh && visibleTodos.length > 0 && visibleTodos.every((task) => task.status === "completed");
   const promptText = step.prompt?.trim() || step.description?.trim();
   const promptSummary = step.summary?.trim() || (promptText ? subagentPromptSummary(promptText) : undefined);
   const collapsedStatus = promptSummary
@@ -428,7 +274,7 @@ function AgentCard({
 
   return (
     <>
-    <article className={`agent-card agent-card--${step.status}${finalizing ? " agent-card--finalizing" : ""}${healthState === "needs_attention" ? " agent-card--needs-attention" : ""}`}>
+    <article className={`agent-card agent-card--${step.status}${healthState === "needs_attention" ? " agent-card--needs-attention" : ""}`}>
       <div className="agent-card__header">
         <button
           className="agent-card__summary"
@@ -489,15 +335,6 @@ function AgentCard({
               </div>
               {steerError && <span className="agent-steer__error" role="alert">{steerError}</span>}
             </form>
-          )}
-
-          {(active || (activity?.todos?.length ?? 0) > 0) && (
-            <AgentTodos
-              todos={restoringTodos ? [] : activity?.todos ?? []}
-              active={active}
-              terminalStatus={step.status}
-              emptyLabel={restoringTodos ? "Restoring this agent’s task list…" : undefined}
-            />
           )}
 
           {activityEvents.length > 0 && (
@@ -632,19 +469,8 @@ export function AgentActivityPanel({
             const orderedSteps = (run.steps ?? [])
               .map((step, index) => ({ step, index: step.index ?? index }))
               .sort((left, right) => left.index - right.index);
-            const activeSteps = orderedSteps
-              .filter(({ step }) => isActive(step.status));
-            const finalizing = activeSteps.length > 0 && activeSteps.every(({ step, index }) => {
-              const snapshot = activity[`${run.runId}:${index}`];
-              const attemptStartedAt = step.startedAt ?? run.startedAt;
-              const tasks = snapshot?.todos?.filter((task) => task.status !== "deleted") ?? [];
-              return snapshot?.todosUpdatedAt != null
-                && snapshot.todosUpdatedAt >= attemptStartedAt
-                && tasks.length > 0
-                && tasks.every((task) => task.status === "completed");
-            });
-            const stateLabel = needsAttention ? "needs attention" : finalizing ? "finalizing" : run.state;
-            const stateClass = needsAttention ? "needs-attention" : finalizing ? "finalizing" : run.state;
+            const stateLabel = needsAttention ? "needs attention" : run.state;
+            const stateClass = needsAttention ? "needs-attention" : run.state;
             const displayMode = (run.steps?.length ?? 0) <= 1 ? "single" : run.mode;
             return <section className="agent-run" key={run.runId}>
               <div className="agent-run__header">

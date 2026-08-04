@@ -120,11 +120,7 @@ impl PiManager {
     /// Submits one server-constructed command only to the exact trusted active Pi generation.
     /// The registry check cannot start or select a process, and the opaque error intentionally
     /// carries no project path, process identity, or private Pi command ID.
-    pub(crate) async fn remote_submit(
-        &self,
-        project: &Path,
-        command: &Value,
-    ) -> Result<(), ()> {
+    pub(crate) async fn remote_submit(&self, project: &Path, command: &Value) -> Result<(), ()> {
         let payload = encode_validated_pi_command(command).map_err(|_| ())?;
         let stdin = {
             let registry = self.registry.lock().await;
@@ -1315,7 +1311,7 @@ async fn start_pi(
     ensure_required_pi_packages(&executable).await?;
     let agent_dir = pi_agent_dir()?;
     ensure_auto_compaction_default(&agent_dir)?;
-    ensure_subagent_todo_access(&agent_dir, &cwd_path, trusted, &child_todo_bridge)?;
+    remove_subagent_todo_access(&agent_dir, &cwd_path, trusted, &child_todo_bridge)?;
     let mut command = pi_command(&executable)?;
     command
         .args(["--mode", "rpc", project_trust_arg(trusted)])
@@ -2134,7 +2130,6 @@ struct DiscoveredAgent {
     definition_path: Option<PathBuf>,
     base_model: Option<String>,
     base_thinking: Option<String>,
-    base_tools: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -2306,7 +2301,6 @@ fn read_agent_definition(path: &Path, source: &'static str) -> Option<Discovered
     let mut description = None;
     let mut model = None;
     let mut thinking = None;
-    let mut tools = None;
     for line in lines {
         if line.trim() == "---" {
             break;
@@ -2320,16 +2314,6 @@ fn read_agent_definition(path: &Path, source: &'static str) -> Option<Discovered
             "description" if !value.is_empty() => description = Some(value),
             "model" if !value.is_empty() => model = Some(value),
             "thinking" if !value.is_empty() && value != "false" => thinking = Some(value),
-            "tools" => {
-                let value = value.trim_matches(|character| character == '[' || character == ']');
-                tools = Some(
-                    value
-                        .split(',')
-                        .map(clean_frontmatter_value)
-                        .filter(|tool| !tool.is_empty())
-                        .collect(),
-                );
-            }
             _ => {}
         }
     }
@@ -2341,7 +2325,6 @@ fn read_agent_definition(path: &Path, source: &'static str) -> Option<Discovered
         definition_path: Some(path.to_path_buf()),
         base_model: model,
         base_thinking: thinking,
-        base_tools: tools,
     })
 }
 
@@ -2364,72 +2347,74 @@ fn setting_string_list(value: Option<&Value>) -> Vec<String> {
     }
 }
 
-fn ensure_agent_todo_overrides(
+fn remove_agent_todo_overrides(
     settings_path: &Path,
-    agents: &HashMap<String, DiscoveredAgent>,
     todo_extension_path: &str,
     child_todo_bridge_path: &str,
 ) -> Result<(), String> {
-    if agents.is_empty() {
-        return Ok(());
-    }
     let mut settings = read_settings_object(settings_path)?;
-    let subagents = settings
-        .entry("subagents".to_string())
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .ok_or_else(|| "Settings field 'subagents' must be an object.".to_string())?;
-    let overrides = subagents
-        .entry("agentOverrides".to_string())
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .ok_or_else(|| {
-            "Settings field 'subagents.agentOverrides' must be an object.".to_string()
-        })?;
+    let Some(subagents) = settings.get_mut("subagents").and_then(Value::as_object_mut) else {
+        return Ok(());
+    };
+    let Some(overrides) = subagents
+        .get_mut("agentOverrides")
+        .and_then(Value::as_object_mut)
+    else {
+        return Ok(());
+    };
     let mut changed = false;
 
-    for agent in agents.values() {
-        let entry = overrides
-            .entry(agent.name.clone())
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-            .ok_or_else(|| format!("Override for '{}' must be an object.", agent.name))?;
-
-        if entry.contains_key("tools") || agent.base_tools.is_some() {
-            let mut tools = if entry.contains_key("tools") {
-                setting_string_list(entry.get("tools"))
-            } else {
-                agent.base_tools.clone().unwrap_or_default()
-            };
-            // Delegated sessions use the owner-scoped bridge. Leaving the
-            // ambient Main Pi tool active would expose a second empty store.
-            tools.retain(|tool| tool != "todo");
-            if !tools.iter().any(|tool| tool == "child_todo") {
-                tools.push("child_todo".to_string());
-            }
-            let next_tools = Value::Array(tools.into_iter().map(Value::String).collect());
-            if entry.get("tools") != Some(&next_tools) {
-                entry.insert("tools".to_string(), next_tools);
+    for entry in overrides.values_mut().filter_map(Value::as_object_mut) {
+        if entry.contains_key("tools") {
+            let current = setting_string_list(entry.get("tools"));
+            let tools = current
+                .iter()
+                .filter(|tool| tool.as_str() != "child_todo")
+                .cloned()
+                .collect::<Vec<_>>();
+            if tools != current {
+                if tools.is_empty() {
+                    entry.remove("tools");
+                } else {
+                    entry.insert(
+                        "tools".to_string(),
+                        Value::Array(tools.into_iter().map(Value::String).collect()),
+                    );
+                }
                 changed = true;
             }
         }
 
-        let mut extensions = setting_string_list(entry.get("subagentOnlyExtensions"));
-        // Older LemonPi builds loaded rpiv-todo and the bridge as independent
-        // extensions. Pi isolates those module graphs, so the bridge could not
-        // seed the provider's Map. The bridge now owns provider registration.
-        extensions.retain(|extension| extension != todo_extension_path);
-        if !extensions
-            .iter()
-            .any(|extension| extension == child_todo_bridge_path)
-        {
-            extensions.push(child_todo_bridge_path.to_string());
+        if entry.contains_key("subagentOnlyExtensions") {
+            let current = setting_string_list(entry.get("subagentOnlyExtensions"));
+            let extensions = current
+                .iter()
+                .filter(|extension| {
+                    extension.as_str() != todo_extension_path
+                        && extension.as_str() != child_todo_bridge_path
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if extensions != current {
+                if extensions.is_empty() {
+                    entry.remove("subagentOnlyExtensions");
+                } else {
+                    entry.insert(
+                        "subagentOnlyExtensions".to_string(),
+                        Value::Array(extensions.into_iter().map(Value::String).collect()),
+                    );
+                }
+                changed = true;
+            }
         }
-        let next_extensions = Value::Array(extensions.into_iter().map(Value::String).collect());
-        if entry.get("subagentOnlyExtensions") != Some(&next_extensions) {
-            entry.insert("subagentOnlyExtensions".to_string(), next_extensions);
-            changed = true;
-        }
+    }
+
+    overrides.retain(|_, value| value.as_object().map_or(true, |entry| !entry.is_empty()));
+    if overrides.is_empty() {
+        subagents.remove("agentOverrides");
+    }
+    if subagents.is_empty() {
+        settings.remove("subagents");
     }
 
     if changed {
@@ -2438,48 +2423,24 @@ fn ensure_agent_todo_overrides(
     Ok(())
 }
 
-fn ensure_subagent_todo_access(
+fn remove_subagent_todo_access(
     agent_dir: &Path,
     project: &Path,
     trusted: bool,
     child_todo_bridge: &Path,
 ) -> Result<(), String> {
     let todo_extension = agent_dir.join("npm/node_modules/@juicesharp/rpiv-todo/index.ts");
-    if !todo_extension.is_file() {
-        return Err(
-            "LemonPi installed rpiv-todo, but its child extension entry point is unavailable."
-                .to_string(),
-        );
-    }
-    if !child_todo_bridge.is_file() {
-        return Err("LemonPi's child todo bridge is unavailable.".to_string());
-    }
-
-    let user_settings_path = agent_dir.join("settings.json");
-    let mut user_agents = HashMap::new();
-    collect_agent_definitions(
-        &agent_dir.join("npm/node_modules/pi-subagents/agents"),
-        "builtin",
-        &mut user_agents,
-    );
-    collect_agent_definitions(&agent_dir.join("agents"), "user", &mut user_agents);
     let todo_extension_path = path_for_frontend(&todo_extension);
     let child_todo_bridge_path = path_for_frontend(child_todo_bridge);
-    ensure_agent_todo_overrides(
-        &user_settings_path,
-        &user_agents,
+    remove_agent_todo_overrides(
+        &agent_dir.join("settings.json"),
         &todo_extension_path,
         &child_todo_bridge_path,
     )?;
 
     if trusted {
-        let project_settings = project_settings_path(project);
-        let mut project_agents = HashMap::new();
-        collect_agent_definitions(&project.join(".agents"), "project", &mut project_agents);
-        collect_agent_definitions(&project.join(".pi/agents"), "project", &mut project_agents);
-        ensure_agent_todo_overrides(
-            &project_settings,
-            &project_agents,
+        remove_agent_todo_overrides(
+            &project_settings_path(project),
             &todo_extension_path,
             &child_todo_bridge_path,
         )?;
@@ -2569,7 +2530,6 @@ fn build_subagent_settings_snapshot(
                         definition_path: None,
                         base_model: None,
                         base_thinking: None,
-                        base_tools: None,
                     });
             }
         }
@@ -3728,34 +3688,18 @@ mod tests {
     }
 
     #[test]
-    fn builtin_and_custom_subagents_receive_todo_without_losing_existing_overrides() {
+    fn subagent_todo_cleanup_preserves_unrelated_overrides() {
         let root = env::temp_dir().join(format!(
-            "lemonpi-subagent-todo-access-{}",
+            "lemonpi-subagent-todo-cleanup-{}",
             std::process::id()
         ));
-        let agents = root.join("npm/node_modules/pi-subagents/agents");
-        let user_agents = root.join("agents");
         let project = root.join("project");
         let todo = root.join("npm/node_modules/@juicesharp/rpiv-todo");
         let bridge = root.join("child-todo-bridge.ts");
-        fs::create_dir_all(&agents).expect("create builtin fixture directory");
-        fs::create_dir_all(&user_agents).expect("create user agent fixture directory");
         fs::create_dir_all(&project).expect("create project fixture directory");
         fs::create_dir_all(&todo).expect("create todo fixture directory");
-        fs::write(
-            agents.join("worker.md"),
-            "---\nname: worker\ndescription: Test worker\ntools: read, grep, write\n---\nWorker\n",
-        )
-        .expect("write builtin agent fixture");
-        fs::write(
-            user_agents.join("designer.md"),
-            "---\nname: designer\ndescription: Test designer\ntools: read, write\n---\nDesigner\n",
-        )
-        .expect("write custom agent fixture");
-        fs::write(todo.join("index.ts"), "export default () => {};\n")
-            .expect("write todo extension fixture");
-        fs::write(&bridge, "export default () => {};\n").expect("write child todo bridge fixture");
         let legacy_todo_path = path_for_frontend(&todo.join("index.ts"));
+        let bridge_path = path_for_frontend(&bridge);
         write_settings_object(
             &root.join("settings.json"),
             &serde_json::Map::from_iter([
@@ -3765,18 +3709,24 @@ mod tests {
                 ),
                 (
                     "subagents".to_string(),
-                    json!({ "agentOverrides": { "worker": {
-                        "model": "example/model",
-                        "tools": ["read", "bash"],
-                        "subagentOnlyExtensions": ["/keep-this-extension.ts", legacy_todo_path]
-                    } } }),
+                    json!({ "agentOverrides": {
+                        "worker": {
+                            "model": "example/model",
+                            "tools": ["read", "bash", "child_todo"],
+                            "subagentOnlyExtensions": ["/keep-this-extension.ts", legacy_todo_path, bridge_path]
+                        },
+                        "designer": {
+                            "tools": ["child_todo"],
+                            "subagentOnlyExtensions": [bridge_path]
+                        }
+                    } }),
                 ),
             ]),
         )
         .expect("write settings fixture");
 
-        ensure_subagent_todo_access(&root, &project, true, &bridge)
-            .expect("grant subagent todo access");
+        remove_subagent_todo_access(&root, &project, true, &bridge)
+            .expect("remove subagent todo access");
         let settings = read_settings_object(&root.join("settings.json")).expect("read settings");
         assert_eq!(
             settings["packages"],
@@ -3784,17 +3734,14 @@ mod tests {
         );
         let worker = &settings["subagents"]["agentOverrides"]["worker"];
         assert_eq!(worker["model"], json!("example/model"));
-        assert_eq!(worker["tools"], json!(["read", "bash", "child_todo"]));
+        assert_eq!(worker["tools"], json!(["read", "bash"]));
         assert_eq!(
             worker["subagentOnlyExtensions"],
-            json!(["/keep-this-extension.ts", path_for_frontend(&bridge)])
+            json!(["/keep-this-extension.ts"])
         );
-        let designer = &settings["subagents"]["agentOverrides"]["designer"];
-        assert_eq!(designer["tools"], json!(["read", "write", "child_todo"]));
-        assert_eq!(
-            designer["subagentOnlyExtensions"],
-            json!([path_for_frontend(&bridge)])
-        );
+        assert!(settings["subagents"]["agentOverrides"]
+            .get("designer")
+            .is_none());
         fs::remove_dir_all(root).expect("remove todo access fixture");
     }
 

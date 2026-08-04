@@ -40,7 +40,7 @@ compileDelegationContracts(writerLaunch);
 assert.match(writerLaunch.task, /^Add the compacting state/);
 assert.match(writerLaunch.task, /^Execution mode: implementation$/m);
 assert.match(writerLaunch.task, /^Chunk outcome:/m);
-assert.match(writerLaunch.task, /^Child checklist:/m);
+assert.doesNotMatch(writerLaunch.task, /^Child checklist:/m);
 assert.match(writerLaunch.task, /^Worker summary: Implement compact status state$/m);
 assert.equal(writerLaunch.summary, undefined);
 assert.equal(delegatesImplementation(writerLaunch), true);
