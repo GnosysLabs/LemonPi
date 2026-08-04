@@ -16,14 +16,13 @@ use super::{
     identity::HostIdentity,
     policy::allows_peer,
     projects::{InternalProjectBinding, ProjectCatalog, RemoteProjectSummary, SessionSyncInput},
-    restrict_file_permissions,
     protocol::{
         Capability, Envelope, EventEnvelope as WireEventEnvelope, EventKind as WireEventKind,
         EventPayload, Health, Hello, Limits, MessagesResponse, PairRequest, PairResponse,
         PairedDevice, ProjectSummary, ProjectedPiEvent, ProtocolError, RpcAccepted, RpcRequest,
         SafeMessage, SessionState, SessionSummary, SessionsResponse, StateResponse,
     },
-    RemoteError, RemoteResult,
+    restrict_file_permissions, RemoteError, RemoteResult,
 };
 use crate::{list_pi_sessions_sync, session_directory, PiManager, PiSessionSummary};
 use axum::{
@@ -173,6 +172,7 @@ struct RpcResource {
 struct CreatedPiSession {
     path: PathBuf,
     command_path: String,
+    metadata: fs::Metadata,
 }
 
 enum ValidatedRpcCommand {
@@ -1622,12 +1622,12 @@ async fn rpc(
         ValidatedRpcCommand::NewSession => None,
         ValidatedRpcCommand::Prompt(text) => Some(serde_json::json!({
             "type": "prompt",
-            "id": private_id,
+            "id": private_id.clone(),
             "message": text,
         })),
         ValidatedRpcCommand::Abort => Some(serde_json::json!({
             "type": "abort",
-            "id": private_id,
+            "id": private_id.clone(),
         })),
         ValidatedRpcCommand::SwitchSession => {
             let Some(session_path) = resource.session_path.as_deref().and_then(Path::to_str) else {
@@ -1635,7 +1635,7 @@ async fn rpc(
             };
             Some(serde_json::json!({
                 "type": "switch_session",
-                "id": private_id,
+                "id": private_id.clone(),
                 "sessionPath": session_path,
             }))
         }
@@ -1703,7 +1703,9 @@ async fn rpc(
             "sessionPath": created.command_path,
         }),
         (Some(command), None) => command,
-        (None, None) => return rpc_resource_error(&context.request_id, RpcResourceError::HostUnavailable),
+        (None, None) => {
+            return rpc_resource_error(&context.request_id, RpcResourceError::HostUnavailable)
+        }
     };
 
     if state
@@ -1830,6 +1832,86 @@ fn revalidate_rpc_resource(
             }
         }
         _ => Err(RpcResourceError::HostUnavailable),
+    }
+}
+
+/// Creates the only filesystem artifact allowed by the remote new-session command. Both its name
+/// and its Pi header ID are server-generated and remain private to this module and Pi stdin.
+fn create_empty_pi_v3_session(project: &Path) -> Result<CreatedPiSession, ()> {
+    let canonical_project = project.canonicalize().map_err(|_| ())?;
+    if canonical_project != project {
+        return Err(());
+    }
+    let cwd = canonical_project.to_str().ok_or(())?;
+    let directory = session_directory(&canonical_project).map_err(|_| ())?;
+    fs::create_dir_all(&directory).map_err(|_| ())?;
+
+    // A random destination plus create_new means a collision can never overwrite a preexisting
+    // Pi session. Retry only the astronomically unlikely UUID collision without accepting input.
+    for _ in 0..4 {
+        let private_session_id = Uuid::new_v4().to_string();
+        let path = directory.join(format!("{private_session_id}.jsonl"));
+        let command_path = path.to_str().ok_or(())?.to_string();
+        let mut header = serde_json::to_vec(&serde_json::json!({
+            "type": "session",
+            "version": 3,
+            "id": private_session_id,
+            "timestamp": rfc3339(unix_seconds()),
+            "cwd": cwd,
+        }))
+        .map_err(|_| ())?;
+        header.push(b'\n');
+
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = match options.open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(()),
+        };
+        let write_result = (|| -> Result<(), ()> {
+            file.write_all(&header).map_err(|_| ())?;
+            restrict_file_permissions(&path).map_err(|_| ())?;
+            file.sync_all().map_err(|_| ())?;
+            Ok(())
+        })();
+        if write_result.is_err() {
+            drop(file);
+            let _ = fs::remove_file(&path);
+            return Err(());
+        }
+        let metadata = match file.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                drop(file);
+                let _ = fs::remove_file(&path);
+                return Err(());
+            }
+        };
+        drop(file);
+        return Ok(CreatedPiSession {
+            path,
+            command_path,
+            metadata,
+        });
+    }
+
+    Err(())
+}
+
+/// Cleanup is limited to the exact inode/file identity created above. A stale request never
+/// removes a different or preexisting session merely because it happens to share a pathname.
+fn remove_created_pi_session(created: &CreatedPiSession) {
+    let Ok(current_metadata) = fs::metadata(&created.path) else {
+        return;
+    };
+    if crate::same_session_file(&created.metadata, &current_metadata) {
+        let _ = fs::remove_file(&created.path);
     }
 }
 
@@ -2151,8 +2233,12 @@ fn project_session(
         .name
         .as_deref()
         .and_then(|name| safe_session_text(name, &secrets, 160));
-    let first_message_preview = safe_session_text(&session.first_message, &secrets, 280)
-        .unwrap_or_else(|| "New session".to_string());
+    let first_message_preview = if message_count == 0 {
+        "New session".to_string()
+    } else {
+        safe_session_text(&session.first_message, &secrets, 280)
+            .unwrap_or_else(|| "New session".to_string())
+    };
     let last_final_reply_at = session
         .last_final_reply
         .as_ref()
