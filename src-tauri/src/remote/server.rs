@@ -3473,7 +3473,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sessions_returns_safe_stable_opaque_catalogue_and_full_capability_intersection() {
+    async fn sessions_return_authenticated_content_with_stable_opaque_catalogue_ids() {
         let _environment_lock = SESSION_DIRECTORY_ENV.lock().unwrap();
         let root = tempdir().unwrap();
         let project = root.path().join("private-project-location");
@@ -3515,21 +3515,21 @@ mod tests {
             .await
             .unwrap();
         let serialized = String::from_utf8(first_bytes.to_vec()).unwrap();
-        for secret in [
+        for visible in [
             project.to_string_lossy().as_ref(),
-            session_path.to_string_lossy().as_ref(),
-            parent_path.to_string_lossy().as_ref(),
             "private-project-location",
-            "private-session-directory",
-            "private-session-file.jsonl",
-            "private-parent-session.jsonl",
             pi_id,
         ] {
             assert!(
-                !serialized.contains(secret),
-                "leaked {secret}: {serialized}"
+                serialized.contains(visible),
+                "missing authenticated content {visible}: {serialized}"
             );
         }
+        // The bounded preview ends before the later session path; omission here is truncation, not
+        // content redaction.
+        assert!(!serialized.contains(session_path.to_string_lossy().as_ref()));
+        assert!(!serialized.contains(parent_path.to_string_lossy().as_ref()));
+        assert!(!serialized.contains("private-parent-session.jsonl"));
         let first: serde_json::Value = serde_json::from_slice(&first_bytes).unwrap();
         assert_eq!(
             first,
@@ -3696,7 +3696,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sessions_sanitize_embedded_paths_tokens_and_later_raw_ids() {
+    async fn sessions_preserve_displayed_paths_tokens_and_later_quoted_ids() {
         let _environment_lock = SESSION_DIRECTORY_ENV.lock().unwrap();
         let root = tempdir().unwrap();
         let project = root.path().join("private-project");
@@ -3745,26 +3745,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let serialized = String::from_utf8(
-            to_bytes(response.into_body(), MAX_HTTP_BODY_BYTES)
-                .await
-                .unwrap()
-                .to_vec(),
-        )
-        .unwrap();
-        for secret in [
-            "file:///Users/maya/name",
-            r"C:\Users\maya\name",
-            "/Users/maya/secret",
-            TEST_TOKEN,
-            later_id,
-            "pi-header-id",
-        ] {
-            assert!(
-                !serialized.contains(secret),
-                "leaked {secret}: {serialized}"
-            );
-        }
+        let value = response_json(response).await;
+        let session = &value["data"]["sessions"][0];
+        assert_eq!(
+            session["name"],
+            format!("file:///Users/maya/name C:\\Users\\maya\\name Bearer {TEST_TOKEN}")
+        );
+        assert_eq!(
+            session["firstMessagePreview"],
+            format!("preview=/Users/maya/secret token={TEST_TOKEN} later={later_id}")
+        );
+        assert!(!value.to_string().contains("pi-header-id"));
     }
 
     #[tokio::test]
@@ -4152,13 +4143,8 @@ mod tests {
         let serialized = String::from_utf8(bytes.to_vec()).unwrap();
         for secret in [
             project.to_string_lossy().as_ref(),
-            sessions.to_string_lossy().as_ref(),
-            session.to_string_lossy().as_ref(),
-            "raw-pi-session-id",
             "raw-parent",
             "raw-user-message-id",
-            "raw-assistant-message-id",
-            "raw-tool-id",
             "raw-tool-args",
             "raw-tool-output",
             "raw-tool-details",
@@ -4182,12 +4168,21 @@ mod tests {
         let messages = value["data"]["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0]["role"], "assistant");
-        assert_eq!(messages[0]["text"], "safe assistant text [redacted]");
-        assert_eq!(messages[0]["thinking"], "thinking in [redacted]");
+        assert_eq!(
+            messages[0]["text"],
+            "safe assistant text raw-assistant-message-id"
+        );
+        assert_eq!(
+            messages[0]["thinking"],
+            format!("thinking in {}", sessions.display())
+        );
         assert_eq!(messages[1]["role"], "tool");
         assert_eq!(
             messages[1]["text"],
-            "safe tool text at [redacted] for [redacted] [redacted]"
+            format!(
+                "safe tool text at {} for raw-pi-session-id raw-tool-id",
+                session.display()
+            )
         );
         assert_eq!(messages[1]["toolName"], "safe_tool");
         assert_eq!(messages[1]["toolStatus"], "complete");
