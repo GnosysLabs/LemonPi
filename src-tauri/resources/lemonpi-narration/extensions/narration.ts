@@ -66,7 +66,7 @@ const IndependentDispatchSchema = {
 const GitManagerSchema = {
   type: "object",
   properties: {
-    action: { type: "string", enum: ["inspect", "checkpoint", "commit", "apply_patch", "create_worktree", "remove_worktree", "cherry_pick"] },
+    action: { type: "string", enum: ["inspect", "checkpoint", "commit", "create_branch", "switch_branch", "apply_patch", "create_worktree", "remove_worktree", "cherry_pick"] },
     cwd: { type: "string" },
     paths: { type: "array", items: { type: "string" } },
     missionPaths: { type: "array", items: { type: "string" } },
@@ -1694,22 +1694,42 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       if (statusResult.code !== 0) return { content: [{ type: "text", text: statusResult.stderr || "Could not inspect Git status." }], isError: true };
       const statusLines = statusResult.stdout.split(/\r?\n/).filter(Boolean);
       const classified = classifyDirtyTree(statusLines, Array.isArray(params.missionPaths) ? params.missionPaths.map(String) : []);
-      if (action === "inspect") {
-        const branch = await git(["branch", "--show-current"], root);
-        const worktrees = await git(["worktree", "list", "--porcelain"], root);
-        return {
-          content: [{ type: "text", text: `Repository: ${root}\nHEAD: ${head}\nBranch: ${branch.stdout.trim() || "detached"}\nDirty paths: ${classified.length}\n${classified.map((entry) => `- ${entry.status} ${entry.path} — ${entry.classification}: ${entry.reason}`).join("\n") || "- clean"}\n\nManaged worktrees:\n${worktrees.stdout.trim() || "none"}` }],
-          details: { action, root, head, branch: branch.stdout.trim(), paths: classified },
-        };
-      }
-
       const safePath = (value: string) => value.length > 0
         && !value.startsWith("/")
         && !/^[A-Za-z]:[\\/]/.test(value)
         && !value.split(/[\\/]/).some((segment) => segment === "" || segment === "." || segment === "..");
       const paths = Array.isArray(params.paths) ? params.paths.map(String) : [];
-      const branch = typeof params.branch === "string" ? params.branch.trim() : "";
+      const branchName = typeof params.branch === "string" ? params.branch.trim() : "";
+      if (action === "inspect") {
+        if (paths.some((path) => !safePath(path))) return { content: [{ type: "text", text: "Inspection paths must be exact repository-relative paths." }], isError: true };
+        const [branch, upstream, branches, commits, unstaged, stagedDiff, worktrees, ignored] = await Promise.all([
+          git(["branch", "--show-current"], root),
+          git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], root),
+          git(["branch", "--list", "--verbose", "--no-abbrev"], root),
+          git(["log", "-5", "--oneline", "--decorate"], root),
+          git(["diff", "--stat", "HEAD", "--", ...(paths.length ? paths : ["."])], root),
+          git(["diff", "--cached", "--stat", "--", ...(paths.length ? paths : ["."])], root),
+          git(["worktree", "list", "--porcelain"], root),
+          paths.length ? git(["check-ignore", "-v", "--", ...paths], root) : Promise.resolve({ code: 1, stdout: "", stderr: "" }),
+        ]);
+        return {
+          content: [{ type: "text", text: `Repository: ${root}\nHEAD: ${head}\nBranch: ${branch.stdout.trim() || "detached"}\nUpstream: ${upstream.code === 0 ? upstream.stdout.trim() : "none"}\nDirty paths: ${classified.length}\n${classified.map((entry) => `- ${entry.status} ${entry.path} — ${entry.classification}: ${entry.reason}`).join("\n") || "- clean"}\n\nUnstaged diff:\n${unstaged.stdout.trim() || "none"}\n\nStaged diff:\n${stagedDiff.stdout.trim() || "none"}\n\nRecent commits:\n${commits.stdout.trim() || "none"}\n\nLocal branches:\n${branches.stdout.trim() || "none"}\n\nManaged worktrees:\n${worktrees.stdout.trim() || "none"}${paths.length ? `\n\nIgnored path evidence:\n${ignored.stdout.trim() || "none"}` : ""}`.slice(0, 24_000) }],
+          details: { action, root, head, branch: branch.stdout.trim(), upstream: upstream.code === 0 ? upstream.stdout.trim() : undefined, paths: classified },
+        };
+      }
+
       const message = typeof params.message === "string" ? params.message.trim() : "";
+      if (["create_branch", "switch_branch"].includes(action)) {
+        if (statusLines.length) return { content: [{ type: "text", text: "Mission branch changes require a clean recoverable checkout." }], isError: true };
+        if (!/^codex\/mission-[a-z0-9][a-z0-9._/-]{0,100}$/i.test(branchName)) return { content: [{ type: "text", text: "Mission branches must use codex/mission-* naming." }], isError: true };
+        const exists = await git(["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`], root);
+        if (action === "create_branch" && exists.code === 0) return { content: [{ type: "text", text: `Local mission branch ${branchName} already exists.` }], isError: true };
+        if (action === "switch_branch" && exists.code !== 0) return { content: [{ type: "text", text: `Local mission branch ${branchName} does not exist.` }], isError: true };
+        const switched = await git(action === "create_branch" ? ["switch", "-c", branchName] : ["switch", branchName], root);
+        return switched.code === 0
+          ? { content: [{ type: "text", text: `${action === "create_branch" ? "Created and switched to" : "Switched to"} local mission branch ${branchName}.` }], details: { action, root, branch: branchName } }
+          : { content: [{ type: "text", text: switched.stderr || "Could not update the local mission branch." }], isError: true };
+      }
       if (["checkpoint", "commit"].includes(action)) {
         if (!paths.length || paths.some((path) => !safePath(path))) return { content: [{ type: "text", text: "Checkpoint and commit require exact repository-relative paths." }], isError: true };
         const selected = classified.filter((entry) => paths.some((path) => entry.path === path || entry.path.startsWith(`${path}/`)));
@@ -1721,12 +1741,20 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
             details: { action, requiresClarification: true, blocker },
           };
         }
+        const nonSource = selected.find((entry) => entry.classification === "generated" || entry.classification === "agent-artifact");
+        if (nonSource) {
+          return {
+            content: [{ type: "text", text: `Refusing to commit ${nonSource.path}: it is classified as ${nonSource.classification}. Preserve it outside Git if needed and delegate an exact .gitignore correction for reproducible output.` }],
+            isError: true,
+            details: { action, nonSource },
+          };
+        }
         if (action === "checkpoint") {
-          if (!/^codex\/(?:recovery|mission)-[a-z0-9][a-z0-9._/-]{0,100}$/i.test(branch)) return { content: [{ type: "text", text: "Recovery branches must use codex/recovery-* or codex/mission-* naming." }], isError: true };
+          if (!/^codex\/(?:recovery|mission)-[a-z0-9][a-z0-9._/-]{0,100}$/i.test(branchName)) return { content: [{ type: "text", text: "Recovery branches must use codex/recovery-* or codex/mission-* naming." }], isError: true };
           const current = await git(["branch", "--show-current"], root);
-          if (current.stdout.trim() !== branch) {
-            const exists = await git(["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], root);
-            const switched = await git(exists.code === 0 ? ["switch", branch] : ["switch", "-c", branch], root);
+          if (current.stdout.trim() !== branchName) {
+            const exists = await git(["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`], root);
+            const switched = await git(exists.code === 0 ? ["switch", branchName] : ["switch", "-c", branchName], root);
             if (switched.code !== 0) return { content: [{ type: "text", text: switched.stderr || "Could not create the recovery branch." }], isError: true };
           }
         }
@@ -1763,12 +1791,12 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       if (action === "create_worktree") {
         if (statusLines.length) return { content: [{ type: "text", text: "Create a recoverable checkpoint before adding managed worktrees; the primary checkout is still dirty." }], isError: true };
         const worktreePath = typeof params.worktreePath === "string" ? params.worktreePath : "";
-        if (!worktreePath.replace(/\\/g, "/").includes("/lemonpi-worktrees/") || !/^codex\/mission-[a-z0-9][a-z0-9._/-]{0,100}$/i.test(branch)) {
+        if (!worktreePath.replace(/\\/g, "/").includes("/lemonpi-worktrees/") || !/^codex\/mission-[a-z0-9][a-z0-9._/-]{0,100}$/i.test(branchName)) {
           return { content: [{ type: "text", text: "Managed worktrees require a dedicated lemonpi-worktrees path and codex/mission-* branch." }], isError: true };
         }
-        const created = await git(["worktree", "add", "-b", branch, worktreePath, head], root);
+        const created = await git(["worktree", "add", "-b", branchName, worktreePath, head], root);
         return created.code === 0
-          ? { content: [{ type: "text", text: `Managed worktree created at ${worktreePath} from ${head}.` }], details: { action, root, head, branch, worktreePath } }
+          ? { content: [{ type: "text", text: `Managed worktree created at ${worktreePath} from ${head}.` }], details: { action, root, head, branch: branchName, worktreePath } }
           : { content: [{ type: "text", text: created.stderr || "Could not create the managed worktree." }], isError: true };
       }
 

@@ -83,6 +83,8 @@ dirty = classifyDirtyTree(gitRaw(repo, "status", "--porcelain=v1", "--untracked-
 assert.equal(checkpointBlocker(dirty)?.classification, "suspicious");
 assert.equal(git(repo, "status", "--porcelain=v1", "--untracked-files=all").includes(".env"), true);
 rmSync(join(repo, ".env"));
+const generated = classifyDirtyTree(["?? dist/bundle.js"]);
+assert.equal(generated[0]?.classification, "generated");
 
 const disjoint = scheduleOwnedLanes([
   { id: "contracts", paths: ["src/contracts"] },
@@ -203,6 +205,7 @@ writeFileSync(join(repo, "logical.txt"), `${contentHash(JSON.stringify(currentMe
 commitAll(repo, "feat: logical final integration");
 assert.equal(git(repo, "status", "--porcelain=v1"), "");
 assert.doesNotMatch(readFileSync(new URL("../src-tauri/resources/lemonpi-narration/extensions/narration.ts", import.meta.url), "utf8"), /git\s+reset\s+--hard|git\s+clean\s+-|force-push/);
+assert.match(readFileSync(new URL("../src-tauri/resources/lemonpi-narration/extensions/narration.ts", import.meta.url), "utf8"), /Refusing to commit.*classified as/);
 
 console.log(JSON.stringify({
   policyVersion: CURRENT_ORCHESTRATION_POLICY_VERSION,

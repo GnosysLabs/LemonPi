@@ -12,7 +12,8 @@ The active policy has no arbitrary worker quota or concurrency ceiling. Independ
 
 `lemonpi_git` is Main Pi's only project-mutation path. It supports:
 
-- inspecting and classifying every dirty path;
+- inspecting status, diffs, upstream, branches, commits, ignored-path evidence, worktrees, and classifying every dirty path;
+- creating or switching clean local `codex/mission-*` branches;
 - checkpointing safe intentional work on a local `codex/recovery-*` branch;
 - exact-path commits with staged-path verification and `git diff --check`;
 - managed mission worktree creation/removal;
