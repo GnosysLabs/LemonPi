@@ -145,10 +145,66 @@ export interface ResumeRequest {
   limits?: { maxTranscriptBytes?: number; maxTokens?: number; maxSlices?: number };
 }
 
+export function workerContextLimits(environment: Record<string, string | undefined> = {}): {
+  maxTranscriptBytes: number;
+  maxTokens: number;
+  maxSlices: number;
+} {
+  const positiveInteger = (name: string, fallback: number) => {
+    const parsed = Number(environment[name]);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+  };
+  return {
+    maxTranscriptBytes: positiveInteger("LEMONPI_WORKER_MAX_TRANSCRIPT_BYTES", 2_000_000),
+    maxTokens: positiveInteger("LEMONPI_WORKER_MAX_TOKENS", 120_000),
+    maxSlices: positiveInteger("LEMONPI_WORKER_MAX_SLICES", 2),
+  };
+}
+
+export function workerStatusMetrics(value: unknown): { tokens: number; transcriptPaths: string[] } {
+  let tokens = 0;
+  const transcriptPaths = new Set<string>();
+  const seen = new Set<object>();
+  const visit = (candidate: unknown, depth: number, parentKey = "") => {
+    if (depth > 8 || !candidate || typeof candidate !== "object") return;
+    if (seen.has(candidate as object)) return;
+    seen.add(candidate as object);
+    if (Array.isArray(candidate)) {
+      candidate.slice(0, 256).forEach((entry) => visit(entry, depth + 1, parentKey));
+      return;
+    }
+    for (const [key, entry] of Object.entries(candidate as Record<string, unknown>).slice(0, 256)) {
+      if ((key === "sessionFile" || key === "transcriptPath") && typeof entry === "string" && entry.trim()) {
+        transcriptPaths.add(entry.trim());
+      }
+      if ((key === "totalTokens" || key === "tokens" || (key === "total" && /tokens?|usage/i.test(parentKey)))
+        && typeof entry === "number" && Number.isFinite(entry)) {
+        tokens = Math.max(tokens, Math.floor(entry));
+      }
+      visit(entry, depth + 1, key);
+    }
+  };
+  visit(value, 0);
+  let text = typeof value === "string" ? value : "";
+  if (!text) {
+    try {
+      text = JSON.stringify(value) ?? "";
+    } catch {
+      text = "";
+    }
+  }
+  for (const match of text.matchAll(/([\d,.]+)\s*(?:tok|tokens?)\b/gi)) {
+    const parsed = Number(match[1]!.replace(/,/g, ""));
+    if (Number.isFinite(parsed)) tokens = Math.max(tokens, Math.floor(parsed));
+  }
+  return { tokens, transcriptPaths: [...transcriptPaths] };
+}
+
 export function resumeWorkerIssue(input: ResumeRequest): string | undefined {
-  const limits = { maxTranscriptBytes: 2_000_000, maxTokens: 120_000, maxSlices: 2, ...input.limits };
+  const limits = { ...workerContextLimits(), ...input.limits };
   if (!input.correction) return "Completed workers may only resume for a bounded correction to their immediately preceding slice.";
   if (input.run.runId !== input.lastCompletedRunId) return "Only the immediately preceding completed worker may be resumed.";
+  if (input.run.status !== "completed") return "Failed, stopped, or still-running workers require recovery or a fresh bounded context, not resume.";
   if (input.run.emptyOutput || input.run.corrupted) return "Empty-output or corrupted sessions require a fresh smaller context.";
   if (input.run.executionMode !== "implementation") return "A wrong-execution-mode implementation attempt cannot be resumed.";
   if (input.run.transcriptBytes >= limits.maxTranscriptBytes) return "The worker transcript is too large; launch a fresh bounded worker.";

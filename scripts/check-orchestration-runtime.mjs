@@ -22,6 +22,8 @@ import {
   uniqueArtifactPath,
   validationActivityLabel,
   validationDeduplicationIssue,
+  workerContextLimits,
+  workerStatusMetrics,
 } from "../src-tauri/resources/lemonpi-narration/extensions/orchestration-runtime.ts";
 import { parsedMissionState } from "../src-tauri/resources/lemonpi-narration/extensions/narration.ts";
 
@@ -120,8 +122,18 @@ const priorAttempt = {
 };
 assert.match(resumeWorkerIssue({ run: priorAttempt, lastCompletedRunId: "run-1", purpose: "Implement messages endpoint", correction: false }), /only resume.*bounded correction/i);
 assert.equal(resumeWorkerIssue({ run: priorAttempt, lastCompletedRunId: "run-1", purpose: "Correct session query parser", correction: true }), undefined);
+assert.match(resumeWorkerIssue({ run: { ...priorAttempt, status: "failed" }, lastCompletedRunId: "run-1", purpose: "Correct parser", correction: true }), /fresh bounded context/);
 assert.match(resumeWorkerIssue({ run: { ...priorAttempt, transcriptBytes: 10_000_000 }, lastCompletedRunId: "run-1", purpose: "Correct parser", correction: true }), /too large/);
 assert.match(resumeWorkerIssue({ run: { ...priorAttempt, executionMode: "read-only" }, lastCompletedRunId: "run-1", purpose: "Apply patch", correction: true }), /wrong-execution-mode/);
+assert.deepEqual(workerContextLimits({ LEMONPI_WORKER_MAX_TRANSCRIPT_BYTES: "500000", LEMONPI_WORKER_MAX_TOKENS: "30000", LEMONPI_WORKER_MAX_SLICES: "1" }), {
+  maxTranscriptBytes: 500_000,
+  maxTokens: 30_000,
+  maxSlices: 1,
+});
+assert.deepEqual(workerStatusMetrics({ details: { tokens: { total: 42_000 }, sessionFile: "/tmp/child.jsonl" } }), {
+  tokens: 42_000,
+  transcriptPaths: ["/tmp/child.jsonl"],
+});
 
 assert.match(launchPreflightIssue({
   agent: "planner",

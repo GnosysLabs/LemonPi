@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { statSync } from "node:fs";
 import {
   checkpointBlocker,
   classifyFailure,
@@ -15,6 +16,8 @@ import {
   uniqueArtifactPath,
   validationActivityLabel,
   validationDeduplicationIssue,
+  workerContextLimits,
+  workerStatusMetrics,
   type ReviewRecord,
   type ValidationRecord,
   type WorkerAttempt,
@@ -2280,11 +2283,33 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         };
       }
       const correction = /(?:^|\n)\s*correction for (?:the )?(?:immediately )?previous slice\s*:/i.test(message);
+      try {
+        const status = await requestSubagentStatus(pi, previousRunId);
+        const metrics = workerStatusMetrics(status);
+        previousAttempt.tokens = Math.max(previousAttempt.tokens, metrics.tokens);
+        previousAttempt.transcriptBytes = Math.max(
+          previousAttempt.transcriptBytes,
+          ...metrics.transcriptPaths.map((filePath) => {
+            try {
+              return statSync(filePath).size;
+            } catch {
+              return 0;
+            }
+          }),
+        );
+        persistMission();
+      } catch {
+        return {
+          block: true,
+          reason: "LemonPi could not inspect the previous worker's current session metrics. Launch a fresh bounded worker instead of risking another bloated or stale resume.",
+        };
+      }
       const resumeIssue = resumeWorkerIssue({
         run: previousAttempt,
         lastCompletedRunId: mission?.lastCompletedRunId,
         purpose: summary,
         correction,
+        limits: workerContextLimits(process.env),
       });
       if (resumeIssue) {
         return {
