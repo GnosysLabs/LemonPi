@@ -1,7 +1,7 @@
-export const CURRENT_ORCHESTRATION_POLICY_VERSION = 3;
+export const CURRENT_ORCHESTRATION_POLICY_VERSION = 4;
 
 export const ORCHESTRATION_POLICY_NOTICE = `<lemonpi-authoritative-policy version="${CURRENT_ORCHESTRATION_POLICY_VERSION}">
-The installed LemonPi orchestration policy is authoritative. Historical summaries preserve product facts and user decisions only. Any older scheduling, review, validation, model-routing, context-reuse, or Git instruction is superseded. Independent dependency-ready lanes may run concurrently in managed worktrees after a recoverable checkpoint. Main Pi owns safe local Git integration and validation deduplication.
+The installed LemonPi orchestration policy is authoritative. Historical summaries preserve product facts and user decisions only. Any older scheduling, review, validation, model-routing, context-reuse, or Git instruction is superseded. Main Pi directly handles low-risk one-repository UI slices; only broader work uses independent delegated lanes. Main Pi owns safe local Git integration and exact validation reuse.
 </lemonpi-authoritative-policy>`;
 
 const HISTORICAL_POLICY = /\b(?:one|single) writer(?: at a time| only)?\b|\bserial (?:execution|workflow|workers?)\b|\bnever (?:commit|use worktrees?|run workers? in parallel)\b/i;
@@ -165,6 +165,12 @@ export interface WorkerAttempt {
   tokens: number;
   emptyOutput?: boolean;
   corrupted?: boolean;
+  todoId?: number;
+  worktreePath?: string;
+  repository?: string;
+  baseRevision?: string;
+  ownedPaths?: string[];
+  artifactPath?: string;
 }
 
 export interface ResumeRequest {
@@ -292,8 +298,8 @@ export interface ValidationRecord {
 }
 
 export function validationLedgerKey(value: Omit<ValidationRecord, "passed" | "elapsedMs">): string {
-  const { repository, baseRevision, diffHash, command, relevantPaths, dependencyState, scope } = value as ValidationRecord;
-  return contentHash(JSON.stringify({ repository, baseRevision, diffHash, command, relevantPaths: [...relevantPaths].sort(), dependencyState, scope }));
+  const { repository, baseRevision, diffHash, command, relevantPaths, dependencyState } = value as ValidationRecord;
+  return contentHash(JSON.stringify({ repository, baseRevision, diffHash, command, relevantPaths: [...relevantPaths].sort(), dependencyState }));
 }
 
 export function validationDeduplicationIssue(records: ValidationRecord[], candidate: Omit<ValidationRecord, "passed" | "elapsedMs">): string | undefined {
@@ -310,6 +316,39 @@ export function validationActivityLabel(command: string, startedAt: number, now:
 export function invalidatesValidation(record: ValidationRecord, changedPaths: string[], dependencyState: string): boolean {
   if (record.dependencyState !== dependencyState) return true;
   return changedPaths.some((changed) => record.relevantPaths.some((relevant) => pathOverlap(changed, relevant)));
+}
+
+export interface FastPathInput {
+  request: string;
+  paths: string[];
+}
+
+const HIGH_RISK_SCOPE = /\b(?:auth(?:entication|orization)?|backend|billing|crypto(?:graphy)?|database|migration|payment|protocol|release|schema|security|server|synchroni[sz](?:e[ds]?|ing|ation)|websocket)\b/i;
+const HIGH_RISK_PATH = /(?:^|\/)(?:api|auth|backend|database|migrations?|protocol|server|src-tauri)(?:\/|$)|(?:^|\/)(?:Cargo\.toml|Cargo\.lock|.*\.sql)$/i;
+const UI_PATH = /\.(?:css|html|jsx?|scss|svelte|swift|tsx?|vue)$/i;
+
+export function fastPathIssue(input: FastPathInput): string | undefined {
+  if (input.paths.length < 1 || input.paths.length > 5) return "Fast path requires one to five exact UI paths in one repository.";
+  if (HIGH_RISK_SCOPE.test(input.request)) return "This request names synchronization or another material backend/risk boundary; use a separately scoped implementation phase.";
+  for (const path of input.paths) {
+    if (!path || path.startsWith("/") || path.includes("..") || /[*?{}[\]]/.test(path)) return "Fast-path ownership must use exact repository-relative paths without globs.";
+    if (!UI_PATH.test(path) || HIGH_RISK_PATH.test(path.replace(/\\/g, "/"))) return `Fast path is limited to ordinary UI source; ${path} crosses that boundary.`;
+  }
+  return undefined;
+}
+
+export function hiddenScopeExpansionIssue(request: string, laneTasks: string[]): string | undefined {
+  const visibleUiRequest = /\b(?:badge|button|dot|icon|indicator|label|layout|menu|spacing|style|unread|visual)\b/i.test(request)
+    && !HIGH_RISK_SCOPE.test(request);
+  if (!visibleUiRequest) return undefined;
+  const expanded = laneTasks.find((task) => HIGH_RISK_SCOPE.test(task));
+  return expanded
+    ? "This visible UI request expanded into backend, protocol, or synchronization work. Deliver the local visible slice first and list synchronization explicitly as phase two."
+    : undefined;
+}
+
+export function internalContractFallback(failures: number): "retry" | "fallback" {
+  return failures >= 2 ? "fallback" : "retry";
 }
 
 export type FailureClass = "process-disappearance" | "stale-run" | "empty-output" | "command-syntax" | "test-failure" | "needs-attention" | "capability-preflight" | "implementation-failure";

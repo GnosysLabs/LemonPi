@@ -1,12 +1,18 @@
 # LemonPi narration
 
-First-party Pi extension bundled with LemonPi. It supplies visible narration, a read-only Main Pi supervisor contract, independent delegated-run scheduling, durable mission recovery, and direct steering/stop controls without patching `pi-subagents`.
+First-party Pi extension bundled with LemonPi. It supplies visible narration, a direct low-risk UI fast path, independent delegated-run scheduling for broader work, durable mission recovery, and direct steering/stop controls without patching `pi-subagents`.
+
+## Direct UI fast path
+
+One-repository changes to one to five ordinary UI files run directly in Main Pi through `lemonpi_fast_path`. The runtime permits edits only to the declared paths and one focused `lemonpi_validate` check. This path has no worktree, delegation, roadmap gate, reviewer, wave check, or final holistic check. Eligible UI work is rejected by `lemonpi_dispatch` so the slower path cannot be selected accidentally.
+
+A visible UI request cannot silently dispatch backend, protocol, database, or synchronization work. LemonPi requires the local visible slice first and treats synchronization as an explicit second phase.
 
 ## Independent dispatch
 
-`lemonpi_dispatch` is the normal execution path for implementation and for multiple dependency-ready read-only lanes. One tool call may describe many lanes, but LemonPi submits every lane through the stable `pi-subagents` RPC `spawn` method as a separate asynchronous run. There is no parent group barrier: the first completed lane produces its own completion event and wakes Main Pi for inspection and integration while siblings continue.
+`lemonpi_dispatch` is the path for multi-repository, genuinely parallel, materially risky, or otherwise non-fast-path work. One tool call may describe many lanes, but LemonPi submits every lane through the stable `pi-subagents` RPC `spawn` method as a separate asynchronous run.
 
-Near-simultaneous terminal events are coalesced for 300 ms into one integration wake so the chat does not repeat itself. This is only notification batching; it never waits for another run. A completion outside that tiny window wakes Main Pi independently. Run IDs and single-child widths are persisted with mission state, so reload, session switching, and context compaction preserve the same completion behavior.
+Near-simultaneous terminal events are coalesced for 300 ms. A terminal event only queues reconciliation; its synthetic wake cannot begin until Main Pi's current turn and every active tool have settled. Run IDs and single-child widths are persisted with mission state, so reload, session switching, and context compaction preserve the same completion behavior.
 
 Grouped `subagent.tasks` and chains are rejected by default because their package result is delivered only when the aggregate finishes. They remain available for the rare case where partial results are genuinely unusable and the task declares `Atomic aggregate: required`. There is no hard minimum agent count, fixed role-diversity quota, prompt-length gate, or singleton-writer exception ritual. Main Pi must launch every useful ready lane, but it must not manufacture ceremonial work.
 
@@ -14,17 +20,19 @@ Every independently dispatched implementation lane is represented internally as 
 
 Implementation lanes must declare exact repo-relative `Owned paths:`. LemonPi performs a fresh Git preflight for each target repository, rejects overlapping ownership within the same repository, and defers only the invalid or dirty lane. Valid read-only and other-repository lanes still launch. LemonPi never discards or hides user changes to make a checkout clean.
 
-Main Pi integrates each completed writer patch individually. It reads `parallelHandoff.path`, checks the base revision, child status, patch health, and ownership boundary, then uses the guarded `git apply --check` followed by `git apply --3way` flow. Package-generated patches under `.pi-subagents/artifacts/worktree-diffs/` are the only project-file mutation Main Pi may perform.
+Main Pi integrates each completed writer slice individually. `lemonpi_git integrate_worktree` inspects a registered worktree, stages only declared owned paths, generates the commit manifest itself, and cherry-picks that commit into a clean integration checkout. A malformed model-authored artifact description or acceptance object cannot invalidate inspected code; guarded package patches remain a compatibility path.
 
 ## Agent behavior
 
 Main Pi briefly maps the complete dependency graph, including later-step work whose inputs are already stable, then keeps the ready queue full as results arrive. It selects from the live built-in and custom agent roster by capability. Planners, designers, scouts, context builders, reviewers, and other specialists are used when their output changes a real decision; neither familiar-role monoculture nor artificial diversity is a goal.
 
-For non-trivial work, Main Pi creates the entire known todo roadmap before the first implementation dispatch. The runtime rejects the one-item conveyor-belt pattern: a launch requires a fresh set of specific, described milestones with one current item, visible dependency ordering, and a validation outcome. Items are decomposed toward two-to-five-minute observable checkpoints, while normal progress only changes their statuses. Newly discovered scope is appended immediately rather than kept hidden until the current item finishes.
+Delegated work uses one to three meaningful todo milestones for simple requests. A lane can declare `todoId`; LemonPi updates that item to in-progress when the worker starts, completed when it succeeds, and pending when it fails or is stopped. The lifecycle snapshot is persisted and restored without relying on the model to remember status updates.
 
-Every `lemonpi_dispatch` lane includes a model-authored, concrete summary of eight words or fewer. LemonPi preserves it as worker metadata so Command Center shows the lane's purpose instead of runner boilerplate. LemonPi also compiles semantic tasks into role-neutral run contracts, adds an explicit execution mode after the human-readable task, disables inferred acceptance unless runtime verification is explicitly configured, and strips model-authored timeout, turn, tool, and usage budgets. Five minutes remains a decomposition aspiration, not a timeout or mechanical rejection threshold.
+Every `lemonpi_dispatch` lane includes a concrete summary of eight words or fewer. LemonPi preserves it as worker metadata, compiles semantic tasks into role-neutral run contracts, forces acceptance off, generates ownership/artifact metadata itself, and strips model-authored timeout, turn, tool, and usage budgets. After two failures of the same internal contract, a third retry is blocked in favor of the direct UI or inspected-worktree fallback.
 
 Main Pi stays interruptible. `subagent_wait` is blocked, background launches end the current turn after concise narration, and user messages can be answered or used to steer a child immediately. Only terminal or `needs_attention` lifecycle changes wake Main Pi; ordinary progress/status updates do not. Direct steering and stopping use the public `subagents:rpc:v1` bridge.
+
+Validation evidence is keyed by the shared repository identity, HEAD revision, exact diff hash, command, relevant paths, and dependency state. Scope labels do not create a new cache entry, so an unchanged passing suite is reused instead of rerun.
 
 ## Recovery and mission state
 

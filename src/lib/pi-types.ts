@@ -283,6 +283,7 @@ export interface AgentMessage {
   toolName?: string;
   isError?: boolean;
   details?: unknown;
+  customType?: string;
 }
 
 export type PiEvent = Record<string, unknown> & {

@@ -10,6 +10,9 @@ import {
   classifyDirtyTree,
   classifyFailure,
   contentHash,
+  fastPathIssue,
+  hiddenScopeExpansionIssue,
+  internalContractFallback,
   invalidatesValidation,
   launchPreflightIssue,
   missionProgress,
@@ -121,6 +124,15 @@ assert.match(structuredWriter.task, /Execution mode: implementation/);
 const preparedSpawn = independentSpawnParams({ ...structuredWriter, cwd: "/tmp/prepared", reusePreparedWorktree: true });
 assert.equal(preparedSpawn.implementation, true);
 assert.equal(preparedSpawn.params.worktree, false);
+assert.equal(independentSpawnParams({ ...structuredWriter, todoId: 7 }).params.tasks[0].todoId, undefined);
+
+assert.equal(fastPathIssue({ request: "Add an unread dot", paths: ["src/Inbox.tsx", "src/inbox.css"] }), undefined);
+assert.match(fastPathIssue({ request: "Add synchronized unread state", paths: ["src/Inbox.tsx"] }), /separately scoped/);
+assert.match(fastPathIssue({ request: "Add an unread dot", paths: ["src/server/events.ts"] }), /ordinary UI source/);
+assert.match(hiddenScopeExpansionIssue("Add an unread dot", ["Add websocket synchronization protocol"]), /local visible slice first/);
+assert.equal(hiddenScopeExpansionIssue("Add synchronized unread state", ["Add websocket synchronization protocol"]), undefined);
+assert.equal(internalContractFallback(1), "retry");
+assert.equal(internalContractFallback(2), "fallback");
 
 const asyncRunId = "1e9cba46-2055-40b7-9a89-a35a5e2934be";
 const asyncPatch = `/tmp/pi-subagents/async-subagent-runs/${asyncRunId}/worktree-diffs/step-0/task-0-worker.patch`;
@@ -207,6 +219,7 @@ assert.equal(reviewDeduplicationIssue([{ ...review, accepted: true }], { ...revi
 const validation = { repository: repo, baseRevision: review.revision, diffHash: "diff-1", command: "pnpm test", relevantPaths: ["src/auth"], dependencyState: "deps-1", scope: "wave" };
 const validationRecord = { ...validation, passed: true, elapsedMs: 2_000 };
 assert.match(validationDeduplicationIssue([validationRecord], validation), /already passed/);
+assert.match(validationDeduplicationIssue([validationRecord], { ...validation, scope: "final" }), /already passed/);
 assert.equal(validationDeduplicationIssue([validationRecord], { ...validation, diffHash: "diff-2" }), undefined);
 assert.equal(invalidatesValidation(validationRecord, ["src/ui/button.tsx"], "deps-1"), false);
 assert.equal(invalidatesValidation(validationRecord, ["src/auth/token.ts"], "deps-1"), true);

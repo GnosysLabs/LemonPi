@@ -109,6 +109,7 @@ assert.equal(missionHasActiveOwnership({ activeDelegationCount: 2, recordedRunCo
 assert.equal(missionHasActiveOwnership({ activeDelegationCount: 0, recordedRunCount: 0, writerOccupied: false, recordedWriterActive: false }), false);
 assert.equal(missionWakeIsBlocked({ mainAgentRunning: false, activeToolExecutions: 0, wakeQueued: false }), false);
 assert.equal(missionWakeIsBlocked({ mainAgentRunning: true, activeToolExecutions: 0, wakeQueued: false }), true);
+assert.equal(missionWakeIsBlocked({ mainAgentRunning: false, activeToolExecutions: 0, wakeQueued: false, turnSettled: false }), true);
 
 assert.deepEqual(remainingPlanFromTodoResult({
   details: {
@@ -126,12 +127,12 @@ const completeRoadmap = [
   { id: 3, subject: "Integrate visible feedback", description: "Connect the guard result to user-facing progress.", status: "pending", blockedBy: [2] },
   { id: 4, subject: "Validate roadmap behavior", description: "Run focused contract and build checks.", status: "pending", blockedBy: [3] },
 ];
-assert.match(upfrontRoadmapIssue({
+assert.equal(upfrontRoadmapIssue({
   tasks: completeRoadmap,
   freshForRequest: false,
   establishedForMission: false,
   laneCount: 2,
-}), /Create or refresh/);
+}), undefined);
 assert.equal(upfrontRoadmapIssue({
   tasks: completeRoadmap,
   freshForRequest: true,
@@ -150,20 +151,26 @@ assert.match(upfrontRoadmapIssue({
   establishedForMission: false,
   laneCount: 2,
 }), /concrete description/);
-assert.match(upfrontRoadmapIssue({
+assert.equal(upfrontRoadmapIssue({
   tasks: completeRoadmap.map((task) => ({ ...task, blockedBy: [] })),
   freshForRequest: true,
   establishedForMission: false,
   laneCount: 2,
-}), /ordering/);
-assert.match(upfrontRoadmapIssue({
+}), undefined);
+assert.equal(upfrontRoadmapIssue({
   tasks: completeRoadmap.map((task, index) => index === 3
     ? { ...task, subject: "Polish roadmap behavior", description: "Confirm the final presentation." }
     : task),
   freshForRequest: true,
   establishedForMission: false,
   laneCount: 2,
-}), /validation milestone/);
+}), undefined);
+assert.equal(upfrontRoadmapIssue({
+  tasks: [{ id: 1, subject: "Add unread dot", status: "pending" }],
+  freshForRequest: false,
+  establishedForMission: false,
+  laneCount: 1,
+}), undefined);
 assert.equal(upfrontRoadmapIssue({
   tasks: [{ ...completeRoadmap[3], status: "in_progress" }],
   freshForRequest: false,

@@ -25,6 +25,14 @@ describe("rpiv-todo snapshots", () => {
     ])).toEqual({ tasks: details.tasks, nextId: 3 });
   });
 
+  it("restores LemonPi-owned worker lifecycle transitions", () => {
+    const completed = { ...details, tasks: details.tasks.map((task) => task.id === 1 ? { ...task, status: "completed" } : task) };
+    expect(todoSnapshotFromMessages([
+      { role: "toolResult", toolName: "todo", details },
+      { role: "custom", customType: "lemonpi-todo-lifecycle", content: JSON.stringify(completed) },
+    ])).toEqual({ tasks: completed.tasks, nextId: 3 });
+  });
+
   it("rejects malformed snapshots instead of partially rendering them", () => {
     expect(parseTodoSnapshot({ details: { tasks: [{ id: 1, subject: "Missing status" }], nextId: 2 } })).toBeUndefined();
   });

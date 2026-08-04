@@ -55,12 +55,25 @@ export function parseTodoSnapshot(value: unknown): TodoSnapshot | undefined {
   return { tasks: tasks as TodoTask[], nextId: details.nextId };
 }
 
+function parseLifecycleSnapshot(message: unknown): TodoSnapshot | undefined {
+  const record = asRecord(message);
+  if (record?.role !== "custom" || record.customType !== "lemonpi-todo-lifecycle") return undefined;
+  if (typeof record.content !== "string") return undefined;
+  try {
+    return parseTodoSnapshot(JSON.parse(record.content));
+  } catch {
+    return undefined;
+  }
+}
+
 export function todoSnapshotFromEvent(event: PiEvent): TodoSnapshot | undefined {
   if (event.type === "tool_execution_end" && event.toolName === "todo" && event.isError !== true) {
     return parseTodoSnapshot(event.result);
   }
   if (event.type !== "message_end") return undefined;
   const message = asRecord(event.message);
+  const lifecycle = parseLifecycleSnapshot(message);
+  if (lifecycle) return lifecycle;
   if (message?.role !== "toolResult" || message.toolName !== "todo" || message.isError === true) return undefined;
   return parseTodoSnapshot(message.details);
 }
@@ -68,6 +81,11 @@ export function todoSnapshotFromEvent(event: PiEvent): TodoSnapshot | undefined 
 export function todoSnapshotFromMessages(messages: AgentMessage[]): TodoSnapshot | undefined {
   let snapshot: TodoSnapshot | undefined;
   for (const message of messages) {
+    const lifecycle = parseLifecycleSnapshot(message);
+    if (lifecycle) {
+      snapshot = lifecycle;
+      continue;
+    }
     if (message.role !== "toolResult" || message.toolName !== "todo" || message.isError) continue;
     snapshot = parseTodoSnapshot(message.details) ?? snapshot;
   }
