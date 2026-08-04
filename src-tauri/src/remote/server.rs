@@ -2884,11 +2884,11 @@ mod tests {
         assert_eq!(value["protocol"], 1);
         assert_eq!(
             value["data"]["capabilities"],
-            serde_json::json!(["projects", "state"])
+            serde_json::json!(["projects", "state", "rpc", "events"])
         );
         assert_eq!(
             value["data"]["acceptedCapabilities"],
-            serde_json::json!(["projects"])
+            serde_json::json!(["projects", "events"])
         );
         assert_eq!(
             value["data"]["limits"]["httpBodyBytes"],
@@ -3221,7 +3221,7 @@ mod tests {
                 "data": {
                     "projectId": project_id,
                     "sessions": [first["data"]["sessions"][0].clone()],
-                    "acceptedCapabilities": ["projects", "state"],
+                    "acceptedCapabilities": ["projects", "state", "rpc", "events"],
                 },
             })
         );
@@ -3504,7 +3504,7 @@ mod tests {
                         "messageCount": 12,
                         "pendingMessageCount": 0,
                     },
-                    "acceptedCapabilities": ["projects", "state"],
+                    "acceptedCapabilities": ["projects", "state", "rpc", "events"],
                 },
             })
         );
@@ -3523,7 +3523,7 @@ mod tests {
         assert!(value["data"]["state"].get("sessionName").is_none());
         assert_eq!(
             value["data"]["acceptedCapabilities"],
-            serde_json::json!(["projects", "state"])
+            serde_json::json!(["projects", "state", "rpc", "events"])
         );
     }
 
@@ -3737,7 +3737,7 @@ mod tests {
         assert_eq!(value["data"]["sessionId"], session_id);
         assert_eq!(
             value["data"]["acceptedCapabilities"],
-            serde_json::json!(["projects", "state"])
+            serde_json::json!(["projects", "state", "events"])
         );
         let messages = value["data"]["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 3);
