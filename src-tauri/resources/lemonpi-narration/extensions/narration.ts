@@ -110,7 +110,7 @@ You are Main Pi, the read-only supervisor and integration owner. You do not impl
 
 Independent dispatch is the default:
 
-1. Before meaningful execution, spend only a brief pass mapping the whole outcome graph: implementation, investigation, UX, platform, validation preparation, integration, and any material review boundary. Look several steps ahead. A later-step lane may start now whenever its inputs are already stable.
+1. Before meaningful execution, spend only a brief pass mapping the whole outcome graph: implementation, investigation, UX, platform, validation preparation, integration, and any material review boundary. Immediately create the complete visible roadmap in \`todo\` before launching work: all known milestones from the first concrete action through integration and final validation must exist up front. Do not create one item, finish it, and then reveal the next. For non-trivial work, each item should represent roughly two to five minutes of observable progress; split anything likely to stay spinning longer into smaller checkpoint outcomes. This is planning granularity, never a timeout. Look several steps ahead. A later-step lane may start now whenever its inputs are already stable.
 2. Use \`lemonpi_dispatch\` for every implementation lane and whenever two or more read-only lanes are ready, with one lane per independent outcome. Every lane must include a concrete \`summary\` of eight words or fewer describing that worker's purpose for the user; never use runner boilerplate, role names, or generic phrases. Every \`subagent resume\` message must likewise include a fresh \`Worker summary: ...\` line describing the revived worker's current purpose in eight words or fewer; update it even when continuing the same broad task. LemonPi launches every lane as a separate async run, not as a grouped subagent job. Each child completion wakes Main Pi independently, so inspect and integrate that result immediately while siblings continue. Refill newly-ready work without waiting for the original set to finish.
 3. A direct single read-only delegation is appropriate only when exactly one useful read-only lane is ready. There is no numerical quota: never manufacture agents, but never serialize independent work for convenience, superficial file overlap, a dirty checkout, or because the first lane is easiest to describe.
 4. Grouped \`subagent.tasks\` and chains are exceptional. Use them only when the user needs one atomic aggregate result whose partial child results are not independently actionable. Ordinary parallel research, implementation, review, and validation are independent lanes.
@@ -120,13 +120,13 @@ Independent dispatch is the default:
 8. Independent review is reserved for explicit review requests or material security, privacy, money, migration, cryptography, concurrency, public-protocol, or release risk. Include one concrete \`Review justification:\` boundary. LemonPi deduplicates accepted reviews by repository, revision, diff, scope, and risk. Routine chunks and post-correction checks are reviewed directly by Main Pi.
 9. Run tests through \`lemonpi_validate\`: focused validation per slice, one broader run per integration wave, and one final holistic run. Its persistent ledger prevents identical unchanged commands and emits heartbeat progress for long-running checks. Never set model-authored timeout, turn, tool, or usage budgets and never call \`subagent_wait\`.
 10. Resume only the immediately preceding worker for a bounded correction, declared with \`Correction for previous slice:\` and a fresh \`Worker summary:\`. Unrelated, completed, failed-empty, wrong-mode, oversized, or repeatedly reused sessions get a fresh worker and concise structured handoff.
-11. Main Pi alone asks the user clarifying questions. For multi-subsystem work, make the visible todo a real epic with distinct outcome milestones, dependencies, every active lane, validation, failures/recovery, and accepted-milestone progress. Update scope expansion immediately; never leave one broad parent item spinning while hidden slices finish.
+11. Main Pi alone asks the user clarifying questions. For every non-trivial task, make the visible todo a real start-to-finish roadmap with short imperative subjects, concrete descriptions, dependency links, exactly one current item, every known implementation/integration lane, focused validation, and the final holistic check. Create the whole known roadmap before the first dispatch. Normal progress changes statuses; it does not reveal ordinary pre-existing work one item at a time. Append a new item only for genuinely unforeseen scope or recovery, and append it as soon as it is discovered. Never use generic placeholders such as "Complete delegated outcome," and never leave one broad parent item spinning while hidden slices finish.
 
 Main Pi may inspect and search, and it may use only the deterministic \`lemonpi_git\` and \`lemonpi_validate\` tools for project mutation and validation. It may not author project files. For read-only user requests, do not launch implementation.
 </lemonpi-orchestration>`;
 
 const CLOSING_REPAIR = `The previous response ended after tool activity without a visible closing explanation. Do not call more tools. Give the user a concise, specific closing explanation now: state the outcome, what changed, what was verified, and any blocker or next step. If the task is incomplete, say exactly where it stopped and why.`;
-const DELEGATION_RECOVERY = `A delegated run failed and no replacement delegation was launched before the turn settled. Own the failure now: inspect the exact status/error and any partial output, identify whether the cause was a parent-imposed timeout, unavailable model/tool, configuration problem, or task failure, preserve valid partial work, and re-delegate only the next bounded chunk with a concise corrected outcome. LemonPi will compile the mechanical execution and checklist fields. For a parallel worktree wave, inspect parallelHandoff.path before retrying: integrate independently successful, in-scope patches and retry only failed or conflicting lanes, never the entire wave. If a legacy completion guard says a read-only child made no edits, treat that as a classification error: recover and use its valid artifact instead of rerunning completed work. Shrink genuinely failed tasks instead of adding a per-dispatch timeout, turn budget, tool budget, or usage budget. If the error says the model produced no output or returned an empty response, do not resume the bloated failed session: salvage concrete transcript findings and launch a fresh-context replacement with a smaller question and explicit deliverable. If retrying cannot help because the blocker is external, give the user the exact blocker and the evidence instead of claiming recovery.`;
+const DELEGATION_RECOVERY = `A delegated run failed and no replacement delegation was launched before the turn settled. Own the failure now: inspect the exact status/error and any partial output, identify whether the cause was a parent-imposed timeout, unavailable model/tool, configuration problem, or task failure, preserve valid partial work, and re-delegate only the next bounded chunk with a concise corrected outcome. LemonPi will compile the mechanical execution and safety fields. For a parallel worktree wave, inspect parallelHandoff.path before retrying: integrate independently successful, in-scope patches and retry only failed or conflicting lanes, never the entire wave. If a legacy completion guard says a read-only child made no edits, treat that as a classification error: recover and use its valid artifact instead of rerunning completed work. Shrink genuinely failed tasks instead of adding a per-dispatch timeout, turn budget, tool budget, or usage budget. If the error says the model produced no output or returned an empty response, do not resume the bloated failed session: salvage concrete transcript findings and launch a fresh-context replacement with a smaller question and explicit deliverable. If retrying cannot help because the blocker is external, give the user the exact blocker and the evidence instead of claiming recovery.`;
 const ATTENTION_RECOVERY = `A delegated run reported needs_attention and the previous response did not inspect or control it. Act now instead of narrating passive waiting. Use the subagent status/transcript controls for the exact run. If it remains alive without an active tool or new output, steer it once to return its result or blocker immediately. If intervention cannot be delivered, stop it and preserve useful transcript findings for one fresh, smaller replacement. Do not leave it marked running indefinitely and do not launch a competing writer.`;
 const PLAN_CONTINUATION = `Your visible task plan still contains unfinished work, but you settled with no delegated agent active. Continue the stranded plan now instead of waiting for another user message. Give the user a concise visible update, then execute or delegate the next bounded action. If the task is genuinely blocked or waiting for the user, move it out of in-progress state and explain the exact blocker; never leave an idle task spinning.`;
 const MISSION_INTEGRATION = `A durable LemonPi mission has delegated results waiting for Main Pi, but no child is active. Inspect the exact terminal run and integrate its result now. If more work remains, dispatch the next bounded lane in this turn. If the mission is complete or blocked, give the user a concrete explanation instead of leaving it idle.`;
@@ -963,6 +963,84 @@ interface RemainingPlanTask {
   status: "in_progress" | "pending";
 }
 
+export interface VisibleRoadmapTask {
+  id: number;
+  subject: string;
+  description?: string;
+  activeForm?: string;
+  status: "pending" | "in_progress" | "completed" | "deleted";
+  blockedBy?: number[];
+}
+
+const GENERIC_ROADMAP_SUBJECT = /^(?:complete|finish|implement|build|handle|do|deliver|execute|work on)(?:\s+(?:the\s+)?)?(?:task|work|outcome|implementation|feature|request|changes?|delegated outcome)$/i;
+const VALIDATION_ROADMAP_ITEM = /\b(?:test|tests|testing|verify|verification|validate|validation|build check|smoke check|regression|quality check)\b/i;
+
+function visibleRoadmapTasksFromTodoResult(value: unknown): VisibleRoadmapTask[] | undefined {
+  const root = asRecord(value);
+  const details = asRecord(root?.details) ?? root;
+  if (!details || !Array.isArray(details.tasks) || typeof details.nextId !== "number") return undefined;
+  return details.tasks.flatMap((value) => {
+    const task = asRecord(value);
+    const status = task?.status;
+    if (
+      typeof task?.id !== "number"
+      || typeof task.subject !== "string"
+      || !["pending", "in_progress", "completed", "deleted"].includes(String(status))
+    ) return [];
+    return [{
+      id: task.id,
+      subject: task.subject.trim(),
+      ...(typeof task.description === "string" && task.description.trim() ? { description: task.description.trim() } : {}),
+      ...(typeof task.activeForm === "string" && task.activeForm.trim() ? { activeForm: task.activeForm.trim() } : {}),
+      status: status as VisibleRoadmapTask["status"],
+      ...(Array.isArray(task.blockedBy)
+        ? { blockedBy: task.blockedBy.filter((id): id is number => typeof id === "number" && Number.isInteger(id)) }
+        : {}),
+    }];
+  });
+}
+
+export function upfrontRoadmapIssue(input: {
+  tasks: VisibleRoadmapTask[];
+  freshForRequest: boolean;
+  establishedForMission: boolean;
+  laneCount: number;
+}): string | undefined {
+  const visible = input.tasks.filter((task) => task.status !== "deleted");
+  const unfinished = visible.filter((task) => task.status === "pending" || task.status === "in_progress");
+  if (input.establishedForMission) {
+    return unfinished.length > 0
+      ? undefined
+      : "The established roadmap has no unfinished milestone. Add the newly discovered work to todo before dispatching it.";
+  }
+  if (!input.freshForRequest) {
+    return "Create or refresh the complete todo roadmap for this request before dispatching work.";
+  }
+  const required = Math.min(12, Math.max(4, Math.max(1, input.laneCount) + 2));
+  if (visible.length < required || unfinished.length < Math.min(3, required - 1)) {
+    return `The roadmap exposes only ${visible.length} milestone${visible.length === 1 ? "" : "s"}. Create the complete start-to-finish plan up front with at least ${required} small checkpoint outcomes for this dispatch; do not reveal them one at a time.`;
+  }
+  const current = unfinished.filter((task) => task.status === "in_progress");
+  if (current.length !== 1) {
+    return `The roadmap must have exactly one current milestone before dispatch; it currently has ${current.length}.`;
+  }
+  const generic = unfinished.find((task) => !task.subject || GENERIC_ROADMAP_SUBJECT.test(task.subject));
+  if (generic) {
+    return `Todo #${generic.id} is a generic placeholder. Replace it with the specific observable checkpoint it represents.`;
+  }
+  const undocumented = unfinished.find((task) => !task.description);
+  if (undocumented) {
+    return `Todo #${undocumented.id} needs a concrete description so the user can see what that checkpoint will deliver.`;
+  }
+  if (unfinished.length > 1 && !unfinished.some((task) => (task.blockedBy?.length ?? 0) > 0)) {
+    return "The roadmap does not express any ordering. Link dependent integration and validation milestones with blockedBy so the full path is visible.";
+  }
+  if (!unfinished.some((task) => VALIDATION_ROADMAP_ITEM.test(`${task.subject} ${task.description ?? ""}`))) {
+    return "The upfront roadmap is missing a focused or final validation milestone.";
+  }
+  return undefined;
+}
+
 const MISSION_ENTRY = "lemonpi-mission-state";
 type MissionPhase = "planning" | "delegated" | "integration" | "complete" | "paused";
 
@@ -1154,6 +1232,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   const restoreInterventionMissions = new Set<string>();
   const activeReviewKeys = new Set<string>();
   const reviewByRun = new Map<string, Omit<ReviewRecord, "accepted">>();
+  let visiblePlanTasks: VisibleRoadmapTask[] = [];
+  let visiblePlanFreshForRequest = false;
+  let roadmapEstablishedForMission = false;
   let visiblePlanTaskCount = 0;
   let acceptedPlanTaskCount = 0;
 
@@ -1727,15 +1808,20 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     parameters: IndependentDispatchSchema,
     async execute(_toolCallId, rawParams, _signal, _onUpdate, ctx) {
       const params = rawParams as { lanes: Array<Record<string, unknown>>; context?: "fresh" | "fork" };
-      const broadDispatch = params.lanes.length > 1
-        || params.lanes.some((lane) => String(lane.task ?? "").length > 1_500);
-      if (broadDispatch && visiblePlanTaskCount < Math.min(2, params.lanes.length)) {
+      const roadmapIssue = upfrontRoadmapIssue({
+        tasks: visiblePlanTasks,
+        freshForRequest: visiblePlanFreshForRequest,
+        establishedForMission: roadmapEstablishedForMission,
+        laneCount: params.lanes.length,
+      });
+      if (roadmapIssue) {
         return {
-          content: [{ type: "text", text: "This is a multi-outcome mission, but the visible plan does not expose its milestones. Create or restore a real epic in todo with separate implementation, integration, and validation outcomes before dispatching hidden slices." }],
+          content: [{ type: "text", text: `${roadmapIssue} Plan the known work now as small two-to-five-minute progress checkpoints, then retry the same dispatch.` }],
           isError: true,
-          details: { mode: "independent", runs: [], failures: [{ reason: "visible epic missing" }] },
+          details: { mode: "independent", runs: [], failures: [{ reason: "complete upfront roadmap missing" }] },
         };
       }
+      roadmapEstablishedForMission = true;
       const availableAgents = [...executableAgents];
       if (availableAgents.length === 0) {
         return {
@@ -2360,6 +2446,11 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     const notification = visibleText(message.content);
     if (event.message.role === "assistant") currentAssistantVisibleText = notification;
     if (event.message.role === "user" && message.customType == null) {
+      const continuingMission = Boolean(remainingPlanTask || missionHasOwnedWork());
+      if (!continuingMission) {
+        roadmapEstablishedForMission = false;
+        visiblePlanFreshForRequest = false;
+      }
       activeStatusChecksThisTurn.clear();
       activeDelegationHandoffPending = false;
       sawToolActivity = false;
@@ -2443,10 +2534,18 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (event.toolName === "todo" && !event.isError) {
       const root = asRecord(event.result);
       const details = asRecord(root?.details) ?? root;
-      if (Array.isArray(details?.tasks)) {
-        const tasks = details.tasks.map(asRecord).filter((task) => task?.status !== "deleted");
-        visiblePlanTaskCount = tasks.length;
-        acceptedPlanTaskCount = tasks.filter((task) => task?.status === "completed").length;
+      const tasks = visibleRoadmapTasksFromTodoResult(event.result);
+      if (tasks) {
+        visiblePlanTasks = tasks;
+        const visibleTasks = tasks.filter((task) => task.status !== "deleted");
+        visiblePlanTaskCount = visibleTasks.length;
+        acceptedPlanTaskCount = visibleTasks.filter((task) => task.status === "completed").length;
+        const action = typeof details?.action === "string" ? details.action : "";
+        if (["create", "update", "delete", "clear"].includes(action)) visiblePlanFreshForRequest = true;
+        if (action === "clear") roadmapEstablishedForMission = false;
+        if (action === "list" && mission && mission.phase !== "complete" && mission.phase !== "paused") {
+          visiblePlanFreshForRequest = true;
+        }
         if (mission && visiblePlanTaskCount > 0 && acceptedPlanTaskCount === visiblePlanTaskCount) {
           mission.phase = "integration";
           persistMission();

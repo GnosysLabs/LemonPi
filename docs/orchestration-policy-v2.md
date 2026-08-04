@@ -51,7 +51,9 @@ There are no model-authored turn, token, tool, or timeout budgets. User-configur
 
 ## Visible mission progress
 
-Multi-outcome dispatch is blocked until Main Pi exposes at least two real todo milestones. The composer panel renders the plan as a Mission, including accepted count and percentage, active worker count, validation state, and recovery-action count. Task states remain the source of truth for current, next, blocked, and accepted outcomes; the runtime does not replace them with a single generic spinning parent task.
+Before the first implementation dispatch, Main Pi must publish the complete known start-to-finish roadmap rather than creating one todo at a time. The dispatch gate requires a fresh roadmap with multiple concrete, described checkpoint outcomes, exactly one current item, explicit dependency ordering, and a focused or final validation milestone. The required floor scales with the number of lanes. Milestones target roughly two to five minutes of observable progress; that target controls decomposition only and is never used as a timeout.
+
+Once a roadmap is established, ordinary execution updates its existing statuses. New items are appended only for genuinely unforeseen scope or recovery and must be visible before that new work is dispatched. The composer panel renders the plan as a Mission, including accepted count and percentage, active worker count, validation state, and recovery-action count. Task states remain the source of truth for current, next, blocked, and accepted outcomes; the runtime does not replace them with a single generic spinning parent task.
 
 ## Deterministic fixture and replay
 

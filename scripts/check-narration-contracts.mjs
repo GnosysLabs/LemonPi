@@ -19,6 +19,7 @@ import {
   shouldSuppressStatusPoll,
   shouldWakeForPlanContinuation,
   subagentStatusDisposition,
+  upfrontRoadmapIssue,
   workerSummaryFromTask,
 } from "../src-tauri/resources/lemonpi-narration/extensions/narration.ts";
 
@@ -118,6 +119,63 @@ assert.deepEqual(remainingPlanFromTodoResult({
     nextId: 3,
   },
 }), { task: { id: 2, subject: "Integrate first result", status: "in_progress" } });
+
+const completeRoadmap = [
+  { id: 1, subject: "Map affected surfaces", description: "Confirm the exact runtime and UI boundaries.", activeForm: "mapping affected surfaces", status: "in_progress" },
+  { id: 2, subject: "Implement runtime guard", description: "Enforce the new dispatch invariant.", status: "pending", blockedBy: [1] },
+  { id: 3, subject: "Integrate visible feedback", description: "Connect the guard result to user-facing progress.", status: "pending", blockedBy: [2] },
+  { id: 4, subject: "Validate roadmap behavior", description: "Run focused contract and build checks.", status: "pending", blockedBy: [3] },
+];
+assert.match(upfrontRoadmapIssue({
+  tasks: completeRoadmap,
+  freshForRequest: false,
+  establishedForMission: false,
+  laneCount: 2,
+}), /Create or refresh/);
+assert.equal(upfrontRoadmapIssue({
+  tasks: completeRoadmap,
+  freshForRequest: true,
+  establishedForMission: false,
+  laneCount: 2,
+}), undefined);
+assert.match(upfrontRoadmapIssue({
+  tasks: completeRoadmap.map((task, index) => index === 0 ? { ...task, subject: "Complete delegated outcome" } : task),
+  freshForRequest: true,
+  establishedForMission: false,
+  laneCount: 2,
+}), /generic placeholder/);
+assert.match(upfrontRoadmapIssue({
+  tasks: completeRoadmap.map((task, index) => index === 1 ? { ...task, description: undefined } : task),
+  freshForRequest: true,
+  establishedForMission: false,
+  laneCount: 2,
+}), /concrete description/);
+assert.match(upfrontRoadmapIssue({
+  tasks: completeRoadmap.map((task) => ({ ...task, blockedBy: [] })),
+  freshForRequest: true,
+  establishedForMission: false,
+  laneCount: 2,
+}), /ordering/);
+assert.match(upfrontRoadmapIssue({
+  tasks: completeRoadmap.map((task, index) => index === 3
+    ? { ...task, subject: "Polish roadmap behavior", description: "Confirm the final presentation." }
+    : task),
+  freshForRequest: true,
+  establishedForMission: false,
+  laneCount: 2,
+}), /validation milestone/);
+assert.equal(upfrontRoadmapIssue({
+  tasks: [{ ...completeRoadmap[3], status: "in_progress" }],
+  freshForRequest: false,
+  establishedForMission: true,
+  laneCount: 1,
+}), undefined);
+assert.match(upfrontRoadmapIssue({
+  tasks: completeRoadmap.map((task) => ({ ...task, status: "completed" })),
+  freshForRequest: true,
+  establishedForMission: true,
+  laneCount: 1,
+}), /no unfinished milestone/);
 assert.equal(shouldWakeForPlanContinuation({ hasRemainingTask: true, activeDelegationCount: 0, writerOccupied: false, intentionallyStopped: false, attempts: 0 }), true);
 assert.equal(shouldWakeForPlanContinuation({ hasRemainingTask: true, activeDelegationCount: 1, writerOccupied: false, intentionallyStopped: false, attempts: 0 }), false);
 
