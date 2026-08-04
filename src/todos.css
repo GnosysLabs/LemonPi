@@ -12,7 +12,7 @@
   width: 100%;
   min-height: 43px;
   padding: 8px 10px;
-  grid-template-columns: auto auto auto minmax(80px, 1fr) auto;
+  grid-template-columns: auto auto minmax(80px, 1fr) auto;
   align-items: center;
   gap: 9px;
   border: 0;
@@ -24,6 +24,10 @@
 
 .todo-panel__header:hover {
   background: var(--bg-subtle);
+}
+
+.todo-panel__header--runtime {
+  grid-template-columns: auto auto auto minmax(80px, 1fr) auto;
 }
 
 .todo-panel__header:focus-visible {
@@ -114,6 +118,10 @@
 }
 
 .todo-panel--collapsed .todo-panel__header {
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+}
+
+.todo-panel--collapsed .todo-panel__header--runtime {
   grid-template-columns: auto auto auto minmax(0, 1fr) auto;
 }
 
