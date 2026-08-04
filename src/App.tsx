@@ -1056,6 +1056,17 @@ export default function App() {
   )), [visibleSubagentRuns]);
   const activityTargetSignature = JSON.stringify(activityTargets);
   const hasActiveSubagents = visibleSubagentRuns.some((run) => isActiveSubagentRun(run));
+  const activeWorkerCount = visibleSubagentRuns.reduce((count, run) => count + (
+    run.steps?.filter((step) => ["pending", "running", "queued"].includes(step.status)).length
+      ?? (isActiveSubagentRun(run) ? 1 : 0)
+  ), 0);
+  const failedWorkerCount = visibleSubagentRuns.reduce((count, run) => count + (
+    run.steps?.filter((step) => ["failed", "rejected", "stopped"].includes(step.status)).length
+      ?? (["failed", "rejected", "stopped"].includes(run.state) ? 1 : 0)
+  ), 0);
+  const validationActive = transcript.items.some((item) => item.kind === "tool"
+    && item.name === "lemonpi_validate"
+    && (item.status === "queued" || item.status === "running"));
   const activeAgentNames = useMemo(() => new Set(visibleSubagentRuns.flatMap((run) => (
     isActiveSubagentRun(run)
       ? run.steps?.filter((step) => ["pending", "running", "queued"].includes(step.status)).map((step) => step.agent) ?? []
@@ -1173,6 +1184,9 @@ export default function App() {
               hiddenCompletedIds={hiddenCompletedTodoIds}
               interrupted={mainTodoInterrupted}
               pauseReason={sessionState?.isCompacting ? "compacting" : !streaming && !hasActiveSubagents ? "idle" : undefined}
+              activeWorkers={activeWorkerCount}
+              failedWorkers={failedWorkerCount}
+              validationActive={validationActive}
             />
             {Object.entries(extensionStatuses).length > 0 && (
               <div className="extension-statuses">

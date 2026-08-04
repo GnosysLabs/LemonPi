@@ -13,7 +13,7 @@ A native desktop workspace for the [Pi coding agent](https://pi.dev), built with
 - Displays session context and cost statistics.
 - Shows a live Command center with child role, task, model, effort, elapsed time, token usage, current tool, child-visible output, direct steering, and stop controls on active agents.
 - Narrates the main agent's live work with current actions, auto-expanded running tools, and a transient token-by-token stream of provider-surfaced reasoning.
-- Keeps Main Pi in a read-only supervisor role and requires broad implementation work to proceed through bounded, sequential worker chunks with an inspection checkpoint after each one.
+- Keeps Main Pi in a read-only supervisor role while dependency-ready implementation lanes run concurrently in managed worktrees, with deterministic Git checkpoints, per-result integration, and deduplicated validation.
 - Lists saved Pi sessions for the active project and reopens them through Pi's `switch_session` RPC without copying or migrating session data.
 - Remembers recent projects, their trust choices, and the last active workspace across launches.
 - Exposes Pi's user and project settings in a native categorized GUI, with a raw JSON escape hatch for new or extension-defined settings.
@@ -43,9 +43,12 @@ Validation:
 
 ```bash
 pnpm test
+pnpm test:orchestration-runtime
 pnpm build
 cd src-tauri && cargo test
 ```
+
+The orchestration replay is a deterministic synthetic fixture, not a wall-clock benchmark of every repository. It exercises policy migration, dirty-tree recovery, worktree ownership, fresh-worker rules, launch preflight, review/validation deduplication, failure recovery, and visible mission progress. See [Orchestration policy v2](docs/orchestration-policy-v2.md) for the runtime contract and operator details.
 
 ## Signed releases and updates
 
@@ -128,6 +131,8 @@ pi --mode rpc
 LemonPi verifies the required `npm:pi-subagents`, `npm:pi-web-access`, `npm:@juicesharp/rpiv-ask-user-question`, and `npm:@juicesharp/rpiv-todo` packages before launching Pi and asks Pi's native package manager to install any missing member. Subagents supply orchestration and machine-readable lifecycle artifacts; web access registers research tools; ask-user-question gives the model a structured clarification tool; and rpiv-todo supplies persistent task snapshots. LemonPi turns the question package's RPC fallback into a native questionnaire and the todo package's public tool-result envelope into a native progress panel. Terminal rendering is never scraped.
 
 Before Pi starts, LemonPi adds its `rpiv-todo`-backed `child_todo` bridge to every discovered built-in, user, and trusted-project subagent while leaving Main Pi's normal `todo` provider and all unrelated ambient extensions untouched. The distinct child tool avoids Pi's duplicate-extension boundary while sharing one module graph and one session store with the bridge. It seeds Main Pi's bounded `Child checklist:` before the first model request, persists the seed for lifecycle replay, and lets later child updates become authoritative. Command Center presents those structured snapshots as the agent's Tasks list and filters by owner, keeping Main Pi and sibling checklists isolated.
+
+LemonPi orchestration policy v2 is enforced by the extension runtime rather than model prose alone. Historical session summaries keep product facts and user decisions, but old scheduler instructions are explicitly superseded. `lemonpi_dispatch` uses the live agent roster, fresh-context workers by default, exact owned paths, unique output artifacts, and managed worktrees for disjoint writers. `lemonpi_git` owns safe local inspection, recovery checkpoints, commits, worktree operations, patch application, and cherry-picks; it never resets, cleans, force-pushes, changes remotes, or pushes. `lemonpi_validate` records content-aware validation results and reuses an unchanged passing result instead of rerunning it. The session task panel exposes accepted milestones, active workers, validation, and recovery work as durable mission progress.
 
 ## Project trust
 

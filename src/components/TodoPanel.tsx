@@ -18,7 +18,23 @@ function TaskIcon({ task, blocked, interrupted, paused }: { task: TodoTask; bloc
 
 type TodoPauseReason = "compacting" | "idle";
 
-export function TodoPanel({ snapshot, hiddenCompletedIds, interrupted = false, pauseReason }: { snapshot?: TodoSnapshot; hiddenCompletedIds: Set<number>; interrupted?: boolean; pauseReason?: TodoPauseReason }) {
+export function TodoPanel({
+  snapshot,
+  hiddenCompletedIds,
+  interrupted = false,
+  pauseReason,
+  activeWorkers = 0,
+  failedWorkers = 0,
+  validationActive = false,
+}: {
+  snapshot?: TodoSnapshot;
+  hiddenCompletedIds: Set<number>;
+  interrupted?: boolean;
+  pauseReason?: TodoPauseReason;
+  activeWorkers?: number;
+  failedWorkers?: number;
+  validationActive?: boolean;
+}) {
   const [collapsed, setCollapsed] = useState(false);
   const tasks = useMemo(() => {
     const completed = new Set(snapshot?.tasks.filter((task) => task.status === "completed").map((task) => task.id));
@@ -42,12 +58,18 @@ export function TodoPanel({ snapshot, hiddenCompletedIds, interrupted = false, p
     ? "Paused while Pi compacts the conversation context"
     : "Pi is idle; this step is not currently running";
   const progress = allVisibleTasks.length > 0 ? (completedCount / allVisibleTasks.length) * 100 : 0;
+  const progressPercent = Math.round(progress);
 
   return (
     <section className={`todo-panel${collapsed ? " todo-panel--collapsed" : ""}${planInterrupted ? " todo-panel--interrupted" : ""}${planPaused ? " todo-panel--paused" : ""}`} aria-label="Task plan">
       <button className="todo-panel__header" type="button" onClick={() => setCollapsed((value) => !value)} aria-expanded={!collapsed}>
-        <span className="todo-panel__title"><ListChecks size={16} /><strong>Task plan</strong></span>
-        <span className="todo-panel__summary">{planInterrupted ? "Stopped · " : planPaused ? `${pausedLabel} · ` : ""}{completedCount} of {allVisibleTasks.length} complete</span>
+        <span className="todo-panel__title"><ListChecks size={16} /><strong>{allVisibleTasks.length > 1 ? "Mission" : "Task"}</strong></span>
+        <span className="todo-panel__summary">{planInterrupted ? "Stopped · " : planPaused ? `${pausedLabel} · ` : ""}{completedCount} of {allVisibleTasks.length} accepted · {progressPercent}%</span>
+        <span className="todo-panel__runtime" aria-label="Mission runtime status">
+          {activeWorkers > 0 && <em><i />{activeWorkers} worker{activeWorkers === 1 ? "" : "s"}</em>}
+          {validationActive && <em><CircleNotch className="spin" size={10} />Validating</em>}
+          {failedWorkers > 0 && <em className="todo-panel__runtime-failure">{failedWorkers} recovery action{failedWorkers === 1 ? "" : "s"}</em>}
+        </span>
         <span className="todo-panel__progress" aria-hidden="true"><i style={{ width: `${progress}%` }} /></span>
         {collapsed && active && <span className="todo-panel__active">{planInterrupted ? "Stopped · " : planPaused ? "Paused · " : ""}{active.activeForm ?? active.subject}</span>}
         <span className="todo-panel__toggle">{collapsed ? <CaretUp size={13} /> : <CaretDown size={13} />}</span>
