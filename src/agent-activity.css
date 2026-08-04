@@ -265,6 +265,11 @@
   color: var(--danger);
 }
 
+.run-state--partial,
+.run-state--budget_exhausted {
+  color: var(--warning);
+}
+
 .run-state--needs-attention {
   color: var(--warning);
 }
@@ -296,6 +301,11 @@
 .agent-card--stopped,
 .agent-card--rejected {
   border-left: 2px solid var(--danger);
+}
+
+.agent-card--partial,
+.agent-card--budget_exhausted {
+  border-left: 2px solid var(--warning);
 }
 
 .agent-card__header {
@@ -394,6 +404,11 @@
 .agent-card--stopped .agent-card__status,
 .agent-card--rejected .agent-card__status {
   color: var(--danger);
+}
+
+.agent-card--partial .agent-card__status,
+.agent-card--budget_exhausted .agent-card__status {
+  color: var(--warning);
 }
 
 .agent-card--paused .agent-card__status {

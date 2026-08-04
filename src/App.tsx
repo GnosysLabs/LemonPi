@@ -136,6 +136,7 @@ function terminalSubagentState(run: SubagentRunStatus): TerminalSubagentState | 
   const state = String(run.state);
   if (state === "complete" || state === "completed") return "complete";
   if (state === "failed" || state === "stopped" || state === "rejected") return state;
+  if (state === "partial" || state === "budget_exhausted") return "failed";
   return undefined;
 }
 
@@ -150,7 +151,7 @@ function foregroundRunFromDetails(value: unknown, final: boolean): SubagentRunSt
     const step = asRecord(raw);
     if (!step || typeof step.agent !== "string") return undefined;
     const rawStatus = typeof step.status === "string" ? step.status : final ? "complete" : "running";
-    const status = rawStatus === "completed" ? "complete" : rawStatus as "pending" | "running" | "complete" | "failed" | "paused" | "stopped" | "rejected";
+    const status = rawStatus === "completed" ? "complete" : rawStatus as SubagentStepStatus["status"];
     const total = typeof step.tokens === "number" ? step.tokens : 0;
     const task = typeof step.task === "string" ? step.task : undefined;
     return {
@@ -1226,8 +1227,6 @@ export default function App() {
         <SettingsSurface
           hasProject={Boolean(project)}
           models={availableModels}
-          sessionModel={sessionState?.model}
-          sessionThinking={sessionState?.thinkingLevel}
           activeAgents={activeAgentNames}
           onClose={closeSettings}
           onNotice={addToast}

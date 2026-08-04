@@ -1311,6 +1311,7 @@ async fn start_pi(
     ensure_required_pi_packages(&executable).await?;
     let agent_dir = pi_agent_dir()?;
     ensure_auto_compaction_default(&agent_dir)?;
+    migrate_legacy_user_agent_routing(&agent_dir)?;
     remove_subagent_todo_access(&agent_dir, &cwd_path, trusted, &child_todo_bridge)?;
     let mut command = pi_command(&executable)?;
     command
@@ -2127,7 +2128,6 @@ struct DiscoveredAgent {
     name: String,
     description: String,
     source: &'static str,
-    definition_path: Option<PathBuf>,
     base_model: Option<String>,
     base_thinking: Option<String>,
 }
@@ -2156,6 +2156,7 @@ struct SubagentSettingsSnapshot {
     scope: String,
     user_settings_path: String,
     project_settings_path: Option<String>,
+    project_routing_enabled: bool,
 }
 
 fn pi_agent_dir() -> Result<PathBuf, String> {
@@ -2253,13 +2254,6 @@ fn subagents_object(
     settings.get("subagents").and_then(Value::as_object)
 }
 
-fn setting_string(settings: &serde_json::Map<String, Value>, field: &str) -> Option<String> {
-    subagents_object(settings)
-        .and_then(|subagents| subagents.get(field))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-}
-
 fn agent_override_string(
     settings: &serde_json::Map<String, Value>,
     agent: &str,
@@ -2322,7 +2316,6 @@ fn read_agent_definition(path: &Path, source: &'static str) -> Option<Discovered
         description: description.unwrap_or_else(|| format!("{name} subagent")),
         name,
         source,
-        definition_path: Some(path.to_path_buf()),
         base_model: model,
         base_thinking: thinking,
     })
@@ -2489,6 +2482,57 @@ fn discover_settings_agents(
     agents
 }
 
+fn migrate_legacy_user_agent_routing(agent_dir: &Path) -> Result<(), String> {
+    let settings_path = agent_dir.join("settings.json");
+    let mut settings = read_settings_object(&settings_path)?;
+    let legacy = discover_settings_agents(agent_dir, None);
+    let subagents = settings
+        .entry("subagents".to_string())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "User settings field 'subagents' must be an object.".to_string())?;
+    let overrides = subagents
+        .entry("agentOverrides".to_string())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| {
+            "User settings field 'subagents.agentOverrides' must be an object.".to_string()
+        })?;
+    let mut changed = false;
+    for agent in legacy.values().filter(|agent| agent.source == "user") {
+        let entry = overrides
+            .entry(agent.name.clone())
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| format!("User override for '{}' must be an object.", agent.name))?;
+        if !entry.contains_key("model") {
+            if let Some(model) = agent
+                .base_model
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                entry.insert("model".to_string(), Value::String(model.clone()));
+                changed = true;
+            }
+        }
+        if !entry.contains_key("thinking") {
+            if let Some(thinking) = agent.base_thinking.as_ref().filter(|value| {
+                matches!(
+                    value.as_str(),
+                    "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+                )
+            }) {
+                entry.insert("thinking".to_string(), Value::String(thinking.clone()));
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        write_settings_object(&settings_path, &settings)?;
+    }
+    Ok(())
+}
+
 fn validate_settings_scope(scope: &str, project: Option<&Path>) -> Result<(), String> {
     match scope {
         "user" => Ok(()),
@@ -2527,7 +2571,6 @@ fn build_subagent_settings_snapshot(
                         name: name.clone(),
                         description: "Configured subagent".to_string(),
                         source: "configured",
-                        definition_path: None,
                         base_model: None,
                         base_thinking: None,
                     });
@@ -2535,10 +2578,10 @@ fn build_subagent_settings_snapshot(
         }
     }
 
-    let user_default_model = setting_string(&user_settings, "defaultModel");
-    let project_default_model = setting_string(&project_settings, "defaultModel");
-    let user_default_thinking = setting_string(&user_settings, "defaultThinking");
-    let project_default_thinking = setting_string(&project_settings, "defaultThinking");
+    let project_routing_enabled = subagents_object(&user_settings)
+        .and_then(|subagents| subagents.get("allowProjectAgentRouting"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let mut agents = discovered
         .into_values()
         .map(|agent| {
@@ -2547,59 +2590,38 @@ fn build_subagent_settings_snapshot(
             let user_thinking = agent_override_string(&user_settings, &agent.name, "thinking");
             let project_thinking =
                 agent_override_string(&project_settings, &agent.name, "thinking");
-            let custom_model_locked = agent.source != "builtin" && agent.base_model.is_some();
-            let custom_thinking_locked = agent.source != "builtin" && agent.base_thinking.is_some();
-
-            let (effective_model, model_source) = if custom_model_locked {
-                (agent.base_model.clone(), "agent-file".to_string())
-            } else if let Some(value) = project_model.clone() {
-                (Some(value), "project".to_string())
-            } else if let Some(value) = user_model.clone() {
+            let (effective_model, model_source) = if let Some(value) = user_model.clone() {
                 (Some(value), "user".to_string())
-            } else if let Some(value) = agent.base_model.clone() {
-                (Some(value), "agent-file".to_string())
-            } else if let Some(value) = project_default_model.clone() {
-                (Some(value), "project-default".to_string())
-            } else if let Some(value) = user_default_model.clone() {
-                (Some(value), "user-default".to_string())
+            } else if project_routing_enabled && project_model.is_some() {
+                (project_model.clone(), "project".to_string())
             } else {
                 (None, "session".to_string())
             };
 
-            let (effective_thinking, thinking_source) = if custom_thinking_locked {
-                (agent.base_thinking.clone(), "agent-file".to_string())
-            } else if let Some(value) = project_thinking.clone() {
-                (Some(value), "project".to_string())
-            } else if let Some(value) = user_thinking.clone() {
+            let (effective_thinking, thinking_source) = if let Some(value) = user_thinking.clone() {
                 (Some(value), "user".to_string())
-            } else if let Some(value) = agent.base_thinking.clone() {
-                (Some(value), "agent-file".to_string())
-            } else if let Some(value) = project_default_thinking.clone() {
-                (Some(value), "project-default".to_string())
-            } else if let Some(value) = user_default_thinking.clone() {
-                (Some(value), "user-default".to_string())
+            } else if project_routing_enabled && project_thinking.is_some() {
+                (project_thinking.clone(), "project".to_string())
             } else {
                 (None, "session".to_string())
             };
 
-            let shadowed_by_project =
-                scope == "user" && (project_model.is_some() || project_thinking.is_some());
+            let shadowed_by_project = project_routing_enabled
+                && scope == "user"
+                && ((user_model.is_none() && project_model.is_some())
+                    || (user_thinking.is_none() && project_thinking.is_some()));
             SubagentSettingInfo {
                 name: agent.name,
                 description: agent.description,
                 source: agent.source,
                 effective_model,
                 effective_thinking,
-                model_override: if custom_model_locked {
-                    agent.base_model
-                } else if scope == "project" {
+                model_override: if scope == "project" {
                     project_model
                 } else {
                     user_model
                 },
-                thinking_override: if custom_thinking_locked {
-                    agent.base_thinking
-                } else if scope == "project" {
+                thinking_override: if scope == "project" {
                     project_thinking
                 } else {
                     user_thinking
@@ -2629,6 +2651,7 @@ fn build_subagent_settings_snapshot(
         scope,
         user_settings_path: user_path.to_string_lossy().into_owned(),
         project_settings_path: project_path.map(|path| path.to_string_lossy().into_owned()),
+        project_routing_enabled,
     })
 }
 
@@ -2837,32 +2860,15 @@ async fn set_subagent_override(
     validate_settings_scope(&scope, project.as_deref())?;
     tauri::async_runtime::spawn_blocking(move || {
         let agent_dir = pi_agent_dir()?;
-        let discovered = discover_settings_agents(&agent_dir, project.as_deref());
-        let definition_field_owned = discovered.get(&agent).is_some_and(|definition| {
-            definition.source != "builtin"
-                && if field == "model" {
-                    definition.base_model.is_some()
-                } else {
-                    definition.base_thinking.is_some()
-                }
-        });
-        if definition_field_owned {
-            let definition_path = discovered
-                .get(&agent)
-                .and_then(|definition| definition.definition_path.as_deref())
-                .ok_or_else(|| format!("Could not locate the agent file for '{agent}'."))?;
-            update_agent_frontmatter(definition_path, &field, value)?;
+        let path = if scope == "project" {
+            project
+                .as_deref()
+                .map(project_settings_path)
+                .ok_or_else(|| "Open a project before editing project settings.".to_string())?
         } else {
-            let path = if scope == "project" {
-                project
-                    .as_deref()
-                    .map(project_settings_path)
-                    .ok_or_else(|| "Open a project before editing project settings.".to_string())?
-            } else {
-                agent_dir.join("settings.json")
-            };
-            update_subagent_override_file(&path, &agent, &field, value)?;
-        }
+            agent_dir.join("settings.json")
+        };
+        update_subagent_override_file(&path, &agent, &field, value)?;
         build_subagent_settings_snapshot(project, scope)
     })
     .await
@@ -3344,8 +3350,55 @@ fn read_subagent_prompts(async_dir: &Path) -> HashMap<usize, String> {
     prompts
 }
 
+fn read_lemonpi_mission_attempts(session_file: &Path) -> HashMap<String, Value> {
+    let Ok(mut file) = fs::File::open(session_file) else {
+        return HashMap::new();
+    };
+    let length = file
+        .metadata()
+        .map(|metadata| metadata.len())
+        .unwrap_or_default();
+    let scan_bytes = length.min(SUBAGENT_TODO_TAIL_BYTES);
+    if length > scan_bytes && file.seek(SeekFrom::Start(length - scan_bytes)).is_err() {
+        return HashMap::new();
+    }
+    let mut content = String::new();
+    if file.take(scan_bytes).read_to_string(&mut content).is_err() {
+        return HashMap::new();
+    }
+    let mut latest = HashMap::new();
+    for line in content.lines() {
+        let Ok(entry) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if entry.get("type").and_then(Value::as_str) != Some("custom")
+            || entry.get("customType").and_then(Value::as_str) != Some("lemonpi-mission-state")
+        {
+            continue;
+        }
+        let Some(attempts) = entry
+            .get("data")
+            .and_then(|data| data.get("attempts"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        latest = attempts
+            .iter()
+            .filter_map(|attempt| {
+                attempt
+                    .get("runId")
+                    .and_then(Value::as_str)
+                    .map(|run_id| (run_id.to_string(), attempt.clone()))
+            })
+            .collect();
+    }
+    latest
+}
+
 #[tauri::command]
 async fn get_subagent_runs(session_file: String) -> Result<Vec<Value>, String> {
+    let lemonpi_attempts = read_lemonpi_mission_attempts(Path::new(&session_file));
     let temp = env::temp_dir();
     let entries = fs::read_dir(&temp)
         .map_err(|error| format!("Could not inspect the temporary directory: {error}"))?;
@@ -3385,12 +3438,42 @@ async fn get_subagent_runs(session_file: String) -> Result<Vec<Value>, String> {
         // an incident only until that same child produces new work.
         reconcile_subagent_attention(&mut status, &path);
         let prompts = path.parent().map(read_subagent_prompts).unwrap_or_default();
+        let lemonpi_attempt = status
+            .get("runId")
+            .and_then(Value::as_str)
+            .and_then(|run_id| lemonpi_attempts.get(run_id))
+            .cloned();
         if let Some(steps) = status.get_mut("steps").and_then(Value::as_array_mut) {
             for (index, step) in steps.iter_mut().enumerate() {
                 if let (Some(prompt), Some(fields)) = (prompts.get(&index), step.as_object_mut()) {
                     fields.insert("prompt".to_string(), Value::from(prompt.clone()));
                     if let Some(summary) = subagent_worker_summary(prompt) {
                         fields.insert("summary".to_string(), Value::from(summary));
+                    }
+                }
+                if let (Some(attempt), Some(fields)) =
+                    (lemonpi_attempt.as_ref(), step.as_object_mut())
+                {
+                    if let Some(model) = attempt.get("model").and_then(Value::as_str) {
+                        fields.insert("model".to_string(), Value::from(model));
+                    }
+                    if let Some(thinking) = attempt.get("thinking").and_then(Value::as_str) {
+                        fields.insert("thinking".to_string(), Value::from(thinking));
+                    }
+                    if let Some(state) = attempt.get("status").and_then(Value::as_str) {
+                        if state != "running" {
+                            fields.insert(
+                                "status".to_string(),
+                                Value::from(if state == "completed" {
+                                    "complete"
+                                } else {
+                                    state
+                                }),
+                            );
+                        }
+                    }
+                    if let Some(phase) = attempt.get("budgetPhase") {
+                        fields.insert("budgetPhase".to_string(), phase.clone());
                     }
                 }
             }
@@ -3400,6 +3483,34 @@ async fn get_subagent_runs(session_file: String) -> Result<Vec<Value>, String> {
                 "statusPath".to_string(),
                 Value::from(path.to_string_lossy().into_owned()),
             );
+            if let Some(attempt) = lemonpi_attempt.as_ref() {
+                if let Some(state) = attempt.get("status").and_then(Value::as_str) {
+                    fields.insert("lemonPiState".to_string(), Value::from(state));
+                    if state != "running" {
+                        fields.insert(
+                            "state".to_string(),
+                            Value::from(if state == "completed" {
+                                "complete"
+                            } else {
+                                state
+                            }),
+                        );
+                    }
+                }
+                for key in [
+                    "model",
+                    "thinking",
+                    "settingsSource",
+                    "settingsHash",
+                    "budgetPhase",
+                    "budgetStopReason",
+                    "partialHandoffPath",
+                ] {
+                    if let Some(value) = attempt.get(key) {
+                        fields.insert(key.to_string(), value.clone());
+                    }
+                }
+            }
         }
         runs.push(status);
     }
@@ -4074,6 +4185,40 @@ mod tests {
             reset["subagents"]["agentOverrides"]["reviewer"]["thinking"],
             "high"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_user_agent_routing_is_migrated_without_overwriting_settings() {
+        let root = env::temp_dir().join(format!(
+            "lemonpi-agent-routing-migration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("agents")).unwrap();
+        fs::write(
+            root.join("agents/explorer.md"),
+            "---\nname: explorer\nmodel: openai-codex/gpt-5.6-luna\nthinking: xhigh\n---\nInspect repositories.\n",
+        )
+        .unwrap();
+        write_settings_object(
+            &root.join("settings.json"),
+            &serde_json::Map::from_iter([(
+                "subagents".to_string(),
+                json!({ "agentOverrides": { "explorer": { "thinking": "max", "tools": ["read"] } } }),
+            )]),
+        )
+        .unwrap();
+
+        migrate_legacy_user_agent_routing(&root).unwrap();
+        let settings = read_settings_object(&root.join("settings.json")).unwrap();
+        let explorer = &settings["subagents"]["agentOverrides"]["explorer"];
+        assert_eq!(explorer["model"], "openai-codex/gpt-5.6-luna");
+        assert_eq!(explorer["thinking"], "max");
+        assert_eq!(explorer["tools"][0], "read");
         fs::remove_dir_all(root).unwrap();
     }
 

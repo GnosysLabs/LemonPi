@@ -77,7 +77,7 @@ function formatClockTime(timestamp: number): string {
 
 function shortModel(model?: string): string | undefined {
   if (!model) return undefined;
-  return model.split("/").at(-1)?.replace(/:([a-z]+)$/i, "");
+  return model;
 }
 
 function compactLine(value: string, limit = 150): string {
@@ -179,7 +179,7 @@ function StatusIcon({ status, needsAttention = false }: { status: string; needsA
   if (needsAttention) return <Warning size={12} />;
   if (status === "running" || status === "queued" || status === "pending") return <CircleNotch className="spin" size={12} />;
   if (status === "paused") return <Pause size={12} weight="fill" />;
-  if (status === "failed" || status === "stopped" || status === "rejected") return <Warning size={12} />;
+  if (status === "failed" || status === "partial" || status === "budget_exhausted" || status === "stopped" || status === "rejected") return <Warning size={12} />;
   return <Check size={12} />;
 }
 
@@ -234,7 +234,9 @@ function AgentCard({
   const [stopping, setStopping] = useState(false);
   const [steerError, setSteerError] = useState<string>();
   const [promptOpen, setPromptOpen] = useState(false);
-  const model = shortModel(step.model);
+  const model = shortModel(step.model ?? run.model);
+  const thinking = step.thinking ?? run.thinking;
+  const budgetPhase = step.budgetPhase ?? run.budgetPhase;
   const activityEvents = activity?.events ?? [];
   const newestActivityEvents = [...activityEvents].reverse();
   const healthState = step.activityState ?? ((run.steps?.length ?? 0) <= 1 ? run.activityState : undefined);
@@ -312,7 +314,8 @@ function AgentCard({
         <div className="agent-card__detail">
           <div className="agent-card__meta">
             {model && <span><Robot size={11} />{model}</span>}
-            {step.thinking && <span><Brain size={11} />{step.thinking}</span>}
+            {thinking && <span><Brain size={11} />{thinking}</span>}
+            {budgetPhase && budgetPhase !== "work" && <span>Budget: {budgetPhase}</span>}
             {step.tokens && <span>{step.tokens.total.toLocaleString()} tok</span>}
             {step.turnCount != null && <span>{step.turnCount} turn{step.turnCount === 1 ? "" : "s"}</span>}
           </div>
@@ -469,7 +472,7 @@ export function AgentActivityPanel({
             const orderedSteps = (run.steps ?? [])
               .map((step, index) => ({ step, index: step.index ?? index }))
               .sort((left, right) => left.index - right.index);
-            const stateLabel = needsAttention ? "needs attention" : run.state;
+            const stateLabel = needsAttention ? "needs attention" : run.state === "budget_exhausted" ? "budget exhausted" : run.state;
             const stateClass = needsAttention ? "needs-attention" : run.state;
             const displayMode = (run.steps?.length ?? 0) <= 1 ? "single" : run.mode;
             return <section className="agent-run" key={run.runId}>

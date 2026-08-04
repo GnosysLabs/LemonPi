@@ -9,6 +9,7 @@
     "build": "tsc -b && vite build",
     "test:narration-contracts": "node --experimental-strip-types scripts/check-narration-contracts.mjs",
     "test:orchestration-runtime": "node --experimental-strip-types scripts/check-orchestration-runtime.mjs",
+    "test:model-routing-budget": "node --experimental-strip-types scripts/check-model-routing-budget.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "tauri": "tauri"

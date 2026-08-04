@@ -143,7 +143,7 @@ export interface SubagentStepStatus {
   prompt?: string;
   phase?: string;
   label?: string;
-  status: "pending" | "running" | "complete" | "completed" | "failed" | "paused" | "stopped" | "rejected";
+  status: "pending" | "running" | "complete" | "completed" | "partial" | "budget_exhausted" | "failed" | "paused" | "stopped" | "rejected";
   sessionFile?: string;
   transcriptPath?: string;
   activityState?: "active_long_running" | "needs_attention";
@@ -164,6 +164,7 @@ export interface SubagentStepStatus {
   tokens?: { input: number; output: number; total: number };
   model?: string;
   thinking?: string;
+  budgetPhase?: "work" | "warning" | "finalizing";
   error?: string;
 }
 
@@ -172,7 +173,7 @@ export interface SubagentRunStatus {
   runId: string;
   sessionId?: string;
   mode: "single" | "parallel" | "chain";
-  state: "queued" | "running" | "complete" | "failed" | "paused" | "stopped" | "rejected";
+  state: "queued" | "running" | "complete" | "partial" | "budget_exhausted" | "failed" | "paused" | "stopped" | "rejected";
   error?: string;
   activityState?: "active_long_running" | "needs_attention";
   lastActivityAt?: number;
@@ -190,6 +191,13 @@ export interface SubagentRunStatus {
   totalTokens?: { input: number; output: number; total: number };
   totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
   statusPath?: string;
+  model?: string;
+  thinking?: string;
+  settingsSource?: string;
+  settingsHash?: string;
+  budgetPhase?: "work" | "warning" | "finalizing";
+  budgetStopReason?: string;
+  partialHandoffPath?: string;
 }
 
 export type SubagentActivityKind = "reasoning" | "message" | "tool" | "result" | "error";
@@ -240,6 +248,7 @@ export interface SubagentSettingsSnapshot {
   scope: SubagentSettingsScope;
   userSettingsPath: string;
   projectSettingsPath?: string;
+  projectRoutingEnabled: boolean;
 }
 
 export type PiSettingsScope = "user" | "project";

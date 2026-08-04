@@ -583,16 +583,12 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ key: Section; icon: Icon
 export function SettingsSurface({
   hasProject,
   models,
-  sessionModel,
-  sessionThinking,
   activeAgents,
   onClose,
   onNotice,
 }: {
   hasProject: boolean;
   models: PiModel[];
-  sessionModel?: PiModel;
-  sessionThinking?: ThinkingLevel;
   activeAgents: Set<string>;
   onClose: () => void;
   onNotice: (message: string, tone?: "info" | "warning" | "error") => void;
@@ -867,8 +863,11 @@ export function SettingsSurface({
               <>
                 <div className="settings-toolbar">
                   <label className="settings-search"><MagnifyingGlass size={14} aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search agents, models, or providers…" aria-label="Search agents" />{query && <button type="button" onClick={() => setQuery("")} aria-label="Clear search"><X size={12} /></button>}</label>
-                  <span>{scope === "project" ? "Project overrides" : "User overrides"}</span>
+                  <span>{scope === "project" ? agentSnapshot.projectRoutingEnabled ? "Project routing enabled" : "Project routing inactive" : "Authoritative user overrides"}</span>
                 </div>
+                {scope === "project" && !agentSnapshot.projectRoutingEnabled && (
+                  <div className="package-security-note"><Warning size={15} /><span>Project model and thinking values do not affect launches. Enable <code>subagents.allowProjectAgentRouting</code> in All projects advanced settings to opt in; populated user agent overrides still win.</span></div>
+                )}
                 {!filteredAgents.length && <div className="settings-error settings-error--empty"><MagnifyingGlass size={19} /><strong>No matching agents</strong><span>Try a name, provider, or model id.</span><button type="button" onClick={() => setQuery("")}>Clear search</button></div>}
                 {agentGroups.map((group) => (
                   <section className="agent-settings-group" aria-labelledby={`agent-settings-${group.key}`} key={group.key}>
@@ -876,20 +875,20 @@ export function SettingsSurface({
                     <div className="settings-panel__shell">
                       <div className="settings-panel__body agent-settings-list">
                         {group.agents.map((agent) => {
-                          const displayedModel = agent.effectiveModel ?? (sessionModel ? modelKey(sessionModel) : "Session model");
-                          const displayedThinking = agent.effectiveThinking ?? sessionThinking ?? "Session default";
+                          const displayedModel = agent.effectiveModel ?? "Not configured — launch blocked";
+                          const displayedThinking = agent.effectiveThinking ?? "Not configured — launch blocked";
                           const modelSaving = saving[`${agent.name}:model`]; const thinkingSaving = saving[`${agent.name}:thinking`];
                           const configuredModelMissing = agent.modelOverride && !models.some((model) => modelKey(model) === agent.modelOverride);
                           return (
                             <article className="agent-setting-row" data-live={activeAgents.has(agent.name) || undefined} data-shadowed={agent.shadowedByProject || undefined} key={agent.name}>
                               <span className="agent-setting-row__status" aria-hidden="true" />
-                              <div className="agent-setting-row__identity"><div><strong>{agent.name}</strong><span className={`agent-source agent-source--${agent.source}`}>{sentenceCase(agent.source)}</span>{activeAgents.has(agent.name) && <span className="agent-live-chip">Running</span>}</div><p>{agent.description}</p>{agent.shadowedByProject && <small className="agent-shadow-notice">A project override takes precedence here.</small>}</div>
+                              <div className="agent-setting-row__identity"><div><strong>{agent.name}</strong><span className={`agent-source agent-source--${agent.source}`}>{sentenceCase(agent.source)}</span>{activeAgents.has(agent.name) && <span className="agent-live-chip">Running</span>}</div><p>{agent.description}</p>{agent.shadowedByProject && <small className="agent-shadow-notice">User-enabled project routing fills a missing user value here.</small>}</div>
                               <div className="agent-setting-control agent-setting-control--model" data-inherited={!agent.modelOverride || undefined} data-busy={modelSaving || undefined}>
                                 <span>Provider / model <i>{agent.modelOverride ? agent.modelSource === "agent-file" ? "Agent file" : scope === "project" ? "Project" : "User" : sourceLabel(agent.modelSource)}</i></span>
                                 <ChoicePicker
                                   ariaLabel={`Provider and model for ${agent.name}`}
                                   value={agent.modelOverride}
-                                  unsetLabel={`Inherit · ${displayedModel}`}
+                                  unsetLabel={scope === "project" ? `Unset · ${displayedModel}` : displayedModel}
                                   options={configuredModelMissing ? [{ value: agent.modelOverride!, label: agent.modelOverride!, hint: "Unavailable" }] : []}
                                   groups={providerGroups}
                                   disabled={agent.modelLocked || modelSaving}
@@ -902,7 +901,7 @@ export function SettingsSurface({
                                 <ChoicePicker
                                   ariaLabel={`Thinking level for ${agent.name}`}
                                   value={agent.thinkingOverride}
-                                  unsetLabel={`Inherit · ${displayedThinking}`}
+                                  unsetLabel={scope === "project" ? `Unset · ${displayedThinking}` : displayedThinking}
                                   options={THINKING_LEVELS.map((level) => ({ value: level, label: sentenceCase(level) }))}
                                   disabled={agent.thinkingLocked || thinkingSaving}
                                   busy={thinkingSaving}

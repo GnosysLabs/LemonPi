@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import {
@@ -9,12 +9,15 @@ import {
   contentHash,
   CURRENT_ORCHESTRATION_POLICY_VERSION,
   ORCHESTRATION_POLICY_NOTICE,
-  recommendedReasoning,
   fastPathIssue,
   hiddenScopeExpansionIssue,
   internalContractFallback,
+  immutableResumeBinding,
   missionStateContentHash,
+  launchOverridePath,
+  preferredTerminalStatus,
   recoveryAction,
+  resolveAgentLaunchBinding,
   reviewDeduplicationIssue,
   reviewLedgerKey,
   resumeWorkerIssue,
@@ -25,7 +28,11 @@ import {
   validationDeduplicationIssue,
   workerContextLimits,
   workerExecutionBudget,
+  workerBudgetPhase,
   workerStatusMetrics,
+  buildPartialWorkerHandoff,
+  terminalOutcome,
+  type AgentLaunchBinding,
   type ReviewRecord,
   type ValidationRecord,
   type WorkerAttempt,
@@ -60,7 +67,7 @@ const IndependentDispatchSchema = {
           worktreePath: { type: "string", description: "Optional already-prepared clean Git worktree to reuse." },
           baseRevision: { type: "string", description: "Expected HEAD for a prepared worktree." },
           todoId: { type: "integer", minimum: 1, description: "Visible todo milestone owned by this lane. LemonPi updates it automatically for the worker lifecycle." },
-          model: { type: "string", description: "Optional model override for this lane." },
+          continuationOf: { type: "string", description: "Prior partial or budget-exhausted run. LemonPi supplies only its unresolved handoff to a fresh child." },
           skill: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }, { type: "boolean" }] },
         },
         required: ["agent", "summary", "task", "executionMode"],
@@ -164,7 +171,7 @@ Optimize for delivery latency and preserve the user's exact scope.
 7. Validation evidence is reused for the same repository revision plus diff hash, command, paths, and dependency state. Run one focused check per slice; run one broader check only once after a genuinely multi-slice integration. Do not repeat an unchanged suite under a different scope label.
 8. Completion wakes are deferred until Main Pi's current turn and every tool have ended. Never let a completion notice abort current validation or restart reconciliation.
 9. If the same LemonPi tool contract fails twice, stop negotiating with it. Take the safe fallback named in the error: use fast path for eligible UI work or \`integrate_worktree\` for inspected worker code, and continue.
-10. LemonPi supplies live token, turn, tool-call, and wall-clock budgets. Routine repository scouts run read-only at low reasoning; implementation workers run medium unless material risk requires high. Main Pi reserves expensive reasoning for actual architecture decisions.
+10. LemonPi supplies live token, turn, tool-call, and wall-clock budgets. Every child uses the exact model and thinking configured for its agent in user settings. Prompts and tool calls cannot override that binding.
 11. Mission todos are append-only history. Update their lifecycle or append a correction; never delete the original worker milestone.
 12. Main Pi alone asks clarifying questions. Do not wait or poll background workers; remain responsive and reconcile each terminal result once.
 </lemonpi-orchestration>`;
@@ -252,36 +259,65 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
-function runtimeRoutedModel(agent: string, cwd: string | undefined, explicitModel: unknown, reasoning: "low" | "medium" | "high"): string | undefined {
-  const readSettings = (path: string): Record<string, unknown> => {
-    try { return asRecord(JSON.parse(readFileSync(path, "utf8"))) ?? {}; } catch { return {}; }
-  };
+function readJsonObject(path: string): Record<string, unknown> {
+  try { return asRecord(JSON.parse(readFileSync(path, "utf8"))) ?? {}; } catch { return {}; }
+}
+
+function userLemonPiSettings(): Record<string, unknown> {
   const agentDir = process.env.PI_CODING_AGENT_DIR || resolve(homedir(), ".pi/agent");
-  const user = readSettings(resolve(agentDir, "settings.json"));
-  const project = cwd ? readSettings(resolve(cwd, ".pi/settings.json")) : {};
-  const configuredAgentModel = (settings: Record<string, unknown>) => {
-    const subagents = asRecord(settings.subagents);
-    const overrides = asRecord(subagents?.agentOverrides);
-    const entry = asRecord(overrides?.[agent]);
-    return typeof entry?.model === "string" && entry.model.trim() ? entry.model.trim() : undefined;
-  };
-  const configuredDefault = (settings: Record<string, unknown>) => {
-    const value = asRecord(settings.subagents)?.defaultModel;
-    return typeof value === "string" && value.trim() ? value.trim() : undefined;
-  };
-  let model = typeof explicitModel === "string" && explicitModel.trim()
-    ? explicitModel.trim()
-    : configuredAgentModel(project)
-      ?? configuredAgentModel(user)
-      ?? configuredDefault(project)
-      ?? configuredDefault(user);
-  if (!model) {
-    const provider = typeof user.defaultProvider === "string" ? user.defaultProvider.trim() : "";
-    const defaultModel = typeof user.defaultModel === "string" ? user.defaultModel.trim() : "";
-    if (defaultModel) model = provider && !defaultModel.includes("/") ? `${provider}/${defaultModel}` : defaultModel;
+  return readJsonObject(resolve(agentDir, "settings.json"));
+}
+
+function availableModelIds(ctx: unknown): string[] {
+  const registry = asRecord(ctx)?.modelRegistry as { getAvailable?: () => unknown[] } | undefined;
+  const models = registry?.getAvailable?.() ?? [];
+  return [...new Set(models.flatMap((candidate) => {
+    const model = asRecord(candidate);
+    const provider = typeof model?.provider === "string" ? model.provider.trim() : "";
+    const id = typeof model?.id === "string" ? model.id.trim() : "";
+    return provider && id ? [`${provider}/${id}`] : [];
+  }))];
+}
+
+function configuredAgentDefinitionFallbacks(agent: string, cwd: string | undefined): string[] {
+  const agentDir = process.env.PI_CODING_AGENT_DIR || resolve(homedir(), ".pi/agent");
+  const directories = [
+    resolve(agentDir, "npm/node_modules/pi-subagents/agents"),
+    resolve(agentDir, "agents"),
+    resolve(homedir(), ".agents"),
+    ...(cwd ? [resolve(cwd, ".pi/agents"), resolve(cwd, ".agents")] : []),
+  ];
+  const configured: string[] = [];
+  for (const directory of directories) {
+    let entries: Array<{ isFile(): boolean; name: string }>;
+    try { entries = readdirSync(directory, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries.slice(0, 512)) {
+      if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+      const path = resolve(directory, entry.name);
+      let text = "";
+      try {
+        if (statSync(path).size > 256 * 1024) continue;
+        text = readFileSync(path, "utf8");
+      } catch { continue; }
+      const frontmatter = /^---\s*\r?\n([\s\S]*?)\r?\n---/m.exec(text)?.[1] ?? "";
+      const name = /^\s*name\s*:\s*["']?([^\r\n"']+)/mi.exec(frontmatter)?.[1]?.trim();
+      if (name !== agent) continue;
+      const fallback = /^\s*fallbackModels\s*:\s*(.*)$/mi.exec(frontmatter);
+      if (fallback && fallback[1]?.trim() !== "[]") configured.push(`${path} fallbackModels`);
+    }
   }
-  if (!model) return undefined;
-  return `${model.replace(/:(?:off|minimal|low|medium|high|xhigh|max)$/i, "")}:${reasoning}`;
+  return configured;
+}
+
+function runtimeLaunchBinding(agent: string, cwd: string | undefined, ctx: unknown): ReturnType<typeof resolveAgentLaunchBinding> {
+  const userSettings = userLemonPiSettings();
+  return resolveAgentLaunchBinding({
+    agent,
+    userSettings,
+    projectSettings: cwd ? readJsonObject(resolve(cwd, ".pi/settings.json")) : {},
+    availableModels: availableModelIds(ctx),
+    configuredFallbackModels: configuredAgentDefinitionFallbacks(agent, cwd),
+  });
 }
 
 const CHUNK_OUTCOME = /(?:^|\n)\s*chunk outcome\s*:\s*\S/i;
@@ -1180,6 +1216,18 @@ interface MissionState {
   validations: ValidationRecord[];
   reviews: ReviewRecord[];
   suppressedRunIds?: string[];
+  pendingLaunches?: Array<{
+    launchId: string;
+    agent: string;
+    purpose: string;
+    task: string;
+    executionMode: "read-only" | "implementation";
+    model: string;
+    thinking: AgentLaunchBinding["thinking"];
+    settingsSource: AgentLaunchBinding["source"];
+    settingsHash: string;
+    startedAt: number;
+  }>;
 }
 
 export function parsedMissionState(value: unknown): MissionState | undefined {
@@ -1198,10 +1246,13 @@ export function parsedMissionState(value: unknown): MissionState | undefined {
     ? record.attempts.map(asRecord).filter((attempt): attempt is Record<string, unknown> => Boolean(attempt))
       .filter((attempt) => typeof attempt.runId === "string"
         && typeof attempt.purpose === "string"
-        && ["running", "completed", "failed", "stopped"].includes(String(attempt.status)))
+        && ["running", "completed", "partial", "budget_exhausted", "failed", "stopped"].includes(String(attempt.status)))
       .slice(-64)
       .map((attempt) => ({
         runId: String(attempt.runId).slice(0, 128),
+        ...(typeof attempt.launchId === "string" ? { launchId: attempt.launchId.slice(0, 128) } : {}),
+        ...(typeof attempt.agent === "string" ? { agent: attempt.agent.slice(0, 160) } : {}),
+        ...(typeof attempt.task === "string" ? { task: attempt.task.slice(0, 20_000) } : {}),
         purpose: String(attempt.purpose).slice(0, 96),
         status: attempt.status as WorkerAttempt["status"],
         executionMode: attempt.executionMode === "implementation" ? "implementation" as const : "read-only" as const,
@@ -1215,6 +1266,15 @@ export function parsedMissionState(value: unknown): MissionState | undefined {
         ...(typeof attempt.elapsedMs === "number" ? { elapsedMs: Math.max(0, attempt.elapsedMs) } : {}),
         ...(typeof attempt.activityState === "string" ? { activityState: attempt.activityState.slice(0, 64) } : {}),
         ...(typeof attempt.budgetStopReason === "string" ? { budgetStopReason: attempt.budgetStopReason.slice(0, 240) } : {}),
+        ...(attempt.budgetPhase === "work" || attempt.budgetPhase === "warning" || attempt.budgetPhase === "finalizing" ? { budgetPhase: attempt.budgetPhase as WorkerAttempt["budgetPhase"] } : {}),
+        ...(attempt.budgetWarningSent === true ? { budgetWarningSent: true } : {}),
+        ...(typeof attempt.terminalCommittedAt === "number" ? { terminalCommittedAt: attempt.terminalCommittedAt } : {}),
+        ...(attempt.usableOutput === true ? { usableOutput: true } : {}),
+        ...(typeof attempt.partialHandoffPath === "string" ? { partialHandoffPath: attempt.partialHandoffPath } : {}),
+        ...(typeof attempt.model === "string" ? { model: attempt.model.slice(0, 240) } : {}),
+        ...(typeof attempt.thinking === "string" ? { thinking: attempt.thinking as WorkerAttempt["thinking"] } : {}),
+        ...(typeof attempt.settingsSource === "string" ? { settingsSource: attempt.settingsSource as WorkerAttempt["settingsSource"] } : {}),
+        ...(typeof attempt.settingsHash === "string" ? { settingsHash: attempt.settingsHash.slice(0, 128) } : {}),
         ...(attempt.emptyOutput === true ? { emptyOutput: true } : {}),
         ...(attempt.corrupted === true ? { corrupted: true } : {}),
         ...(typeof attempt.todoId === "number" && Number.isInteger(attempt.todoId) ? { todoId: attempt.todoId } : {}),
@@ -1270,6 +1330,11 @@ export function parsedMissionState(value: unknown): MissionState | undefined {
     attempts,
     validations,
     reviews,
+    ...(Array.isArray(record.pendingLaunches)
+      ? { pendingLaunches: record.pendingLaunches.map(asRecord).filter((item): item is Record<string, unknown> => Boolean(item))
+        .filter((item) => typeof item.launchId === "string" && typeof item.agent === "string" && typeof item.model === "string" && typeof item.thinking === "string" && typeof item.settingsHash === "string")
+        .slice(-32) as MissionState["pendingLaunches"] }
+      : {}),
     ...(Array.isArray(record.suppressedRunIds)
       ? { suppressedRunIds: [...new Set(record.suppressedRunIds.filter((runId): runId is string => typeof runId === "string").map((runId) => runId.slice(0, 128)))].slice(-64) }
       : {}),
@@ -1354,7 +1419,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   const delegationToolCalls = new Set<string>();
   const delegationLaunchToolCalls = new Set<string>();
   const delegationLaunchWidths = new Map<string, number>();
-  const delegationAttemptMetadata = new Map<string, { purpose: string; executionMode: "read-only" | "implementation"; startedAt: number }>();
+  const delegationAttemptMetadata = new Map<string, { launchId: string; agent: string; task: string; purpose: string; executionMode: "read-only" | "implementation"; repository: string; startedAt: number; binding: AgentLaunchBinding }>();
   const activeDelegationWidths = new Map<string, number>();
   const activeWriterRuns = new Set<string>();
   const manuallyStoppedRuns = new Set<string>();
@@ -1364,11 +1429,12 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     sessionId?: string;
     status: Exclude<WriterLifecycleStatus, "paused">;
     agent?: string;
+    evidence?: unknown;
   }>();
   let independentCompletionTimer: ReturnType<typeof setTimeout> | undefined;
   const statusToolCalls = new Map<string, { key: string; target?: string }>();
   const activeStatusChecksThisTurn = new Set<string>();
-  const resumeToolCalls = new Map<string, { implementation: boolean; previousRunId: string; purpose: string; sliceCount: number }>();
+  const resumeToolCalls = new Map<string, { launchId: string; implementation: boolean; previousRunId: string; purpose: string; sliceCount: number; binding: AgentLaunchBinding; task: string; agent: string; repository?: string }>();
   const rosterToolCalls = new Set<string>();
   const executableAgents = new Set<string>();
   let activeDelegationHandoffPending = false;
@@ -1508,6 +1574,59 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     return mission;
   };
 
+  const persistPendingLaunch = (input: {
+    launchId: string;
+    agent: string;
+    purpose: string;
+    task: string;
+    executionMode: "read-only" | "implementation";
+    binding: AgentLaunchBinding;
+    startedAt: number;
+  }) => {
+    const currentMission = ensureMission("delegated");
+    currentMission.pendingLaunches ??= [];
+    currentMission.pendingLaunches.push({
+      launchId: input.launchId,
+      agent: input.agent,
+      purpose: input.purpose,
+      task: input.task,
+      executionMode: input.executionMode,
+      model: input.binding.model,
+      thinking: input.binding.thinking,
+      settingsSource: input.binding.source,
+      settingsHash: input.binding.settingsHash,
+      startedAt: input.startedAt,
+    });
+    persistMissionNow();
+  };
+
+  const clearPendingLaunch = (launchId: string) => {
+    if (!mission?.pendingLaunches) return;
+    mission.pendingLaunches = mission.pendingLaunches.filter((launch) => launch.launchId !== launchId);
+    if (mission.pendingLaunches.length === 0) delete mission.pendingLaunches;
+    persistMission();
+  };
+
+  const writeAutomaticPartialHandoff = (attempt: WorkerAttempt, evidence: unknown): string | undefined => {
+    const handoff = buildPartialWorkerHandoff({
+      attempt,
+      evidence,
+      stopReason: attempt.budgetStopReason ?? (attempt.status === "stopped" ? "stopped by user" : attempt.status),
+    });
+    if (!handoff || !mission) return undefined;
+    const root = attempt.repository ?? process.cwd();
+    const handoffDirectory = resolve(root, ".pi-subagents", "artifacts", "lemonpi-handoffs", mission.id);
+    const safeRunId = attempt.runId.replace(/[^a-zA-Z0-9._-]+/g, "-");
+    const handoffPath = resolve(handoffDirectory, `${safeRunId}.json`);
+    try {
+      mkdirSync(handoffDirectory, { recursive: true });
+      writeFileSync(handoffPath, `${JSON.stringify(handoff, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+      return handoffPath;
+    } catch {
+      return undefined;
+    }
+  };
+
   const updateAttemptTelemetry = (runId: string, value: unknown): WorkerAttempt | undefined => {
     const attempt = mission?.attempts.find((candidate) => candidate.runId === runId);
     if (!attempt) return undefined;
@@ -1532,19 +1651,23 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
 
   const enforceAttemptBudget = async (attempt: WorkerAttempt): Promise<void> => {
     if (attempt.status !== "running" || budgetStopsInFlight.has(attempt.runId)) return;
-    const budget = workerExecutionBudget(attempt.executionMode, process.env);
+    const budget = workerExecutionBudget(attempt.agent ?? "worker", attempt.executionMode, userLemonPiSettings());
     const elapsedMs = Math.max(attempt.elapsedMs ?? 0, attempt.startedAt ? Date.now() - attempt.startedAt : 0);
-    const reason = attempt.tokens >= budget.maxTokens
-      ? `token budget reached (${attempt.tokens}/${budget.maxTokens})`
-      : (attempt.turns ?? 0) >= budget.maxTurns + 2
-        ? `turn budget reached (${attempt.turns}/${budget.maxTurns}+2 grace)`
-        : (attempt.toolCalls ?? 0) >= budget.maxToolCalls
-          ? `tool-call budget reached (${attempt.toolCalls}/${budget.maxToolCalls})`
-          : elapsedMs >= budget.maxRuntimeMs
-            ? `wall-clock budget reached (${Math.round(elapsedMs / 1_000)}s/${Math.round(budget.maxRuntimeMs / 1_000)}s)`
-            : undefined;
-    if (!reason) return;
-    attempt.budgetStopReason = reason;
+    const state = workerBudgetPhase({ tokens: attempt.tokens, turns: attempt.turns ?? 0, toolCalls: attempt.toolCalls ?? 0, elapsedMs }, budget);
+    attempt.budgetPhase = state.phase;
+    if ((state.phase === "warning" || state.phase === "finalizing") && !attempt.budgetWarningSent) {
+      attempt.budgetWarningSent = true;
+      persistMission();
+      try {
+        await requestSubagentSteer(pi, attempt.runId, 0, state.phase === "finalizing"
+          ? "LemonPi finalization reserve is active. Start no normal tool work. Return the requested result or a concise partial handoff now."
+          : "LemonPi budget warning: finish the current bounded action, then return the requested result without expanding scope.");
+      } catch {
+        // The package also receives native soft/hard budget contracts at launch.
+      }
+    }
+    if (!state.hardStopReason) return;
+    attempt.budgetStopReason = state.hardStopReason;
     budgetStopsInFlight.add(attempt.runId);
     persistMission();
     try {
@@ -1554,23 +1677,38 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     }
   };
 
-  const recordTerminalAttempt = (runId: string, status: Exclude<WriterLifecycleStatus, "paused">) => {
+  const recordTerminalAttempt = (runId: string, status: Exclude<WriterLifecycleStatus, "paused">, evidence?: unknown) => {
     if (!mission) return;
     const attempt = [...mission.attempts].reverse().find((candidate) => candidate.runId === runId);
     if (!attempt) return;
     const wasRunning = attempt.status === "running";
-    attempt.status = status === "completed" ? "completed" : status === "stopped" ? "stopped" : "failed";
+    const outcome = terminalOutcome({
+      reportedStatus: status,
+      evidence,
+      budgetStopReason: attempt.budgetStopReason,
+      manuallyStopped: isManuallyStoppedRun(runId),
+    });
+    attempt.status = preferredTerminalStatus(attempt.status, outcome.status);
+    attempt.usableOutput = attempt.usableOutput === true || outcome.usableOutput;
+    attempt.terminalCommittedAt ??= Date.now();
     attempt.elapsedMs = Math.max(attempt.elapsedMs ?? 0, attempt.startedAt ? Date.now() - attempt.startedAt : 0);
     if (wasRunning) attempt.completedOrdinal = Math.max(0, ...mission.attempts.map((candidate) => candidate.completedOrdinal)) + 1;
-    if (status === "completed") mission.lastCompletedRunId = runId;
+    if (attempt.status === "completed") mission.lastCompletedRunId = runId;
+    if ((attempt.status === "partial" || attempt.status === "budget_exhausted") && !attempt.partialHandoffPath) {
+      const handoffPath = writeAutomaticPartialHandoff(attempt, evidence);
+      if (handoffPath) {
+        attempt.partialHandoffPath = handoffPath;
+        attempt.handoffPath ??= handoffPath;
+      }
+    }
     budgetStopsInFlight.delete(runId);
-    if (attempt.todoId) void publishTodoLifecycle(attempt.todoId, status === "completed" ? "completed" : "pending");
+    if (attempt.todoId) void publishTodoLifecycle(attempt.todoId, attempt.status === "completed" ? "completed" : attempt.status === "failed" || attempt.status === "stopped" ? "pending" : "in_progress");
     const review = reviewByRun.get(runId);
     if (review) {
       const key = reviewLedgerKey(review);
       activeReviewKeys.delete(key);
       reviewByRun.delete(runId);
-      if (status === "completed" && !reviewDeduplicationIssue(mission.reviews, review)) {
+      if (attempt.status === "completed" && !reviewDeduplicationIssue(mission.reviews, review)) {
         mission.reviews.push({ ...review, accepted: true });
       }
     }
@@ -1872,8 +2010,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     status: Exclude<WriterLifecycleStatus, "paused">,
     agent?: string,
     force = false,
+    evidence?: unknown,
   ) => {
-    recordTerminalAttempt(runId, status);
+    recordTerminalAttempt(runId, status, evidence);
     const key = terminalRunKey(sessionId, runId);
     if (isManuallyStoppedRun(runId)) {
       rememberTerminalRun(key);
@@ -1891,11 +2030,11 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     const deferred = deferredWriterLanesByRun.get(runId) ?? [];
     deferredWriterLanesByRun.delete(runId);
     const terminalAttempt = mission?.attempts.find((attempt) => attempt.runId === runId);
-    const implementationHandle = terminalAttempt?.executionMode === "implementation" && status === "completed"
+    const implementationHandle = terminalAttempt?.executionMode === "implementation" && terminalAttempt.status === "completed"
       ? `; integrate deterministically with lemonpi_git { action: "integrate_worker_result", artifactRunId: "${runId}" }`
       : "";
     const budgetNotice = terminalAttempt?.budgetStopReason ? `; stopped by LemonPi: ${terminalAttempt.budgetStopReason}` : "";
-    pendingIntegrationNotices.push(`- ${runId}${agent ? ` (${agent})` : ""}: ${status}${budgetNotice}${implementationHandle}${deferred.length > 0 ? `; deferred lanes: ${deferred.join(", ")}` : ""}`);
+    pendingIntegrationNotices.push(`- ${runId}${agent ? ` (${agent})` : ""}: ${terminalAttempt?.status ?? status}${budgetNotice}${implementationHandle}${terminalAttempt?.partialHandoffPath ? `; continuation handoff: ${terminalAttempt.partialHandoffPath}` : ""}${deferred.length > 0 ? `; deferred lanes: ${deferred.join(", ")}` : ""}`);
     const currentMission = ensureMission("integration");
     currentMission.wakeAttempts = 0;
     persistMission();
@@ -1915,11 +2054,11 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     completed.forEach(({ runId, sessionId }) => rememberTerminalRun(terminalRunKey(sessionId, runId)));
     pendingIntegrationNotices.push(...completed.map(({ runId, status, agent }) => {
       const terminalAttempt = mission?.attempts.find((attempt) => attempt.runId === runId);
-      const implementationHandle = terminalAttempt?.executionMode === "implementation" && status === "completed"
+      const implementationHandle = terminalAttempt?.executionMode === "implementation" && terminalAttempt.status === "completed"
         ? `; integrate deterministically with lemonpi_git { action: "integrate_worker_result", artifactRunId: "${runId}" }`
         : "";
       const budgetNotice = terminalAttempt?.budgetStopReason ? `; stopped by LemonPi: ${terminalAttempt.budgetStopReason}` : "";
-      return `- ${runId}${agent ? ` (${agent})` : ""}: ${status}${budgetNotice}${implementationHandle}`;
+      return `- ${runId}${agent ? ` (${agent})` : ""}: ${terminalAttempt?.status ?? status}${budgetNotice}${implementationHandle}${terminalAttempt?.partialHandoffPath ? `; continuation handoff: ${terminalAttempt.partialHandoffPath}` : ""}`;
     }));
     const currentMission = ensureMission("integration");
     currentMission.wakeAttempts = 0;
@@ -1932,8 +2071,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     sessionId?: string;
     status: Exclude<WriterLifecycleStatus, "paused">;
     agent?: string;
+    evidence?: unknown;
   }) => {
-    recordTerminalAttempt(completion.runId, completion.status);
+    recordTerminalAttempt(completion.runId, completion.status, completion.evidence);
     const key = terminalRunKey(completion.sessionId, completion.runId);
     if (integratedTerminalRuns.has(key)) return;
     pendingIndependentCompletions.set(key, completion);
@@ -2460,6 +2600,10 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     parameters: IndependentDispatchSchema,
     async execute(_toolCallId, rawParams, _signal, _onUpdate, ctx) {
       const params = rawParams as { lanes: Array<Record<string, unknown>>; context?: "fresh" | "fork" };
+      const forbiddenOverride = launchOverridePath(params, "lemonpi_dispatch");
+      if (forbiddenOverride) {
+        return { content: [{ type: "text", text: `LemonPi rejected ${forbiddenOverride} before launch. Agent model and thinking come only from user settings; no child was launched.` }], isError: true, details: { mode: "independent", runs: [], failures: [{ reason: "launch override rejected" }] } };
+      }
       todoSessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? todoSessionId;
       const scopeIssue = hiddenScopeExpansionIssue(latestUserRequest, params.lanes.flatMap((lane) => [String(lane.task ?? ""), String(lane.cwd ?? "") ]));
       if (scopeIssue) {
@@ -2512,27 +2656,44 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         reviewRecord: undefined as Omit<ReviewRecord, "accepted"> | undefined,
         todoId: typeof lane.todoId === "number" && Number.isInteger(lane.todoId) ? lane.todoId : undefined,
         artifactPath: "",
-        reasoning: "medium" as "low" | "medium" | "high",
+        launchId: globalThis.crypto.randomUUID(),
+        binding: undefined as AgentLaunchBinding | undefined,
+        budget: undefined as ReturnType<typeof workerExecutionBudget> | undefined,
         spawnAttempted: false,
         issue: undefined as string | undefined,
       }));
 
       await Promise.all(prepared.map(async (candidate) => {
         stripPerDispatchBudgets(candidate.lane);
-        const rawTask = typeof candidate.lane.task === "string" ? candidate.lane.task : "";
-        if (candidate.executionMode === "read-only"
-          && executableAgents.has("scout")
-          && ["context-builder", "explorer", "researcher"].includes(candidate.agent.toLowerCase())
-          && /\b(?:code|file|git|repository|repo|source|implementation)\b/i.test(rawTask)
-          && !/\b(?:internet|web|external research|paper|documentation site)\b/i.test(rawTask)) {
-          candidate.agent = "scout";
-          candidate.lane.agent = "scout";
+        const continuationOf = typeof candidate.lane.continuationOf === "string" ? candidate.lane.continuationOf.trim() : "";
+        delete candidate.lane.continuationOf;
+        if (continuationOf) {
+          const previous = mission?.attempts.find((attempt) => attempt.runId === continuationOf);
+          if (!previous || (previous.status !== "partial" && previous.status !== "budget_exhausted") || !previous.partialHandoffPath) {
+            candidate.issue = `continuationOf '${continuationOf}' is not a recorded partial or budget-exhausted run with a deterministic handoff.`;
+            return;
+          }
+          try {
+            const handoff = asRecord(JSON.parse(readFileSync(previous.partialHandoffPath, "utf8")));
+            if (typeof handoff?.continuationTask !== "string" || !handoff.continuationTask.trim()) throw new Error("missing continuationTask");
+            candidate.lane.task = handoff.continuationTask;
+          } catch (error) {
+            candidate.issue = `Could not load continuation handoff for '${continuationOf}': ${error instanceof Error ? error.message : String(error)}`;
+            return;
+          }
         }
+        const rawTask = typeof candidate.lane.task === "string" ? candidate.lane.task : "";
         if (!availableAgents.includes(candidate.agent)) {
           candidate.issue = `Agent '${candidate.agent}' is not in the live executable roster.`;
           return;
         }
-        candidate.reasoning = recommendedReasoning(candidate.agent, rawTask);
+        const routing = runtimeLaunchBinding(candidate.agent, String(candidate.lane.cwd ?? ctx.cwd), ctx);
+        if (!routing.binding) {
+          candidate.issue = routing.error ?? `LemonPi settings could not resolve agent '${candidate.agent}'. No child was launched.`;
+          return;
+        }
+        candidate.binding = routing.binding;
+        candidate.budget = workerExecutionBudget(candidate.agent, candidate.executionMode, userLemonPiSettings());
         if (candidate.todoId !== undefined && !visiblePlanTasks.some((task) => task.id === candidate.todoId && task.status !== "deleted" && task.status !== "completed")) {
           candidate.issue = `todoId ${candidate.todoId} is not an unfinished visible milestone.`;
           return;
@@ -2686,19 +2847,30 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       const launched = await Promise.all(prepared.map(async (candidate) => {
         if (candidate.issue) return { ...candidate, result: undefined as unknown, runId: undefined as string | undefined };
         const spawn = independentSpawnParams(candidate.lane).params;
-        const budget = workerExecutionBudget(candidate.executionMode, process.env);
-        const routedModel = runtimeRoutedModel(candidate.agent, String(candidate.lane.cwd ?? ctx.cwd), candidate.lane.model, candidate.reasoning);
-        Object.assign(spawn, budget.spawn, ...(routedModel ? [{ model: routedModel }] : []));
+        const binding = candidate.binding!;
+        const budget = candidate.budget!;
+        Object.assign(spawn, budget.spawn, { model: `${binding.model}:${binding.thinking}` });
         // Independent slices always start from concise fresh context. Bounded correction
         // continuity belongs exclusively to the guarded resume path below.
         spawn.context = "fresh";
         try {
+          persistPendingLaunch({
+            launchId: candidate.launchId,
+            agent: candidate.agent,
+            purpose: candidate.purpose,
+            task: String(candidate.lane.task ?? ""),
+            executionMode: candidate.executionMode,
+            binding,
+            startedAt: Date.now(),
+          });
           candidate.spawnAttempted = true;
           const result = await requestSubagentSpawn(pi, spawn);
           const runId = delegationRunId(result);
           if (!runId) throw new Error("The subagent runtime acknowledged the lane without returning a run ID.");
+          clearPendingLaunch(candidate.launchId);
           return { ...candidate, result, runId };
         } catch (error) {
+          clearPendingLaunch(candidate.launchId);
           return {
             ...candidate,
             issue: error instanceof Error ? error.message : String(error),
@@ -2734,6 +2906,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           if (!currentMission.activeRunIds.includes(candidate.runId)) currentMission.activeRunIds.push(candidate.runId);
           currentMission.attempts.push({
             runId: candidate.runId,
+            launchId: candidate.launchId,
+            agent: candidate.agent,
+            task: String(candidate.lane.task ?? ""),
             purpose: candidate.purpose,
             status: "running",
             executionMode: candidate.implementation ? "implementation" : "read-only",
@@ -2745,8 +2920,14 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
             toolCalls: 0,
             startedAt: Date.now(),
             elapsedMs: 0,
+            budgetPhase: "work",
+            model: candidate.binding!.model,
+            thinking: candidate.binding!.thinking,
+            settingsSource: candidate.binding!.source,
+            settingsHash: candidate.binding!.settingsHash,
             ...(candidate.todoId ? { todoId: candidate.todoId } : {}),
             ...(candidate.snapshot ? { repository: candidate.snapshot.root, baseRevision: candidate.snapshot.head } : {}),
+            ...(!candidate.snapshot ? { repository: candidate.sourceCwd || ctx.cwd } : {}),
             ...(candidate.preparedWorktreePath ? { worktreePath: candidate.preparedWorktreePath } : {}),
             ...(candidate.ownedPaths ? { ownedPaths: [...candidate.ownedPaths] } : {}),
             ...(candidate.artifactPath ? { artifactPath: candidate.artifactPath } : {}),
@@ -2781,7 +2962,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         ...(successes.length === 0 ? { isError: true } : {}),
         details: {
           mode: "independent",
-          runs: successes.map((candidate) => ({ runId: candidate.runId, agent: candidate.agent, implementation: candidate.implementation, todoId: candidate.todoId, manifest: { repository: candidate.snapshot?.root, worktreePath: candidate.preparedWorktreePath || undefined, baseRevision: candidate.snapshot?.head, ownedPaths: candidate.ownedPaths, artifactPath: candidate.artifactPath } })),
+          runs: successes.map((candidate) => ({ runId: candidate.runId, agent: candidate.agent, implementation: candidate.implementation, todoId: candidate.todoId, model: candidate.binding!.model, thinking: candidate.binding!.thinking, settingsSource: candidate.binding!.source, settingsHash: candidate.binding!.settingsHash, budget: candidate.budget, manifest: { repository: candidate.snapshot?.root, worktreePath: candidate.preparedWorktreePath || undefined, baseRevision: candidate.snapshot?.head, ownedPaths: candidate.ownedPaths, artifactPath: candidate.artifactPath } })),
           failures: failures.map((candidate) => ({ agent: candidate.agent, reason: candidate.issue ?? "launch failed" })),
         },
       };
@@ -2805,7 +2986,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     writerOccupied = activeWriterRuns.size > 0;
     if (mission) {
       mission.writerActive = writerOccupied;
-      if (status !== "paused" && mission.activeRunIds.length === 0 && mission.phase !== "paused") mission.phase = "integration";
+      if (mission.activeRunIds.length === 0 && mission.phase !== "paused") mission.phase = "integration";
       persistMission();
     }
   };
@@ -2841,6 +3022,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     }
     const status = writerLifecycleStatus(payload);
     if (runId && status) {
+      if (status !== "paused") recordTerminalAttempt(runId, status, payload);
       terminalWriterRuns.set(runId, status);
       if (terminalWriterRuns.size > 64) terminalWriterRuns.delete(terminalWriterRuns.keys().next().value!);
       if (activeWriterRuns.has(runId)) settleWriter(status, runId);
@@ -2848,27 +3030,26 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         const root = asRecord(payload);
         const sessionId = delegationSessionId(payload);
         const agent = typeof root?.agent === "string" ? root.agent : undefined;
-        if (isManuallyStoppedRun(runId)) wakeForTerminalRun(runId, sessionId, status, agent);
-        else if (independentlyDispatched && root?.intercomDelivered !== true) queueIndependentCompletion({ runId, sessionId, status, agent });
+        if (isManuallyStoppedRun(runId)) wakeForTerminalRun(runId, sessionId, status, agent, false, payload);
+        else if (independentlyDispatched && root?.intercomDelivered !== true) queueIndependentCompletion({ runId, sessionId, status, agent, evidence: payload });
         else if (independentlyDispatched) rememberTerminalRun(terminalRunKey(sessionId, runId));
-        else if (root?.intercomDelivered === true) wakeForTerminalRun(runId, sessionId, status, agent);
+        else if (root?.intercomDelivered === true) wakeForTerminalRun(runId, sessionId, status, agent, false, payload);
         else rememberTerminalRun(terminalRunKey(sessionId, runId));
       }
     }
     const failure = delegationFailure(payload, false);
-    if (failure) {
+    const authoritativeAttempt = runId ? mission?.attempts.find((attempt) => attempt.runId === runId) : undefined;
+    if (failure && (!authoritativeAttempt || authoritativeAttempt.status === "failed")) {
       delegationFailurePending = true;
       const classification = classifyFailure(failure);
       lastDelegationFailure = `Classification: ${classification}\nRecovery: ${recoveryAction(classification, 0)}\n${failure}`;
+    } else if (authoritativeAttempt && authoritativeAttempt.status !== "failed") {
+      delegationFailurePending = false;
+      lastDelegationFailure = undefined;
     }
   });
 
   pi.on("before_agent_start", async (event) => {
-    if (process.env.PI_SUBAGENT_CHILD !== "1") {
-      const architectureDecision = /\b(?:architecture decision|choose architecture|system architecture|redesign architecture|migration strategy|security model|protocol design)\b/i.test(latestUserRequest);
-      const desiredThinking = architectureDecision ? "xhigh" as const : "medium" as const;
-      if (pi.getThinkingLevel() !== desiredThinking) pi.setThinkingLevel(desiredThinking);
-    }
     mainAgentRunning = true;
     mainTurnSettled = false;
     missionWakeGeneration += 1;
@@ -3065,6 +3246,10 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       statusToolCalls.set(event.toolCallId, { key, ...(target ? { target } : {}) });
     }
     if (input.action === "resume") {
+      const forbiddenOverride = launchOverridePath(input);
+      if (forbiddenOverride) {
+        return { block: true, reason: `LemonPi rejected ${forbiddenOverride} before resume. A resumed run preserves its original model and thinking binding; no child was launched.` };
+      }
       const message = typeof input.message === "string" ? input.message.trimEnd() : "";
       const authoredSummary = workerSummaryFromTask(message);
       const summaryIssue = authoredWorkerSummaryIssue(authoredSummary);
@@ -3082,6 +3267,10 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           block: true,
           reason: "This worker has no current-policy lifecycle record. Launch a fresh bounded lane with a concise handoff instead of reviving a legacy or unrelated session.",
         };
+      }
+      const originalBinding = immutableResumeBinding(previousAttempt);
+      if (!previousAttempt.task || !originalBinding) {
+        return { block: true, reason: "This worker predates immutable LemonPi model/thinking metadata. Launch a fresh bounded lane from user settings; no child was launched." };
       }
       const correction = /(?:^|\n)\s*correction for (?:the )?(?:immediately )?previous slice\s*:/i.test(message);
       try {
@@ -3119,15 +3308,22 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       const targetedMessage = SLICE_TARGET.test(canonicalMessage) ? canonicalMessage : `${canonicalMessage}\nSlice target: under 5 minutes`.trimStart();
       const compiledMessage = targetedMessage;
       input.message = compiledMessage;
+      const binding = originalBinding;
+      const launchId = globalThis.crypto.randomUUID();
       resumeToolCalls.set(event.toolCallId, {
+        launchId,
         implementation: declaredExecutionMode(compiledMessage) === "implementation",
         previousRunId,
         purpose: summary,
         sliceCount: previousAttempt.sliceCount + 1,
+        binding,
+        task: previousAttempt.task,
+        agent: binding.agent,
+        repository: previousAttempt.repository,
       });
       const currentMission = ensureMission("delegated");
       currentMission.wakeAttempts = 0;
-      persistMission();
+      persistPendingLaunch({ launchId, agent: binding.agent, purpose: summary, task: previousAttempt.task, executionMode: previousAttempt.executionMode, binding, startedAt: Date.now() });
     }
     if (attentionRecovery && ["status", "steer", "stop"].includes(String(input.action ?? ""))) {
       const target = typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : "";
@@ -3139,25 +3335,16 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     const isDelegation = specs.length > 0;
 
     if (isDelegation && !isManagementAction) {
+      const forbiddenOverride = launchOverridePath(input);
+      if (forbiddenOverride) {
+        return { block: true, reason: `LemonPi rejected ${forbiddenOverride} before launch. Direct child model and thinking overrides are forbidden; user settings are authoritative and zero children were started.` };
+      }
       stripPerDispatchBudgets(input);
       const groupedIssue = groupedDelegationPolicyIssue(input);
       if (groupedIssue) return { block: true, reason: groupedIssue };
       compileDelegationContracts(input);
       specs = delegatedSpecs(input);
       const writers = specs.filter(delegatesImplementation);
-      if (specs.length === 1 && writers.length === 0) {
-        const mode = "read-only" as const;
-        const budget = workerExecutionBudget(mode, process.env);
-        const reasoning = recommendedReasoning(specs[0]!.agent, specs[0]!.task);
-        const routedModel = runtimeRoutedModel(specs[0]!.agent, typeof input.cwd === "string" ? input.cwd : ctx.cwd, input.model, reasoning);
-        Object.assign(input, budget.spawn, ...(routedModel ? [{ model: routedModel }] : []));
-        delegationAttemptMetadata.set(event.toolCallId, {
-          purpose: normalizeWorkerSummary(workerSummaryFromTask(specs[0]!.task), specs[0]!.task),
-          executionMode: mode,
-          startedAt: Date.now(),
-        });
-      }
-
       if (writers.length > 0) {
         return {
           block: true,
@@ -3179,6 +3366,26 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           block: true,
           reason: parallelWriterIssue,
         };
+      }
+      if (specs.length === 1 && writers.length === 0) {
+        const mode = "read-only" as const;
+        const routing = runtimeLaunchBinding(specs[0]!.agent, typeof input.cwd === "string" ? input.cwd : ctx.cwd, ctx);
+        if (!routing.binding) return { block: true, reason: routing.error ?? "LemonPi settings could not resolve this agent. No child was launched." };
+        const binding = routing.binding;
+        const budget = workerExecutionBudget(specs[0]!.agent, mode, userLemonPiSettings());
+        Object.assign(input, budget.spawn, { model: `${binding.model}:${binding.thinking}` });
+        const launchId = globalThis.crypto.randomUUID();
+        const purpose = normalizeWorkerSummary(workerSummaryFromTask(specs[0]!.task), specs[0]!.task);
+        delegationAttemptMetadata.set(event.toolCallId, {
+          launchId,
+          agent: specs[0]!.agent,
+          task: specs[0]!.task,
+          purpose,
+          executionMode: mode,
+          repository: typeof input.cwd === "string" ? input.cwd : ctx.cwd,
+          startedAt: Date.now(),
+          binding,
+        });
       }
       if (writers.length > 0) {
         const directWriterRecords = directImplementationRecords(input);
@@ -3258,6 +3465,16 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
 
       input.acceptance = false;
       applyDelegationSafetyContracts(input);
+      const launchMetadata = delegationAttemptMetadata.get(event.toolCallId);
+      if (launchMetadata) persistPendingLaunch({
+        launchId: launchMetadata.launchId,
+        agent: launchMetadata.agent,
+        purpose: launchMetadata.purpose,
+        task: launchMetadata.task,
+        executionMode: launchMetadata.executionMode,
+        binding: launchMetadata.binding,
+        startedAt: launchMetadata.startedAt,
+      });
     }
 
     // pi-subagents supports async natively. LemonPi supplies the product-level
@@ -3414,6 +3631,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     }
     const resumedCall = resumeToolCalls.get(event.toolCallId);
     resumeToolCalls.delete(event.toolCallId);
+    if (resumedCall) clearPendingLaunch(resumedCall.launchId);
     if (resumedCall && !event.isError) {
       const runId = delegationRunId(event.result);
       if (runId) {
@@ -3423,6 +3641,10 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         if (!currentMission.activeRunIds.includes(runId)) currentMission.activeRunIds.push(runId);
         currentMission.attempts.push({
           runId,
+          launchId: resumedCall.launchId,
+          agent: resumedCall.agent,
+          task: resumedCall.task,
+          ...(resumedCall.repository ? { repository: resumedCall.repository } : {}),
           purpose: resumedCall.purpose,
           status: "running",
           executionMode: resumedCall.implementation ? "implementation" : "read-only",
@@ -3434,6 +3656,11 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           toolCalls: 0,
           startedAt: Date.now(),
           elapsedMs: 0,
+          budgetPhase: "work",
+          model: resumedCall.binding.model,
+          thinking: resumedCall.binding.thinking,
+          settingsSource: resumedCall.binding.source,
+          settingsHash: resumedCall.binding.settingsHash,
         });
         if (resumedCall.implementation) {
           writerOccupied = true;
@@ -3458,6 +3685,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       const runId = delegationRunId(event.result) ?? statusCall?.target;
       if (runId && !event.isError) updateAttemptTelemetry(runId, event.result);
       if (status && status !== "paused") {
+        if (runId) recordTerminalAttempt(runId, status, event.result);
         if (runId) {
           activeDelegationRuns.delete(runId);
           activeDelegationWidths.delete(runId);
@@ -3506,6 +3734,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (!delegationToolCalls.delete(event.toolCallId)) return;
     const attemptMetadata = delegationAttemptMetadata.get(event.toolCallId);
     delegationAttemptMetadata.delete(event.toolCallId);
+    if (attemptMetadata) clearPendingLaunch(attemptMetadata.launchId);
     const failure = writerCall && writerCall.async !== false
       ? asyncWriterLaunchFailure(event.result, event.isError)
       : delegationFailure(event.result, event.isError);
@@ -3521,9 +3750,13 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         if (attemptMetadata && !currentMission.attempts.some((attempt) => attempt.runId === runId)) {
           currentMission.attempts.push({
             runId,
+            launchId: attemptMetadata.launchId,
+            agent: attemptMetadata.agent,
+            task: attemptMetadata.task,
             purpose: attemptMetadata.purpose,
             status: "running",
             executionMode: attemptMetadata.executionMode,
+            repository: attemptMetadata.repository,
             completedOrdinal: 0,
             sliceCount: 1,
             transcriptBytes: 0,
@@ -3532,6 +3765,11 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
             toolCalls: 0,
             startedAt: attemptMetadata.startedAt,
             elapsedMs: 0,
+            budgetPhase: "work",
+            model: attemptMetadata.binding.model,
+            thinking: attemptMetadata.binding.thinking,
+            settingsSource: attemptMetadata.binding.source,
+            settingsHash: attemptMetadata.binding.settingsHash,
           });
         }
         currentMission.wakeAttempts = 0;

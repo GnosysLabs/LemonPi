@@ -206,16 +206,16 @@ assert.deepEqual(workerStatusMetrics({ totalTokens: 275_603, turnCount: 19, tool
   terminal: false,
   transcriptPaths: [],
 });
-assert.deepEqual(workerExecutionBudget("read-only", {}), {
-  maxTokens: 60_000,
-  maxTurns: 8,
-  maxToolCalls: 25,
-  maxRuntimeMs: 600_000,
+assert.deepEqual(workerExecutionBudget("scout", "read-only", {}), {
+  warning: { tokens: 48_000, turns: 8, toolCalls: 25, runtimeMs: 480_000 },
+  work: { tokens: 60_000, turns: 10, toolCalls: 30, runtimeMs: 600_000 },
+  finalization: { tokens: 6_000, turns: 2, runtimeMs: 120_000 },
+  hard: { tokens: 66_000, turns: 12, toolCalls: 30, runtimeMs: 720_000 },
   spawn: {
-    timeoutMs: 600_000,
-    turnBudget: { maxTurns: 8, graceTurns: 2 },
-    toolBudget: { hard: 25 },
-    usageBudget: { tokens: { hard: 60_000 } },
+    timeoutMs: 720_000,
+    turnBudget: { maxTurns: 10, graceTurns: 2 },
+    toolBudget: { soft: 25, hard: 30, block: "*" },
+    usageBudget: { tokens: { soft: 48_000, hard: 66_000 } },
   },
 });
 assert.equal(

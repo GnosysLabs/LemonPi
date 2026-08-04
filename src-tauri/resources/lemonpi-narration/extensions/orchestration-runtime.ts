@@ -1,4 +1,4 @@
-export const CURRENT_ORCHESTRATION_POLICY_VERSION = 5;
+export const CURRENT_ORCHESTRATION_POLICY_VERSION = 6;
 
 export const ORCHESTRATION_POLICY_NOTICE = `<lemonpi-authoritative-policy version="${CURRENT_ORCHESTRATION_POLICY_VERSION}">
 The installed LemonPi orchestration policy is authoritative. Historical summaries preserve product facts and user decisions only. Any older scheduling, review, validation, model-routing, context-reuse, or Git instruction is superseded. Main Pi directly handles low-risk one-repository UI slices; only broader work uses independent delegated lanes. Main Pi owns safe local Git integration and exact validation reuse.
@@ -116,6 +116,137 @@ export function scheduleOwnedLanes(lanes: OwnedLane[], completed = new Set<strin
 
 export type ExecutionMode = "read-only" | "implementation";
 
+export const LEMONPI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type LemonPiThinkingLevel = typeof LEMONPI_THINKING_LEVELS[number];
+
+export interface AgentLaunchBinding {
+  agent: string;
+  model: string;
+  thinking: LemonPiThinkingLevel;
+  source: "user-agent-override" | "user-agent-override+project-opt-in" | "project-opt-in";
+  settingsHash: string;
+}
+
+export interface AgentLaunchBindingResolution {
+  binding?: AgentLaunchBinding;
+  error?: string;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function nonEmptySetting(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, entry]) => [key, stableValue(entry)]));
+}
+
+/**
+ * Resolve one immutable launch binding from user-owned LemonPi settings.
+ * Conversation/tool-call fields are deliberately absent from this API.
+ */
+export function resolveAgentLaunchBinding(input: {
+  agent: string;
+  userSettings: unknown;
+  projectSettings?: unknown;
+  availableModels: string[];
+  configuredFallbackModels?: string[];
+}): AgentLaunchBindingResolution {
+  const user = objectRecord(input.userSettings) ?? {};
+  const userSubagents = objectRecord(user.subagents) ?? {};
+  const userOverrides = objectRecord(userSubagents.agentOverrides) ?? {};
+  const userEntry = objectRecord(userOverrides[input.agent]) ?? {};
+  const allowProject = userSubagents.allowProjectAgentRouting === true;
+  const rawProject = objectRecord(input.projectSettings) ?? {};
+  const project = allowProject ? rawProject : {};
+  const projectSubagents = objectRecord(project.subagents) ?? {};
+  const projectOverrides = objectRecord(projectSubagents.agentOverrides) ?? {};
+  const projectEntry = objectRecord(projectOverrides[input.agent]) ?? {};
+  const rawProjectEntry = objectRecord(objectRecord(objectRecord(rawProject.subagents)?.agentOverrides)?.[input.agent]) ?? {};
+
+  const configuredFallbacks = [
+    ...(Array.isArray(userEntry.fallbackModels) ? userEntry.fallbackModels.filter((value): value is string => typeof value === "string" && Boolean(value.trim())) : []),
+    ...(Array.isArray(rawProjectEntry.fallbackModels) ? rawProjectEntry.fallbackModels.filter((value): value is string => typeof value === "string" && Boolean(value.trim())) : []),
+    ...(input.configuredFallbackModels ?? []).filter((value) => value.trim()),
+  ];
+  if (configuredFallbacks.length > 0) {
+    return { error: `LemonPi settings error for agent '${input.agent}': automatic fallback models are configured (${[...new Set(configuredFallbacks)].join(", ")}). LemonPi requires one exact model; remove fallbackModels from LemonPi settings or the named agent definition before launch. No child was launched.` };
+  }
+
+  const userModel = nonEmptySetting(userEntry.model);
+  const userThinking = nonEmptySetting(userEntry.thinking);
+  const projectModel = allowProject ? nonEmptySetting(projectEntry.model) : undefined;
+  const projectThinking = allowProject ? nonEmptySetting(projectEntry.thinking) : undefined;
+  const model = userModel ?? projectModel;
+  const thinking = userThinking ?? projectThinking;
+
+  if (!model || !thinking) {
+    const missing = [!model ? "model" : undefined, !thinking ? "thinking" : undefined].filter(Boolean).join(" and ");
+    return {
+      error: `LemonPi settings error for agent '${input.agent}': set ${missing} in user subagents.agentOverrides.${input.agent}. Project routing is ${allowProject ? "enabled but did not provide the missing value" : "disabled by default"}. No child was launched.`,
+    };
+  }
+  if (!LEMONPI_THINKING_LEVELS.includes(thinking as LemonPiThinkingLevel)) {
+    return { error: `LemonPi settings error for agent '${input.agent}': thinking '${thinking}' is invalid. Use ${LEMONPI_THINKING_LEVELS.join(", ")}. No child was launched.` };
+  }
+  if (/:(?:off|minimal|low|medium|high|xhigh|max)$/i.test(model)) {
+    return { error: `LemonPi settings error for agent '${input.agent}': keep thinking separate from model '${model}'. No child was launched.` };
+  }
+  const normalizedAvailable = new Set(input.availableModels.map((value) => value.trim().toLowerCase()).filter(Boolean));
+  if (normalizedAvailable.size === 0) {
+    return { error: `LemonPi could not verify configured model '${model}' for agent '${input.agent}' because the authenticated model registry is empty. No child was launched.` };
+  }
+  if (!normalizedAvailable.has(model.toLowerCase())) {
+    return { error: `LemonPi settings error for agent '${input.agent}': configured model '${model}' is not authenticated and available. No fallback was used and no child was launched.` };
+  }
+
+  const source: AgentLaunchBinding["source"] = userModel && userThinking
+    ? "user-agent-override"
+    : (userModel || userThinking) ? "user-agent-override+project-opt-in" : "project-opt-in";
+  const relevantSettings = {
+    agent: input.agent,
+    user: { model: userModel, thinking: userThinking, allowProjectAgentRouting: allowProject },
+    ...(allowProject ? { project: { model: projectModel, thinking: projectThinking } } : {}),
+  };
+  return {
+    binding: {
+      agent: input.agent,
+      model,
+      thinking: thinking as LemonPiThinkingLevel,
+      source,
+      settingsHash: contentHash(JSON.stringify(stableValue(relevantSettings))),
+    },
+  };
+}
+
+/** Return the first model/thinking field that could alter a child launch. */
+export function launchOverridePath(value: unknown, path = "subagent"): string | undefined {
+  const record = objectRecord(value);
+  if (!record) return undefined;
+  if (Object.hasOwn(record, "model")) return `${path}.model`;
+  if (Object.hasOwn(record, "thinking")) return `${path}.thinking`;
+  for (const key of ["lanes", "tasks", "chain", "parallel"] as const) {
+    const nested = record[key];
+    if (Array.isArray(nested)) {
+      for (let index = 0; index < nested.length; index += 1) {
+        const issue = launchOverridePath(nested[index], `${path}.${key}[${index}]`);
+        if (issue) return issue;
+      }
+    } else if (nested !== undefined) {
+      const issue = launchOverridePath(nested, `${path}.${key}`);
+      if (issue) return issue;
+    }
+  }
+  return undefined;
+}
+
 export function recommendedReasoning(agent: string, task: string): "low" | "medium" | "high" {
   const role = agent.toLowerCase();
   const materialRisk = /\b(?:authentication|authorization|security|privacy|cryptograph|migration|destructive|concurrency|release|public protocol)\b/i.test(task);
@@ -156,9 +287,16 @@ export function launchPreflightIssue(input: LaunchPreflightInput): string | unde
 
 export interface WorkerAttempt {
   runId: string;
+  launchId?: string;
+  agent?: string;
+  task?: string;
   purpose: string;
-  status: "running" | "completed" | "failed" | "stopped";
+  status: "running" | "completed" | "partial" | "budget_exhausted" | "failed" | "stopped";
   executionMode: ExecutionMode;
+  model?: string;
+  thinking?: LemonPiThinkingLevel;
+  settingsSource?: AgentLaunchBinding["source"];
+  settingsHash?: string;
   completedOrdinal: number;
   sliceCount: number;
   transcriptBytes: number;
@@ -169,6 +307,11 @@ export interface WorkerAttempt {
   elapsedMs?: number;
   activityState?: string;
   budgetStopReason?: string;
+  budgetPhase?: "work" | "warning" | "finalizing";
+  budgetWarningSent?: boolean;
+  terminalCommittedAt?: number;
+  usableOutput?: boolean;
+  partialHandoffPath?: string;
   emptyOutput?: boolean;
   corrupted?: boolean;
   todoId?: number;
@@ -184,42 +327,227 @@ export interface WorkerAttempt {
 }
 
 export interface WorkerExecutionBudget {
-  maxTokens: number;
-  maxTurns: number;
-  maxToolCalls: number;
-  maxRuntimeMs: number;
+  warning: { tokens: number; turns: number; toolCalls: number; runtimeMs: number };
+  work: { tokens: number; turns: number; toolCalls: number; runtimeMs: number };
+  finalization: { tokens: number; turns: number; runtimeMs: number };
+  hard: { tokens: number; turns: number; toolCalls: number; runtimeMs: number };
   spawn: {
     timeoutMs: number;
     turnBudget: { maxTurns: number; graceTurns: number };
-    toolBudget: { hard: number };
-    usageBudget: { tokens: { hard: number } };
+    toolBudget: { soft: number; hard: number; block: "*" };
+    usageBudget: { tokens: { soft: number; hard: number } };
   };
 }
 
 export function workerExecutionBudget(
+  agent: string,
   mode: ExecutionMode,
-  environment: Record<string, string | undefined> = {},
+  userSettings: unknown,
 ): WorkerExecutionBudget {
-  const prefix = mode === "implementation" ? "LEMONPI_IMPLEMENTATION" : "LEMONPI_READONLY";
-  const positiveInteger = (suffix: string, fallback: number) => {
-    const parsed = Number(environment[`${prefix}_${suffix}`]);
-    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+  const defaults = mode === "implementation"
+    ? { tokens: 120_000, turns: 12, tools: 45, runtime: 15 * 60_000, finalTokens: 8_000, finalTurns: 2, finalRuntime: 2 * 60_000 }
+    : { tokens: 60_000, turns: 10, tools: 30, runtime: 10 * 60_000, finalTokens: 6_000, finalTurns: 2, finalRuntime: 2 * 60_000 };
+  const settings = objectRecord(userSettings) ?? {};
+  const subagents = objectRecord(settings.subagents) ?? {};
+  const budgets = objectRecord(subagents.agentBudgets) ?? {};
+  const configured = objectRecord(budgets[agent]) ?? {};
+  const positiveInteger = (name: string, fallback: number) => {
+    const parsed = configured[name];
+    return typeof parsed === "number" && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
   };
-  const maxTokens = positiveInteger("MAX_TOKENS", mode === "implementation" ? 120_000 : 60_000);
-  const maxTurns = positiveInteger("MAX_TURNS", mode === "implementation" ? 12 : 8);
-  const maxToolCalls = positiveInteger("MAX_TOOL_CALLS", mode === "implementation" ? 45 : 25);
-  const maxRuntimeMs = positiveInteger("MAX_RUNTIME_MS", mode === "implementation" ? 15 * 60_000 : 10 * 60_000);
+  const work = {
+    tokens: positiveInteger("workMaxTokens", defaults.tokens),
+    turns: positiveInteger("workMaxTurns", defaults.turns),
+    toolCalls: positiveInteger("workMaxToolCalls", defaults.tools),
+    runtimeMs: positiveInteger("workMaxRuntimeMs", defaults.runtime),
+  };
+  const finalization = {
+    tokens: positiveInteger("finalizationTokens", defaults.finalTokens),
+    turns: positiveInteger("finalizationTurns", defaults.finalTurns),
+    runtimeMs: positiveInteger("finalizationRuntimeMs", defaults.finalRuntime),
+  };
+  const warning = {
+    tokens: Math.min(work.tokens, positiveInteger("warningTokens", Math.floor(work.tokens * 0.8))),
+    turns: Math.min(work.turns, positiveInteger("warningTurns", Math.max(1, work.turns - 2))),
+    toolCalls: Math.min(work.toolCalls, positiveInteger("warningToolCalls", Math.max(1, work.toolCalls - 5))),
+    runtimeMs: Math.min(work.runtimeMs, positiveInteger("warningRuntimeMs", Math.floor(work.runtimeMs * 0.8))),
+  };
+  const hard = {
+    tokens: work.tokens + finalization.tokens,
+    turns: work.turns + finalization.turns,
+    toolCalls: work.toolCalls,
+    runtimeMs: work.runtimeMs + finalization.runtimeMs,
+  };
   return {
-    maxTokens,
-    maxTurns,
-    maxToolCalls,
-    maxRuntimeMs,
+    warning,
+    work,
+    finalization,
+    hard,
     spawn: {
-      timeoutMs: maxRuntimeMs,
-      turnBudget: { maxTurns, graceTurns: 2 },
-      toolBudget: { hard: maxToolCalls },
-      usageBudget: { tokens: { hard: maxTokens } },
+      timeoutMs: hard.runtimeMs,
+      turnBudget: { maxTurns: work.turns, graceTurns: finalization.turns },
+      toolBudget: { soft: warning.toolCalls, hard: work.toolCalls, block: "*" },
+      usageBudget: { tokens: { soft: warning.tokens, hard: hard.tokens } },
     },
+  };
+}
+
+export function workerBudgetPhase(
+  metrics: { tokens: number; turns: number; toolCalls: number; elapsedMs: number },
+  budget: WorkerExecutionBudget,
+): { phase: "work" | "warning" | "finalizing"; hardStopReason?: string } {
+  const hardStopReason = metrics.tokens >= budget.hard.tokens
+    ? `token budget exhausted (${metrics.tokens}/${budget.hard.tokens})`
+    : metrics.turns > budget.hard.turns
+      ? `turn budget exhausted (${metrics.turns}/${budget.work.turns}+${budget.finalization.turns} finalization)`
+      : metrics.elapsedMs >= budget.hard.runtimeMs
+        ? `wall-clock budget exhausted (${Math.round(metrics.elapsedMs / 1_000)}s/${Math.round(budget.hard.runtimeMs / 1_000)}s)`
+        : undefined;
+  const finalizing = metrics.tokens >= budget.work.tokens
+    || metrics.turns >= budget.work.turns
+    || metrics.toolCalls >= budget.work.toolCalls
+    || metrics.elapsedMs >= budget.work.runtimeMs;
+  const warning = metrics.tokens >= budget.warning.tokens
+    || metrics.turns >= budget.warning.turns
+    || metrics.toolCalls >= budget.warning.toolCalls
+    || metrics.elapsedMs >= budget.warning.runtimeMs;
+  return { phase: finalizing ? "finalizing" : warning ? "warning" : "work", ...(hardStopReason ? { hardStopReason } : {}) };
+}
+
+export type WorkerTerminalStatus = Exclude<WorkerAttempt["status"], "running">;
+
+function substantiveText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  if (!text || /^(?:\(no output\)|delegated run failed\.?|subagent exceeded turn budget[^\n]*|turn budget wrap-up[^\n]*)$/i.test(text)) return undefined;
+  return text;
+}
+
+export function terminalEvidenceSummary(value: unknown): {
+  usefulOutput?: string;
+  hasStructuredOutput: boolean;
+  artifactPaths: string[];
+  inspectedResources: string[];
+  cleanExit: boolean;
+  budgetReached: boolean;
+  corrupt: boolean;
+} {
+  let usefulOutput: string | undefined;
+  let hasStructuredOutput = false;
+  let cleanExit = false;
+  let budgetReached = false;
+  let corrupt = false;
+  const artifactPaths = new Set<string>();
+  const inspectedResources = new Set<string>();
+  const seen = new Set<object>();
+  const visit = (candidate: unknown, depth: number, key = "") => {
+    if (depth > 9 || candidate === null || candidate === undefined) return;
+    if (typeof candidate === "string") {
+      if (!usefulOutput && /^(?:output|finalOutput|resultPreview|latestOutput|recentOutput)$/i.test(key)) usefulOutput = substantiveText(candidate);
+      if (/^(?:artifactPath|handoffPath|outputPath|patchPath)$/i.test(key) && candidate.trim()) artifactPaths.add(candidate.trim());
+      if (/^(?:currentPath|path|file|cwd|sessionFile|transcriptPath)$/i.test(key) && candidate.trim()) inspectedResources.add(candidate.trim());
+      return;
+    }
+    if (typeof candidate !== "object" || seen.has(candidate as object)) return;
+    seen.add(candidate as object);
+    if (Array.isArray(candidate)) {
+      candidate.slice(0, 256).forEach((entry) => visit(entry, depth + 1, key));
+      return;
+    }
+    const record = candidate as Record<string, unknown>;
+    if (record.exitCode === 0 || record.success === true || record.state === "complete" || record.state === "completed") cleanExit = true;
+    if (record.turnBudgetExceeded === true || record.timedOut === true || /budget/i.test(String(record.stopReason ?? record.error ?? ""))) budgetReached = true;
+    if (record.corrupted === true || record.outputState === "corrupt") corrupt = true;
+    if (record.structuredOutput !== undefined && record.structuredOutput !== null) hasStructuredOutput = true;
+    for (const [childKey, entry] of Object.entries(record).slice(0, 256)) visit(entry, depth + 1, childKey);
+  };
+  visit(value, 0);
+  return { ...(usefulOutput ? { usefulOutput } : {}), hasStructuredOutput, artifactPaths: [...artifactPaths], inspectedResources: [...inspectedResources], cleanExit, budgetReached, corrupt };
+}
+
+export function terminalOutcome(input: {
+  reportedStatus: "completed" | "failed" | "stopped";
+  evidence?: unknown;
+  budgetStopReason?: string;
+  manuallyStopped?: boolean;
+}): { status: WorkerTerminalStatus; usableOutput: boolean; summary: ReturnType<typeof terminalEvidenceSummary> } {
+  const summary = terminalEvidenceSummary(input.evidence);
+  const usableOutput = !summary.corrupt && Boolean(summary.usefulOutput || summary.hasStructuredOutput || summary.artifactPaths.length > 0);
+  const budgetReached = Boolean(input.budgetStopReason) || summary.budgetReached;
+  if (input.manuallyStopped) return { status: usableOutput ? "partial" : "stopped", usableOutput, summary };
+  if (usableOutput && (input.reportedStatus === "completed" || summary.cleanExit)) return { status: "completed", usableOutput, summary };
+  if (usableOutput) return { status: "partial", usableOutput, summary };
+  if (budgetReached) return { status: "budget_exhausted", usableOutput, summary };
+  return { status: input.reportedStatus === "completed" ? "failed" : input.reportedStatus, usableOutput, summary };
+}
+
+export function preferredTerminalStatus(previous: WorkerAttempt["status"], next: WorkerTerminalStatus): WorkerTerminalStatus {
+  if (previous === "running") return next;
+  const rank: Record<WorkerTerminalStatus, number> = { failed: 1, stopped: 2, budget_exhausted: 3, partial: 4, completed: 5 };
+  return rank[previous] >= rank[next] ? previous : next;
+}
+
+export function immutableResumeBinding(attempt: WorkerAttempt): AgentLaunchBinding | undefined {
+  if (!attempt.agent || !attempt.model || !attempt.thinking || !attempt.settingsSource || !attempt.settingsHash) return undefined;
+  return {
+    agent: attempt.agent,
+    model: attempt.model,
+    thinking: attempt.thinking,
+    source: attempt.settingsSource,
+    settingsHash: attempt.settingsHash,
+  };
+}
+
+export interface PartialWorkerHandoff {
+  version: 1;
+  originalTask: string;
+  agent: string;
+  model: string;
+  thinking: LemonPiThinkingLevel;
+  settingsSource: AgentLaunchBinding["source"];
+  settingsHash: string;
+  inspectedResources: string[];
+  latestUsefulOutput?: string;
+  artifacts: string[];
+  completedConditions: string[];
+  unresolvedConditions: string[];
+  stopReason: string;
+  continuationTask: string;
+  continuation: { priorRunId: string; mode: "fresh"; unresolvedOnly: true };
+}
+
+export function buildPartialWorkerHandoff(input: {
+  attempt: WorkerAttempt;
+  evidence?: unknown;
+  stopReason: string;
+}): PartialWorkerHandoff | undefined {
+  const attempt = input.attempt;
+  if (!attempt.task || !attempt.agent || !attempt.model || !attempt.thinking || !attempt.settingsSource || !attempt.settingsHash) return undefined;
+  const evidence = terminalEvidenceSummary(input.evidence);
+  const completedConditions = evidence.usefulOutput ? ["Preserve and verify the useful output captured below."] : [];
+  const declaredConditions = attempt.task.split(/\r?\n/).flatMap((line) => {
+    const match = /^\s*(?:done when|completion condition|acceptance condition)\s*:\s*(.+)$/i.exec(line);
+    return match?.[1]?.trim() ? [match[1].trim()] : [];
+  });
+  const unresolvedConditions = declaredConditions.length > 0
+    ? declaredConditions
+    : [`Complete only the unresolved scope from the original task after '${input.stopReason}'.`];
+  return {
+    version: 1,
+    originalTask: attempt.task,
+    agent: attempt.agent,
+    model: attempt.model,
+    thinking: attempt.thinking,
+    settingsSource: attempt.settingsSource,
+    settingsHash: attempt.settingsHash,
+    inspectedResources: evidence.inspectedResources,
+    ...(evidence.usefulOutput ? { latestUsefulOutput: evidence.usefulOutput } : {}),
+    artifacts: [...new Set([...(attempt.artifactPath ? [attempt.artifactPath] : []), ...evidence.artifactPaths])],
+    completedConditions,
+    unresolvedConditions,
+    stopReason: input.stopReason,
+    continuationTask: `Continue only the unresolved portion of this task. Do not repeat completed investigation or overwrite preserved artifacts.\n\nOriginal task:\n${attempt.task}\n\nPreserved findings:\n${evidence.usefulOutput ?? "No reliable final output was returned before the limit."}\n\nUnresolved condition:\n${unresolvedConditions[0]}`,
+    continuation: { priorRunId: attempt.runId, mode: "fresh", unresolvedOnly: true },
   };
 }
 
