@@ -19,6 +19,7 @@ import {
   getSubagentRuns,
   isTauriRuntime,
   listPiSessions,
+  markPiSessionRead,
   onPiEvent,
   onPiProcessEvent,
   onPiStderr,
@@ -57,12 +58,9 @@ import { useAppUpdater } from "./lib/app-updater";
 import { todoSnapshotFromEvent, todoSnapshotFromMessages, type TodoSnapshot } from "./lib/extension-todos";
 import { subagentWorkerSummary } from "./lib/subagent-prompt";
 import {
-  baselineProjectFinalReplies,
+  applyHostReadReceipt,
   countUnreadFinalReplies,
-  markSessionFinalReplyRead,
-  parseUnreadFinalReplyState,
-  serializeUnreadFinalReplyState,
-  UNREAD_FINAL_REPLIES_STORAGE_KEY,
+  focusedSessionReadRequest,
 } from "./lib/unread-sessions";
 
 type ConnectionState = "offline" | "launching" | "online" | "error";
@@ -214,13 +212,6 @@ export default function App() {
   const [sessionState, setSessionState] = useState<PiSessionState>();
   const [sessions, setSessions] = useState<PiSessionSummary[]>([]);
   const [sessionsStatus, setSessionsStatus] = useState<SessionsStatus>("ready");
-  const [unreadFinalReplyState, setUnreadFinalReplyState] = useState(() => {
-    try {
-      return parseUnreadFinalReplyState(window.localStorage.getItem(UNREAD_FINAL_REPLIES_STORAGE_KEY));
-    } catch {
-      return parseUnreadFinalReplyState(null);
-    }
-  });
   const [conversationViewed, setConversationViewed] = useState(() => (
     document.visibilityState !== "hidden" && document.hasFocus()
   ));
@@ -321,7 +312,6 @@ export default function App() {
       const nextSessions = await listPiSessions(targetProject);
       if (request !== sessionRefreshRequestRef.current || targetProject !== projectRef.current) return;
       setSessions(nextSessions);
-      setUnreadFinalReplyState((current) => baselineProjectFinalReplies(current, targetProject, nextSessions));
       setSessionsStatus("ready");
     } catch (error) {
       if (request !== sessionRefreshRequestRef.current || targetProject !== projectRef.current) return;
@@ -590,14 +580,6 @@ export default function App() {
   }, [sidebarCollapsed, sidebarWidth]);
 
   useEffect(() => {
-    try {
-      window.localStorage.setItem(UNREAD_FINAL_REPLIES_STORAGE_KEY, serializeUnreadFinalReplyState(unreadFinalReplyState));
-    } catch {
-      // Read receipts are best-effort when webview storage is unavailable.
-    }
-  }, [unreadFinalReplyState]);
-
-  useEffect(() => {
     projectRef.current = project;
   }, [project]);
 
@@ -617,11 +599,18 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!conversationViewed || !sessionState?.sessionFile) return;
-    const activeSession = sessions.find((session) => session.path === sessionState.sessionFile);
-    if (!activeSession) return;
-    setUnreadFinalReplyState((current) => markSessionFinalReplyRead(current, activeSession));
-  }, [conversationViewed, sessionState?.sessionFile, sessions]);
+    if (!project) return;
+    const request = focusedSessionReadRequest(conversationViewed, sessionState?.sessionFile, sessions);
+    if (!request) return;
+    const { sessionPath, readReplyId } = request;
+    void markPiSessionRead(project, sessionPath, readReplyId)
+      .then((receipt) => setSessions((current) => applyHostReadReceipt(current, sessionPath, receipt)))
+      .catch((error) => {
+        // A stale focused receipt is harmless: refresh to observe the newer host reply.
+        console.warn("Could not mark the focused Pi session read", error);
+        void refreshSessions(project);
+      });
+  }, [conversationViewed, project, refreshSessions, sessionState?.sessionFile, sessions]);
 
   useEffect(() => {
     const recent = recentProjects.reduce<RecentProject | undefined>(
@@ -799,16 +788,21 @@ export default function App() {
       projectRef.current = openedPath;
       setProject(openedPath);
       setProjectTrusted(trusted);
-      setRecentProjects((current) => {
-        const existing = current.find((entry) => entry.path === path || entry.path === openedPath);
-        const withoutAlias = current.filter((entry) => entry.path !== path && entry.path !== openedPath);
-        return rememberProject(withoutAlias, {
-          path: openedPath,
-          trusted,
-          lastOpened: Date.now(),
-          pinned: existing?.pinned,
-        });
+      const existing = recentProjects.find((entry) => entry.path === path || entry.path === openedPath);
+      const withoutAlias = recentProjects.filter((entry) => entry.path !== path && entry.path !== openedPath);
+      const knownProjects = rememberProject(withoutAlias, {
+        path: openedPath,
+        trusted,
+        lastOpened: Date.now(),
+        pinned: existing?.pinned,
       });
+      setRecentProjects(knownProjects);
+      try {
+        // Establish the shared host baseline before the first desktop session projection.
+        await syncKnownProjects(knownProjects);
+      } catch (error) {
+        console.warn("Could not establish LemonPi's unread session baseline", error);
+      }
       setCandidatePath(undefined);
       setConnection("online");
       setSessionState(undefined);
@@ -1044,8 +1038,8 @@ export default function App() {
   const online = connection === "online";
   const streaming = sessionState?.isStreaming ?? transcript.isStreaming;
   const unreadConversationCount = useMemo(
-    () => countUnreadFinalReplies(sessions, unreadFinalReplyState),
-    [sessions, unreadFinalReplyState],
+    () => countUnreadFinalReplies(sessions),
+    [sessions],
   );
   const activeDialog = dialogQueue[0];
   const visibleSubagentRuns = useMemo(() => {

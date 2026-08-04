@@ -15,16 +15,22 @@ use super::{
     hydration::{self, HydrationError},
     identity::HostIdentity,
     policy::allows_peer,
-    projects::{InternalProjectBinding, ProjectCatalog, RemoteProjectSummary, SessionSyncInput},
+    projects::{
+        InternalProjectBinding, ProjectCatalog, ReadReceiptResult, RemoteProjectSummary,
+        SessionSyncInput, UnreadSnapshot,
+    },
     protocol::{
         Capability, Envelope, EventEnvelope as WireEventEnvelope, EventKind as WireEventKind,
         EventPayload, Health, Hello, Limits, MessagesResponse, PairRequest, PairResponse,
-        PairedDevice, ProjectSummary, ProjectedPiEvent, ProtocolError, RpcAccepted, RpcRequest,
-        SafeMessage, SessionState, SessionSummary, SessionsResponse, StateResponse,
+        PairedDevice, ProjectSummary, ProjectedPiEvent, ProtocolError, ReadReceiptRequest,
+        ReadReceiptResponse, RpcAccepted, RpcRequest, SafeMessage, SessionState, SessionSummary,
+        SessionsResponse, StateResponse,
     },
     restrict_file_permissions, RemoteError, RemoteResult,
 };
-use crate::{list_pi_sessions_sync, session_directory, PiManager, PiSessionSummary};
+use crate::{
+    list_pi_sessions_sync, read_session_summary, session_directory, PiManager, PiSessionSummary,
+};
 use axum::{
     body::{to_bytes, Body},
     extract::{
@@ -90,6 +96,7 @@ const AVAILABLE_CAPABILITIES: &[Capability] = &[
     Capability::State,
     Capability::Rpc,
     Capability::Events,
+    Capability::Unread,
 ];
 
 #[derive(Clone)]
@@ -124,6 +131,14 @@ enum SessionCatalogError {
 enum SessionTransactionResult {
     Sessions(Vec<SessionSummary>),
     ProjectNotFound,
+    HostUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadSessionError {
+    ProjectNotFound,
+    SessionNotFound,
+    StaleFinalReply,
     HostUnavailable,
 }
 
@@ -230,6 +245,7 @@ pub(crate) fn router(state: BridgeState) -> Router {
         .route("/v1/pair", post(pair))
         .route("/v1/projects", get(projects))
         .route("/v1/sessions", get(sessions))
+        .route("/v1/sessions/read", post(read_session))
         .route("/v1/state", get(state_snapshot))
         .route("/v1/messages", get(messages))
         .route("/v1/rpc", post(rpc))
@@ -482,9 +498,10 @@ async fn projects(
     }
     let active_project = state.manager.remote_active_project().await;
     let storage = state.storage.clone();
+    let include_unread = context.accepted_capabilities.contains(&Capability::Unread);
     let summaries = match tokio::task::spawn_blocking(move || {
         ProjectCatalog::load_or_create(&storage)
-            .map(|catalog| catalog.safe_projects(active_project.as_deref()))
+            .map(|catalog| catalog.safe_projects(active_project.as_deref(), include_unread))
     })
     .await
     {
@@ -552,9 +569,11 @@ async fn sessions(
 
     let storage = state.storage.clone();
     let requested_project_id = project_id.clone();
-    let result =
-        tokio::task::spawn_blocking(move || session_catalogue(&storage, &requested_project_id))
-            .await;
+    let include_unread = context.accepted_capabilities.contains(&Capability::Unread);
+    let result = tokio::task::spawn_blocking(move || {
+        session_catalogue(&storage, &requested_project_id, include_unread)
+    })
+    .await;
     let sessions = match result {
         Ok(Ok(sessions)) => sessions,
         Ok(Err(SessionCatalogError::ProjectNotFound)) => {
@@ -586,6 +605,165 @@ async fn sessions(
         SessionsResponse {
             project_id,
             sessions,
+            accepted_capabilities: context.accepted_capabilities,
+        },
+    )
+}
+
+async fn read_session(
+    State(state): State<BridgeState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let context = match validate_request(&headers, peer, state.config.access_mode) {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    let Some(_authentication_lease) = authentication_lease(&headers, &state).await else {
+        return unauthenticated(&context.request_id);
+    };
+    if !context.accepted_capabilities.contains(&Capability::Unread) {
+        return error(
+            StatusCode::NOT_IMPLEMENTED,
+            &context.request_id,
+            "capability_unavailable",
+            "Unread receipts were not negotiated for this request.",
+            false,
+        );
+    }
+    if !is_json_content_type(&headers) {
+        return error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            &context.request_id,
+            "unsupported_content_type",
+            "This endpoint requires a JSON request body.",
+            false,
+        );
+    }
+    let body = match to_bytes(body, MAX_HTTP_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(_) => {
+            return error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &context.request_id,
+                "payload_too_large",
+                "The request body is too large.",
+                false,
+            )
+        }
+    };
+    let request: ReadReceiptRequest = match serde_json::from_slice::<ReadReceiptRequest>(&body) {
+        Ok(request)
+            if !request.project_id.is_empty()
+                && !request.session_id.is_empty()
+                && !request.read_reply_id.is_empty() =>
+        {
+            request
+        }
+        _ => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                &context.request_id,
+                "malformed_request",
+                "The read receipt request is invalid.",
+                false,
+            )
+        }
+    };
+
+    let storage = state.storage.clone();
+    let event_storage = state.storage.clone();
+    let event_hub = state.manager.remote_event_hub();
+    let requested_project_id = request.project_id.clone();
+    let requested_session_id = request.session_id.clone();
+    let requested_reply_id = request.read_reply_id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        ProjectCatalog::transaction(&storage, |catalog| {
+            let Some(binding) = catalog.resolve_project_binding(&requested_project_id) else {
+                return Ok(Err(ReadSessionError::ProjectNotFound));
+            };
+            if !binding.trusted {
+                return Ok(Err(ReadSessionError::HostUnavailable));
+            }
+            let directory = session_directory(&binding.path).map_err(|_| {
+                RemoteError::InvalidConfiguration("session directory unavailable".into())
+            })?;
+            let Some(path) = catalog.resolve_session_path(
+                &requested_project_id,
+                &requested_session_id,
+                &directory,
+            ) else {
+                return Ok(Err(ReadSessionError::SessionNotFound));
+            };
+            let Some(summary) = read_session_summary(&path, &binding.path) else {
+                return Ok(Err(ReadSessionError::HostUnavailable));
+            };
+            let marker = summary.last_final_reply.map(|reply| reply.marker);
+            let (receipt, snapshot) = catalog.apply_read_receipt(
+                &requested_project_id,
+                &requested_session_id,
+                marker,
+                &requested_reply_id,
+            )?;
+            if snapshot.changed {
+                publish_unread_snapshot(&event_hub, &event_storage, &snapshot);
+            }
+            match receipt {
+                ReadReceiptResult::Current => Ok(Ok(snapshot)),
+                ReadReceiptResult::Stale => Ok(Err(ReadSessionError::StaleFinalReply)),
+            }
+        })
+    })
+    .await;
+    let snapshot = match result {
+        Ok(Ok(Ok(snapshot))) => snapshot,
+        Ok(Ok(Err(ReadSessionError::ProjectNotFound))) => {
+            return error(
+                StatusCode::NOT_FOUND,
+                &context.request_id,
+                "project_not_found",
+                "The requested project is not available.",
+                false,
+            )
+        }
+        Ok(Ok(Err(ReadSessionError::SessionNotFound))) => {
+            return error(
+                StatusCode::NOT_FOUND,
+                &context.request_id,
+                "session_not_found",
+                "The requested session is not available.",
+                false,
+            )
+        }
+        Ok(Ok(Err(ReadSessionError::StaleFinalReply))) => {
+            return error(
+                StatusCode::CONFLICT,
+                &context.request_id,
+                "stale_final_reply",
+                "The final reply has changed. Refresh before marking it read.",
+                false,
+            )
+        }
+        Ok(Ok(Err(ReadSessionError::HostUnavailable))) | Ok(Err(_)) | Err(_) => {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &context.request_id,
+                "host_unavailable",
+                "The host cannot persist the read receipt right now.",
+                true,
+            )
+        }
+    };
+    success(
+        StatusCode::OK,
+        &context.request_id,
+        ReadReceiptResponse {
+            project_id: snapshot.project_id,
+            session_id: snapshot.session_id,
+            has_unread_final_reply: snapshot.has_unread_final_reply,
+            last_final_reply_id: snapshot.last_final_reply_id,
+            unread_session_count: snapshot.unread_session_count,
             accepted_capabilities: context.accepted_capabilities,
         },
     )
@@ -681,12 +859,14 @@ async fn state_snapshot(
     let requested_project_id = project_id.clone();
     let project_path = resource.binding.path.clone();
     let active_session_for_check = active_session.clone();
+    let include_unread = context.accepted_capabilities.contains(&Capability::Unread);
     let project = match tokio::task::spawn_blocking(move || {
         revalidate_state_project(
             &storage,
             &requested_project_id,
             &project_path,
             active_session_for_check.as_ref(),
+            include_unread,
         )
     })
     .await
@@ -935,7 +1115,7 @@ async fn serve_event_socket(
         protocol: super::protocol::PROTOCOL_VERSION,
         host_id,
         high_water_seq: cutoff,
-        accepted_capabilities: capabilities,
+        accepted_capabilities: capabilities.clone(),
         limits: event_socket_limits(),
     };
     let Ok(hello) = serde_json::to_string(&hello) else {
@@ -955,7 +1135,7 @@ async fn serve_event_socket(
         if event.kind == InternalEventKind::Gap {
             skip_through = skip_through.max(event.seq);
         }
-        if !send_internal_event(&mut socket, &storage, event).await {
+        if !send_internal_event(&mut socket, &storage, &capabilities, event).await {
             return;
         }
     }
@@ -986,7 +1166,7 @@ async fn serve_event_socket(
                     continue;
                 }
                 cursor = cursor.max(event.seq);
-                if !send_internal_event(&mut socket, &storage, event).await {
+                if !send_internal_event(&mut socket, &storage, &capabilities, event).await {
                     return;
                 }
             }
@@ -994,7 +1174,7 @@ async fn serve_event_socket(
                 let gap = hub.allocate_client_lag_gap(cursor.saturating_add(1));
                 skip_through = gap.seq;
                 cursor = gap.seq;
-                if !send_internal_event(&mut socket, &storage, gap).await {
+                if !send_internal_event(&mut socket, &storage, &capabilities, gap).await {
                     return;
                 }
             }
@@ -1018,10 +1198,14 @@ async fn close_event_socket(socket: &mut WebSocket, code: u16) {
 async fn send_internal_event(
     socket: &mut WebSocket,
     storage: &Path,
+    capabilities: &[Capability],
     event: InternalEventEnvelope,
 ) -> bool {
     let storage = storage.to_path_buf();
-    let projected = tokio::task::spawn_blocking(move || project_wire_event(&storage, &event)).await;
+    let capabilities = capabilities.to_vec();
+    let projected =
+        tokio::task::spawn_blocking(move || project_wire_event(&storage, &event, &capabilities))
+            .await;
     let bytes = match projected {
         Ok(Ok(Some(bytes))) => bytes,
         Ok(Ok(None)) => return true,
@@ -1043,11 +1227,18 @@ async fn send_internal_event(
 fn project_wire_event(
     storage: &Path,
     event: &InternalEventEnvelope,
+    capabilities: &[Capability],
 ) -> Result<Option<Vec<u8>>, ()> {
+    if event.kind == InternalEventKind::UnreadUpdate && !capabilities.contains(&Capability::Unread)
+    {
+        return Ok(None);
+    }
     let projected = (|| {
         let (project_id, session_id, secrets) = match event.kind {
             InternalEventKind::Gap => (None, None, Vec::new()),
-            InternalEventKind::PiEvent | InternalEventKind::ProcessEvent => {
+            InternalEventKind::PiEvent
+            | InternalEventKind::ProcessEvent
+            | InternalEventKind::UnreadUpdate => {
                 let (project_id, session_id, secrets) = map_event_scope(storage, event)?;
                 (Some(project_id), session_id, secrets)
             }
@@ -1073,11 +1264,18 @@ fn project_wire_event(
                     reason: None,
                     original_kind: None,
                     original_bytes: None,
+                    has_unread_final_reply: None,
+                    last_final_reply_id: None,
+                    unread_session_count: None,
                 },
             ),
             InternalEventKind::ProcessEvent => (
                 WireEventKind::ProcessEvent,
                 project_process_payload(&event.payload)?,
+            ),
+            InternalEventKind::UnreadUpdate => (
+                WireEventKind::UnreadUpdate,
+                project_unread_payload(&event.payload)?,
             ),
             InternalEventKind::Gap => (WireEventKind::Gap, project_gap_payload(&event.payload)?),
             InternalEventKind::Truncated => (
@@ -1103,13 +1301,14 @@ fn project_wire_event(
     }
     if !matches!(
         projected.kind,
-        WireEventKind::PiEvent | WireEventKind::ProcessEvent
+        WireEventKind::PiEvent | WireEventKind::ProcessEvent | WireEventKind::UnreadUpdate
     ) {
         return Ok(None);
     }
     let original_kind = match projected.kind {
         WireEventKind::PiEvent => "piEvent",
         WireEventKind::ProcessEvent => "processEvent",
+        WireEventKind::UnreadUpdate => "unreadUpdate",
         _ => return Ok(None),
     };
     let truncated = WireEventEnvelope {
@@ -1129,6 +1328,9 @@ fn project_wire_event(
             reason: None,
             original_kind: Some(original_kind.to_string()),
             original_bytes: Some(u64::try_from(bytes.len()).map_err(|_| ())?),
+            has_unread_final_reply: None,
+            last_final_reply_id: None,
+            unread_session_count: None,
         },
     };
     let truncated = serde_json::to_vec(&truncated).map_err(|_| ())?;
@@ -1137,6 +1339,33 @@ fn project_wire_event(
     } else {
         Err(())
     }
+}
+
+pub(crate) fn publish_unread_snapshot(hub: &EventHub, storage: &Path, snapshot: &UnreadSnapshot) {
+    let Ok(catalog) = ProjectCatalog::load_or_create(storage) else {
+        return;
+    };
+    let Some(binding) = catalog.resolve_project_binding(&snapshot.project_id) else {
+        return;
+    };
+    let Ok(directory) = session_directory(&binding.path) else {
+        return;
+    };
+    let Some(session_path) =
+        catalog.resolve_session_path(&snapshot.project_id, &snapshot.session_id, &directory)
+    else {
+        return;
+    };
+    hub.publish_scoped(
+        Some(binding.path),
+        Some(session_path),
+        InternalEventKind::UnreadUpdate,
+        serde_json::json!({
+            "hasUnreadFinalReply": snapshot.has_unread_final_reply,
+            "lastFinalReplyId": snapshot.last_final_reply_id,
+            "unreadSessionCount": snapshot.unread_session_count,
+        }),
+    );
 }
 
 fn map_event_scope(
@@ -1447,7 +1676,27 @@ fn empty_event_payload() -> EventPayload {
         reason: None,
         original_kind: None,
         original_bytes: None,
+        has_unread_final_reply: None,
+        last_final_reply_id: None,
+        unread_session_count: None,
     }
+}
+
+fn project_unread_payload(payload: &serde_json::Value) -> Option<EventPayload> {
+    let payload = payload.as_object()?;
+    let mut projected = empty_event_payload();
+    projected.has_unread_final_reply = Some(payload.get("hasUnreadFinalReply")?.as_bool()?);
+    projected.last_final_reply_id = match payload.get("lastFinalReplyId") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => {
+            let value = value.as_str()?;
+            (value.starts_with("reply_") && value.len() == 70)
+                .then(|| value.to_string())?
+                .into()
+        }
+    };
+    projected.unread_session_count = Some(payload.get("unreadSessionCount")?.as_u64()?);
+    Some(projected)
 }
 
 fn project_process_payload(payload: &serde_json::Value) -> Option<EventPayload> {
@@ -1954,7 +2203,7 @@ fn state_project_resource(
     // Resolve the safe projection here as well so catalogue metadata and canonical binding must
     // both be valid before any manager state is consulted.
     catalog
-        .safe_project(project_id, active_project)
+        .safe_project(project_id, active_project, false)
         .ok_or(StateResourceError::ProjectNotFound)?;
     Ok(StateProjectResource { binding })
 }
@@ -2000,6 +2249,7 @@ fn revalidate_state_project(
     project_id: &str,
     expected_project: &Path,
     active_session: Option<&(String, PathBuf)>,
+    include_unread: bool,
 ) -> Result<ProjectSummary, StateResourceError> {
     let catalog =
         ProjectCatalog::load_or_create(storage).map_err(|_| StateResourceError::HostUnavailable)?;
@@ -2024,7 +2274,7 @@ fn revalidate_state_project(
         }
     }
     catalog
-        .safe_project(project_id, Some(expected_project))
+        .safe_project(project_id, Some(expected_project), include_unread)
         .ok_or(StateResourceError::ProjectNotFound)
 }
 
@@ -2152,6 +2402,7 @@ fn unauthenticated(request_id: &str) -> Response {
 fn session_catalogue(
     storage: &std::path::Path,
     project_id: &str,
+    include_unread: bool,
 ) -> Result<Vec<SessionSummary>, SessionCatalogError> {
     let initial = ProjectCatalog::load_or_create(storage)
         .map_err(|_| SessionCatalogError::HostUnavailable)?;
@@ -2188,6 +2439,10 @@ fn session_catalogue(
             .iter()
             .map(|session| SessionSyncInput {
                 path: PathBuf::from(&session.path),
+                final_reply_marker: session
+                    .last_final_reply
+                    .as_ref()
+                    .map(|reply| reply.marker.clone()),
             })
             .collect::<Vec<_>>();
         catalog.sync_sessions(project_id, directory, &inputs)?;
@@ -2195,7 +2450,14 @@ fn session_catalogue(
             .iter()
             .cloned()
             .filter_map(|session| {
-                project_session(catalog, &binding.path, directory, project_id, session)
+                project_session(
+                    catalog,
+                    &binding.path,
+                    directory,
+                    project_id,
+                    session,
+                    include_unread,
+                )
             })
             .collect();
         Ok(SessionTransactionResult::Sessions(sessions))
@@ -2214,6 +2476,7 @@ fn project_session(
     directory: &std::path::Path,
     project_id: &str,
     session: PiSessionSummary,
+    include_unread: bool,
 ) -> Option<SessionSummary> {
     let session_path = PathBuf::from(&session.path);
     let session_id = catalog.session_id_for_path(project_id, directory, &session_path)?;
@@ -2244,6 +2507,9 @@ fn project_session(
         .as_ref()
         .and_then(|reply| reply.timestamp.as_deref())
         .and_then(normalized_utc_timestamp);
+    let unread = include_unread
+        .then(|| catalog.unread_snapshot(project_id, &session_id))
+        .flatten();
     Some(SessionSummary {
         session_id,
         name,
@@ -2251,6 +2517,10 @@ fn project_session(
         message_count,
         first_message_preview,
         last_final_reply_at,
+        has_unread_final_reply: unread
+            .as_ref()
+            .map(|snapshot| snapshot.has_unread_final_reply),
+        last_final_reply_id: unread.and_then(|snapshot| snapshot.last_final_reply_id),
     })
 }
 
@@ -2488,6 +2758,7 @@ fn accepted_capabilities(headers: &HeaderMap) -> Vec<Capability> {
             "state" => Capability::State,
             "rpc" => Capability::Rpc,
             "events" => Capability::Events,
+            "unread" => Capability::Unread,
             // Unknown future capabilities do not broaden the currently available intersection.
             _ => continue,
         };
@@ -2791,6 +3062,7 @@ mod tests {
                 directory,
                 &[SessionSyncInput {
                     path: session.to_path_buf(),
+                    final_reply_marker: None,
                 }],
             )
             .unwrap();
@@ -2884,7 +3156,7 @@ mod tests {
         assert_eq!(value["protocol"], 1);
         assert_eq!(
             value["data"]["capabilities"],
-            serde_json::json!(["projects", "state", "rpc", "events"])
+            serde_json::json!(["projects", "state", "rpc", "events", "unread"])
         );
         assert_eq!(
             value["data"]["acceptedCapabilities"],
@@ -2895,6 +3167,52 @@ mod tests {
             MAX_HTTP_BODY_BYTES
         );
         assert!(value.to_string().contains("hostId"));
+    }
+
+    #[test]
+    fn unread_events_are_projected_only_for_negotiated_live_and_replay_recipients() {
+        let _environment_lock = SESSION_DIRECTORY_ENV.lock().unwrap();
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        let sessions = root.path().join("sessions");
+        let session = sessions.join("one.jsonl");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&sessions).unwrap();
+        let project = project.canonicalize().unwrap();
+        let _override = SessionDirectoryOverride::set(&sessions);
+        write_session(&session, &project, "private-pi-id", None, None, "Question");
+        let project_id = sync_project(root.path(), &project, true);
+        let session_id = sync_session(root.path(), &project_id, &sessions, &session);
+        let hub = EventHub::new();
+        let event = hub.publish_scoped(
+            Some(project),
+            Some(session),
+            InternalEventKind::UnreadUpdate,
+            serde_json::json!({
+                "hasUnreadFinalReply": true,
+                "lastFinalReplyId": format!("reply_{}", "a".repeat(64)),
+                "unreadSessionCount": 1,
+            }),
+        );
+
+        assert!(
+            project_wire_event(root.path(), &event, &[Capability::Events])
+                .unwrap()
+                .is_none()
+        );
+        let bytes = project_wire_event(
+            root.path(),
+            &event,
+            &[Capability::Events, Capability::Unread],
+        )
+        .unwrap()
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["kind"], "unreadUpdate");
+        assert_eq!(value["projectId"], project_id);
+        assert_eq!(value["sessionId"], session_id);
+        assert_eq!(value["payload"]["hasUnreadFinalReply"], true);
+        assert_eq!(value["payload"]["unreadSessionCount"], 1);
     }
 
     #[test]
@@ -3256,6 +3574,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authenticated_read_receipts_are_idempotent_and_reject_stale_final_reply_ids() {
+        let _environment_lock = SESSION_DIRECTORY_ENV.lock().unwrap();
+        let root = tempdir().unwrap();
+        let project = root.path().join("project");
+        let sessions = root.path().join("sessions");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&sessions).unwrap();
+        let project = project.canonicalize().unwrap();
+        let _override = SessionDirectoryOverride::set(&sessions);
+        let session = sessions.join("one.jsonl");
+        write_session(&session, &project, "private-id", None, None, "First");
+        let state = state(root.path().to_path_buf()).await;
+        let project_id = sync_project(root.path(), &project, true);
+        authorize(&state).await;
+        let app = router(state);
+        let request_id = "7c9b9c14-e910-4be7-8878-5d3ed02b2f02";
+        let uri = format!("/v1/sessions?projectId={project_id}");
+        let first = response_json(
+            app.clone()
+                .oneshot(authorized_request(Method::GET, &uri, request_id))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let session_id = first["data"]["sessions"][0]["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(first["data"]["sessions"][0]["hasUnreadFinalReply"], false);
+
+        let mut file = OpenOptions::new().append(true).open(&session).unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"type":"message","message":{"role":"user","content":"Again"}})
+        )
+        .unwrap();
+        writeln!(file, "{}", serde_json::json!({"type":"message","id":"new-final","timestamp":"2026-08-03T01:21:00.000Z","message":{"role":"assistant","stopReason":"stop","content":"New"}})).unwrap();
+        drop(file);
+        let refreshed = response_json(
+            app.clone()
+                .oneshot(authorized_request(Method::GET, &uri, request_id))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let reply_id = refreshed["data"]["sessions"][0]["lastFinalReplyId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            refreshed["data"]["sessions"][0]["hasUnreadFinalReply"],
+            true
+        );
+        assert!(reply_id.starts_with("reply_"));
+        assert!(!reply_id.contains("new-final"));
+
+        let post_receipt = |reply_id: &str| {
+            let body = serde_json::json!({
+                "projectId": project_id,
+                "sessionId": session_id,
+                "readReplyId": reply_id,
+            });
+            let mut request = request(
+                Method::POST,
+                "/v1/sessions/read",
+                request_id,
+                Body::from(serde_json::to_vec(&body).unwrap()),
+            );
+            request.headers_mut().insert(
+                header::AUTHORIZATION,
+                format!("Bearer {TEST_TOKEN}").parse().unwrap(),
+            );
+            request
+                .headers_mut()
+                .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+            request
+                .headers_mut()
+                .insert(CAPABILITIES_HEADER, "unread".parse().unwrap());
+            request
+        };
+        let read = app.clone().oneshot(post_receipt(&reply_id)).await.unwrap();
+        assert_eq!(read.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(read).await["data"]["hasUnreadFinalReply"],
+            false
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(post_receipt(&reply_id))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+
+        let mut file = OpenOptions::new().append(true).open(&session).unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"type":"message","message":{"role":"user","content":"One more"}})
+        )
+        .unwrap();
+        writeln!(file, "{}", serde_json::json!({"type":"message","id":"newer-final","timestamp":"2026-08-03T01:22:00.000Z","message":{"role":"assistant","stopReason":"stop","content":"Newer"}})).unwrap();
+        drop(file);
+        let stale = app.clone().oneshot(post_receipt(&reply_id)).await.unwrap();
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(stale).await["error"]["code"],
+            "stale_final_reply"
+        );
+        let latest = response_json(
+            app.oneshot(authorized_request(Method::GET, &uri, request_id))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(latest["data"]["sessions"][0]["hasUnreadFinalReply"], true);
+        assert_ne!(latest["data"]["sessions"][0]["lastFinalReplyId"], reply_id);
+    }
+
+    #[tokio::test]
     async fn sessions_sanitize_embedded_paths_tokens_and_later_raw_ids() {
         let _environment_lock = SESSION_DIRECTORY_ENV.lock().unwrap();
         let root = tempdir().unwrap();
@@ -3523,7 +3963,7 @@ mod tests {
         assert!(value["data"]["state"].get("sessionName").is_none());
         assert_eq!(
             value["data"]["acceptedCapabilities"],
-            serde_json::json!(["projects", "state", "rpc", "events"])
+            serde_json::json!(["projects", "state", "rpc", "events", "unread"])
         );
     }
 
@@ -4218,6 +4658,7 @@ mod tests {
                     &sessions,
                     &[SessionSyncInput {
                         path: session.clone(),
+                        final_reply_marker: None,
                     }],
                 )
                 .unwrap();

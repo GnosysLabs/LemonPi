@@ -56,6 +56,7 @@ pub(crate) enum Capability {
     State,
     Rpc,
     Events,
+    Unread,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -115,6 +116,8 @@ pub(crate) struct ProjectSummary {
     pub(crate) display_path: String,
     pub(crate) trust_state: TrustState,
     pub(crate) is_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unread_session_count: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -142,6 +145,10 @@ pub(crate) struct SessionSummary {
     pub(crate) first_message_preview: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) last_final_reply_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) has_unread_final_reply: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_final_reply_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -197,6 +204,26 @@ pub(crate) struct MessagesResponse {
     pub(crate) project_id: String,
     pub(crate) session_id: String,
     pub(crate) messages: Vec<SafeMessage>,
+    pub(crate) accepted_capabilities: Vec<Capability>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReadReceiptRequest {
+    pub(crate) project_id: String,
+    pub(crate) session_id: String,
+    pub(crate) read_reply_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReadReceiptResponse {
+    pub(crate) project_id: String,
+    pub(crate) session_id: String,
+    pub(crate) has_unread_final_reply: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_final_reply_id: Option<String>,
+    pub(crate) unread_session_count: u64,
     pub(crate) accepted_capabilities: Vec<Capability>,
 }
 
@@ -262,6 +289,7 @@ pub(crate) struct EventEnvelope {
 pub(crate) enum EventKind {
     PiEvent,
     ProcessEvent,
+    UnreadUpdate,
     Gap,
     Truncated,
 }
@@ -289,6 +317,12 @@ pub(crate) struct EventPayload {
     pub(crate) original_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) original_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) has_unread_final_reply: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_final_reply_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unread_session_count: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -408,6 +442,8 @@ mod tests {
             message_count: 1,
             first_message_preview: "First".into(),
             last_final_reply_at: None,
+            has_unread_final_reply: None,
+            last_final_reply_id: None,
         };
         let state = SessionState {
             session_id: None,
@@ -456,6 +492,9 @@ mod tests {
                 reason: None,
                 original_kind: None,
                 original_bytes: None,
+                has_unread_final_reply: None,
+                last_final_reply_id: None,
+                unread_session_count: None,
             },
         };
         let rpc = RpcRequest {

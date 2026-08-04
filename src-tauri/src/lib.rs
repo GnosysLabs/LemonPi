@@ -22,8 +22,12 @@ mod remote;
 use remote::{
     events::{EventHub, EventKind},
     hydration::{SafeLiveState, SafeLiveStateCache},
-    projects::{KnownProjectInput, ProjectCatalog, RemoteProjectSummary, SessionSyncInput},
+    projects::{
+        KnownProjectInput, ProjectCatalog, ReadReceiptResult, RemoteProjectSummary,
+        SessionSyncInput, UnreadSnapshot,
+    },
     service::RemoteService,
+    RemoteError,
 };
 
 const MAX_RPC_RECORD_BYTES: usize = 8 * 1024 * 1024;
@@ -247,7 +251,9 @@ struct PiPackagesSnapshot {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PiSessionFinalReply {
-    marker: String,
+    /// Stable transcript receipt marker. Never cross the desktop host boundary directly.
+    #[serde(skip_serializing)]
+    pub(crate) marker: String,
     pub(crate) timestamp: Option<String>,
 }
 
@@ -263,7 +269,12 @@ pub(crate) struct PiSessionSummary {
     pub(crate) modified: u64,
     pub(crate) message_count: usize,
     pub(crate) first_message: String,
+    #[serde(skip_serializing)]
     pub(crate) last_final_reply: Option<PiSessionFinalReply>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) has_unread_final_reply: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_final_reply_id: Option<String>,
     #[serde(skip_serializing)]
     pub(crate) redaction_secrets: Vec<String>,
 }
@@ -827,8 +838,7 @@ fn same_session_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
         && left.created().ok() == right.created().ok()
 }
 
-#[cfg(test)]
-fn read_session_summary(path: &Path, expected_cwd: &Path) -> Option<PiSessionSummary> {
+pub(crate) fn read_session_summary(path: &Path, expected_cwd: &Path) -> Option<PiSessionSummary> {
     read_session_summary_with_budget(path, expected_cwd, &mut SessionScanBudget::new())
 }
 
@@ -996,6 +1006,8 @@ fn read_session_summary_with_budget(
             first_message
         },
         last_final_reply,
+        has_unread_final_reply: None,
+        last_final_reply_id: None,
         redaction_secrets,
     })
 }
@@ -1039,13 +1051,119 @@ pub(crate) fn list_pi_sessions_sync(cwd: &Path) -> Result<Vec<PiSessionSummary>,
 }
 
 #[tauri::command]
-async fn list_pi_sessions(cwd: String) -> Result<Vec<PiSessionSummary>, String> {
+async fn list_pi_sessions(app: AppHandle, cwd: String) -> Result<Vec<PiSessionSummary>, String> {
     let cwd = PathBuf::from(cwd)
         .canonicalize()
         .map_err(|error| format!("Could not inspect project sessions: {error}"))?;
-    tauri::async_runtime::spawn_blocking(move || list_pi_sessions_sync(&cwd))
-        .await
-        .map_err(|error| format!("Could not inspect project sessions: {error}"))?
+    let storage = remote_storage_directory(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut sessions = list_pi_sessions_sync(&cwd)?;
+        let directory = session_directory(&cwd)?;
+        let snapshots = ProjectCatalog::transaction(&storage, |catalog| {
+            let Some(binding) = catalog
+                .project_bindings()
+                .into_iter()
+                .find(|binding| binding.path == cwd)
+            else {
+                return Ok(HashMap::new());
+            };
+            let inputs = sessions
+                .iter()
+                .map(|session| SessionSyncInput {
+                    path: PathBuf::from(&session.path),
+                    final_reply_marker: session
+                        .last_final_reply
+                        .as_ref()
+                        .map(|reply| reply.marker.clone()),
+                })
+                .collect::<Vec<_>>();
+            catalog.sync_sessions(&binding.id, &directory, &inputs)?;
+            Ok(sessions
+                .iter()
+                .filter_map(|session| {
+                    let id = catalog.session_id_for_path(
+                        &binding.id,
+                        &directory,
+                        Path::new(&session.path),
+                    )?;
+                    catalog
+                        .unread_snapshot(&binding.id, &id)
+                        .map(|snapshot| (session.path.clone(), snapshot))
+                })
+                .collect::<HashMap<_, _>>())
+        })
+        .map_err(|error| error.to_string())?;
+        for session in &mut sessions {
+            if let Some(snapshot) = snapshots.get(&session.path) {
+                session.has_unread_final_reply = Some(snapshot.has_unread_final_reply);
+                session.last_final_reply_id = snapshot.last_final_reply_id.clone();
+            }
+        }
+        Ok(sessions)
+    })
+    .await
+    .map_err(|error| format!("Could not inspect project sessions: {error}"))?
+}
+
+/// Focused desktop viewing uses the same durable host receipt transaction as remote clients.
+#[tauri::command]
+async fn mark_pi_session_read(
+    app: AppHandle,
+    manager: State<'_, Arc<PiManager>>,
+    project: String,
+    session_path: String,
+    read_reply_id: String,
+) -> Result<UnreadSnapshot, String> {
+    let project = PathBuf::from(project)
+        .canonicalize()
+        .map_err(|error| format!("Could not inspect the project: {error}"))?;
+    let requested_session = PathBuf::from(session_path);
+    let storage = remote_storage_directory(&app)?;
+    let transaction_storage = storage.clone();
+    let event_storage = storage.clone();
+    let event_hub = manager.remote_event_hub();
+    let snapshot = tauri::async_runtime::spawn_blocking(move || {
+        ProjectCatalog::transaction(&transaction_storage, |catalog| {
+            let binding = catalog
+                .project_bindings()
+                .into_iter()
+                .find(|binding| binding.path == project)
+                .ok_or_else(|| {
+                    RemoteError::InvalidConfiguration("project is not synchronized".into())
+                })?;
+            let directory =
+                session_directory(&binding.path).map_err(RemoteError::InvalidConfiguration)?;
+            let session_id = catalog
+                .session_id_for_path(&binding.id, &directory, &requested_session)
+                .ok_or_else(|| {
+                    RemoteError::InvalidConfiguration("session is not synchronized".into())
+                })?;
+            let path = catalog
+                .resolve_session_path(&binding.id, &session_id, &directory)
+                .ok_or_else(|| {
+                    RemoteError::InvalidConfiguration("session is unavailable".into())
+                })?;
+            let summary = read_session_summary(&path, &binding.path).ok_or_else(|| {
+                RemoteError::InvalidConfiguration("session is unavailable".into())
+            })?;
+            let marker = summary.last_final_reply.map(|reply| reply.marker);
+            let (result, snapshot) =
+                catalog.apply_read_receipt(&binding.id, &session_id, marker, &read_reply_id)?;
+            if snapshot.changed {
+                remote::server::publish_unread_snapshot(&event_hub, &event_storage, &snapshot);
+            }
+            if result == ReadReceiptResult::Stale {
+                return Err(RemoteError::InvalidConfiguration(
+                    "stale_final_reply".into(),
+                ));
+            }
+            Ok(snapshot)
+        })
+    })
+    .await
+    .map_err(|error| format!("Could not mark the session read: {error}"))?
+    .map_err(|error| error.to_string())?;
+    Ok(snapshot)
 }
 
 fn remote_storage_directory(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1087,7 +1205,11 @@ async fn sync_known_projects(
                 let inputs = sessions
                     .into_iter()
                     .map(|session| SessionSyncInput {
-                        path: PathBuf::from(session.path),
+                        path: PathBuf::from(&session.path),
+                        final_reply_marker: session
+                            .last_final_reply
+                            .as_ref()
+                            .map(|reply| reply.marker.clone()),
                     })
                     .collect::<Vec<_>>();
                 Some((binding, directory, inputs))
@@ -1117,6 +1239,69 @@ async fn sync_known_projects(
     .map_err(|error| format!("Could not synchronize known projects: {error}"))?
 }
 
+fn update_unread_from_pi_event(
+    app: &AppHandle,
+    project: &Path,
+    session: Option<&Path>,
+    event: &Value,
+    events: &EventHub,
+) {
+    let Some(session) = session else { return };
+    let event_type = event.get("type").and_then(Value::as_str);
+    if !matches!(event_type, Some("message_start" | "message_end")) {
+        return;
+    }
+    let role = event.pointer("/message/role").and_then(Value::as_str);
+    let marker = if role == Some("user") {
+        None
+    } else if event_type == Some("message_end")
+        && role == Some("assistant")
+        && event.pointer("/message/stopReason").and_then(Value::as_str) == Some("stop")
+    {
+        let summary = read_session_summary(session, project);
+        Some(
+            summary
+                .as_ref()
+                .and_then(|summary| summary.last_final_reply.as_ref())
+                .cloned()
+                .unwrap_or_else(|| {
+                    final_reply_metadata(
+                        event,
+                        summary
+                            .as_ref()
+                            .map(|summary| summary.message_count.saturating_add(1))
+                            .unwrap_or(1),
+                    )
+                })
+                .marker,
+        )
+    } else {
+        return;
+    };
+    let Ok(storage) = remote_storage_directory(app) else {
+        return;
+    };
+    let Ok(directory) = session_directory(project) else {
+        return;
+    };
+    let snapshot = ProjectCatalog::transaction(&storage, |catalog| {
+        let Some(binding) = catalog
+            .project_bindings()
+            .into_iter()
+            .find(|binding| binding.trusted && binding.path == project)
+        else {
+            return Ok(None);
+        };
+        let snapshot =
+            catalog.merge_session_final_reply(&binding.id, project, &directory, session, marker)?;
+        if let Some(snapshot) = snapshot.as_ref().filter(|snapshot| snapshot.changed) {
+            remote::server::publish_unread_snapshot(events, &storage, snapshot);
+        }
+        Ok(snapshot)
+    });
+    let _ = snapshot;
+}
+
 fn forward_framed_result(
     result: Result<Option<Value>, String>,
     app: &AppHandle,
@@ -1134,10 +1319,11 @@ fn forward_framed_result(
                 .and_then(|snapshot| snapshot.session_file);
             events.publish_scoped(
                 Some(project.to_path_buf()),
-                session,
+                session.clone(),
                 EventKind::PiEvent,
                 event.clone(),
             );
+            update_unread_from_pi_event(app, project, session.as_deref(), &event, events);
             if let Value::Object(fields) = &mut event {
                 fields.insert("__piPid".to_string(), Value::from(pid));
             }
@@ -3605,6 +3791,7 @@ pub fn run() {
             start_pi,
             send_pi,
             list_pi_sessions,
+            mark_pi_session_read,
             sync_known_projects,
             get_git_branch,
             get_subagent_runs,
@@ -4369,11 +4556,30 @@ mod tests {
         let final_reply = summary.last_final_reply.expect("terminal reply metadata");
         assert_eq!(final_reply.timestamp.as_deref(), Some("1234"));
         assert_eq!(final_reply.marker, "timestamp:1234|id:final-1");
+        let desktop_projection =
+            serde_json::to_value(read_session_summary(&session, &project).unwrap()).unwrap();
+        assert!(desktop_projection.get("lastFinalReply").is_none());
+        assert!(!desktop_projection
+            .to_string()
+            .contains("timestamp:1234|id:final-1"));
 
         fs::write(
             &session,
             format!(
                 "{records}{{\"type\":\"message\",\"id\":\"user-2\",\"message\":{{\"role\":\"user\",\"content\":\"Follow-up\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        assert!(read_session_summary(&session, &project)
+            .unwrap()
+            .last_final_reply
+            .is_none());
+        fs::write(
+            &session,
+            format!(
+                "{records}{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"Retry\"}}}}\n\
+                 {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"stopReason\":\"aborted\"}}}}\n\
+                 {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"stopReason\":\"error\"}}}}\n"
             ),
         )
         .unwrap();
