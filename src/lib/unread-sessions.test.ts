@@ -1,61 +1,67 @@
 import { describe, expect, it } from "vitest";
 import type { PiSessionSummary } from "./pi-types";
 import {
-  baselineProjectFinalReplies,
+  applyHostReadReceipt,
   countUnreadFinalReplies,
+  focusedSessionReadRequest,
   isSessionFinalReplyUnread,
-  markSessionFinalReplyRead,
-  parseUnreadFinalReplyState,
-  serializeUnreadFinalReplyState,
 } from "./unread-sessions";
 
-function session(path: string, marker?: string): PiSessionSummary {
+function session(path: string, unread?: boolean, replyId?: string): PiSessionSummary {
   return {
     path,
     id: path,
     modified: 1,
     messageCount: 2,
     firstMessage: "Hello",
-    ...(marker ? { lastFinalReply: { marker, timestamp: "1" } } : {}),
+    hasUnreadFinalReply: unread,
+    lastFinalReplyId: replyId,
   };
 }
 
-describe("unread final reply state", () => {
-  it("baselines known project history without marking it unread", () => {
-    const sessions = [session("/sessions/one", "reply-1"), session("/sessions/two", "reply-2")];
-    const baseline = baselineProjectFinalReplies(parseUnreadFinalReplyState(null), "/project", sessions);
+describe("host-authoritative unread final replies", () => {
+  it("treats absent and baselined host projections as read", () => {
+    expect(isSessionFinalReplyUnread(session("/sessions/unknown"))).toBe(false);
+    expect(countUnreadFinalReplies([
+      session("/sessions/one", false, "reply_baseline"),
+      session("/sessions/two"),
+    ])).toBe(0);
+  });
 
-    expect(countUnreadFinalReplies(sessions, baseline)).toBe(0);
-    expect(baseline.initializedProjects).toEqual(["/project"]);
-    expect(baseline.readFinalReplyMarkers).toEqual({
-      "/sessions/one": "reply-1",
-      "/sessions/two": "reply-2",
+  it("counts only host-projected unread sessions", () => {
+    expect(countUnreadFinalReplies([
+      session("/sessions/one", true, "reply_new"),
+      session("/sessions/two", false, "reply_old"),
+      session("/sessions/pending"),
+    ])).toBe(1);
+  });
+
+  it("requests local reads only for the focused current unread host session", () => {
+    const sessions = [session("/sessions/one", true, "reply_1")];
+    expect(focusedSessionReadRequest(true, "/sessions/one", sessions)).toEqual({
+      sessionPath: "/sessions/one",
+      readReplyId: "reply_1",
     });
+    expect(focusedSessionReadRequest(false, "/sessions/one", sessions)).toBeUndefined();
+    expect(focusedSessionReadRequest(true, "/sessions/other", sessions)).toBeUndefined();
+    expect(focusedSessionReadRequest(true, "/sessions/one", [session("/sessions/one", false, "reply_1")])).toBeUndefined();
   });
 
-  it("counts only a newer final reply and clears it when read", () => {
-    const initial = baselineProjectFinalReplies(
-      parseUnreadFinalReplyState(null),
-      "/project",
-      [session("/sessions/one", "reply-1")],
-    );
-    const updated = session("/sessions/one", "reply-2");
+  it("applies a focused host receipt without changing another session", () => {
+    const sessions = [
+      session("/sessions/one", true, "reply_1"),
+      session("/sessions/two", true, "reply_2"),
+    ];
+    const next = applyHostReadReceipt(sessions, "/sessions/one", {
+      projectId: "project_1",
+      sessionId: "session_1",
+      hasUnreadFinalReply: false,
+      lastFinalReplyId: "reply_1",
+      unreadSessionCount: 1,
+    });
 
-    expect(isSessionFinalReplyUnread(updated, initial)).toBe(true);
-    expect(countUnreadFinalReplies([updated, session("/sessions/pending")], initial)).toBe(1);
-
-    const read = markSessionFinalReplyRead(initial, updated);
-    expect(isSessionFinalReplyUnread(updated, read)).toBe(false);
-    expect(countUnreadFinalReplies([updated], read)).toBe(0);
-  });
-
-  it("keeps initialization and receipts across storage round trips", () => {
-    const state = markSessionFinalReplyRead(
-      baselineProjectFinalReplies(parseUnreadFinalReplyState(null), "/project", []),
-      session("/sessions/one", "reply-1"),
-    );
-
-    expect(parseUnreadFinalReplyState(serializeUnreadFinalReplyState(state))).toEqual(state);
-    expect(baselineProjectFinalReplies(state, "/project", [session("/sessions/two", "reply-2")])).toBe(state);
+    expect(next[0]).toMatchObject({ hasUnreadFinalReply: false, lastFinalReplyId: "reply_1" });
+    expect(next[1]).toBe(sessions[1]);
+    expect(countUnreadFinalReplies(next)).toBe(1);
   });
 });

@@ -10,6 +10,7 @@ use super::{
     CURRENT_REMOTE_STORAGE_VERSION,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -37,6 +38,8 @@ pub(crate) struct KnownProjectInput {
 #[derive(Clone, Debug)]
 pub(crate) struct SessionSyncInput {
     pub(crate) path: PathBuf,
+    /// The stable desktop-internal final-reply marker discovered in the transcript.
+    pub(crate) final_reply_marker: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -47,6 +50,27 @@ pub(crate) struct RemoteProjectSummary {
     display_path: String,
     trust_state: &'static str,
     is_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unread_session_count: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UnreadSnapshot {
+    pub(crate) project_id: String,
+    pub(crate) session_id: String,
+    pub(crate) has_unread_final_reply: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_final_reply_id: Option<String>,
+    pub(crate) unread_session_count: u64,
+    #[serde(skip_serializing)]
+    pub(crate) changed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReadReceiptResult {
+    Current,
+    Stale,
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +119,8 @@ struct ProjectRecord {
     pinned: bool,
     #[serde(default)]
     session_directory: Option<PathBuf>,
+    #[serde(default)]
+    unread_initialized: bool,
     sessions: Vec<SessionRecord>,
 }
 
@@ -105,6 +131,11 @@ struct SessionRecord {
     path: PathBuf,
     #[serde(default)]
     identity: Option<FilesystemIdentity>,
+    /// Stable Pi transcript marker. It is persisted for comparison and never serialized remotely.
+    #[serde(default)]
+    final_reply_marker: Option<String>,
+    #[serde(default)]
+    read_final_reply_marker: Option<String>,
 }
 
 /// Owner-only persistence for the desktop's recently known projects.
@@ -198,13 +229,14 @@ impl ProjectCatalog {
                         last_opened,
                         pinned,
                         session_directory: None,
+                        unread_initialized: false,
                         sessions: Vec::new(),
                     }
                 }
             })
             .collect();
         self.persist()?;
-        Ok(self.safe_projects(active))
+        Ok(self.safe_projects(active, true))
     }
 
     pub(crate) fn project_bindings(&self) -> Vec<InternalProjectBinding> {
@@ -256,7 +288,7 @@ impl ProjectCatalog {
                 if !path.starts_with(directory) || !seen.insert(path.clone()) {
                     continue;
                 }
-                accepted.push((path, identity));
+                accepted.push((path, identity, input.final_reply_marker.clone()));
             }
         }
 
@@ -283,18 +315,31 @@ impl ProjectCatalog {
             .collect::<HashMap<_, _>>();
         project.sessions = accepted
             .into_iter()
-            .map(|(path, identity)| {
-                existing
+            .map(|(path, identity, final_reply_marker)| {
+                if let Some(mut record) = existing
                     .get(&path)
                     .filter(|record| record.identity.as_ref() == Some(&identity))
                     .cloned()
-                    .unwrap_or_else(|| SessionRecord {
+                {
+                    record.final_reply_marker = final_reply_marker;
+                    record
+                } else {
+                    SessionRecord {
                         id: opaque_id("session"),
                         path,
                         identity: Some(identity),
-                    })
+                        final_reply_marker,
+                        read_final_reply_marker: None,
+                    }
+                }
             })
             .collect();
+        if !project.unread_initialized {
+            for session in &mut project.sessions {
+                session.read_final_reply_marker = session.final_reply_marker.clone();
+            }
+            project.unread_initialized = true;
+        }
         self.persist()
     }
 
@@ -342,6 +387,8 @@ impl ProjectCatalog {
                     id: opaque_id("session"),
                     path: path.clone(),
                     identity: Some(identity),
+                    final_reply_marker: None,
+                    read_final_reply_marker: None,
                 };
             }
             existing.id.clone()
@@ -350,6 +397,8 @@ impl ProjectCatalog {
                 id: opaque_id("session"),
                 path: path.clone(),
                 identity: Some(identity),
+                final_reply_marker: None,
+                read_final_reply_marker: None,
             };
             let id = session.id.clone();
             project.sessions.push(session);
@@ -361,6 +410,176 @@ impl ProjectCatalog {
             .as_deref()
             == Some(&session_id))
         .then_some(session_id))
+    }
+
+    /// Merges a live session observation and unread eligibility in one durable transaction.
+    pub(crate) fn merge_session_final_reply(
+        &mut self,
+        project_id: &str,
+        expected_project: &Path,
+        session_directory: &Path,
+        session_path: &Path,
+        final_reply_marker: Option<String>,
+    ) -> RemoteResult<Option<UnreadSnapshot>> {
+        let session_id = self.merge_active_session_record(
+            project_id,
+            expected_project,
+            session_directory,
+            session_path,
+        )?;
+        let Some(session_id) = session_id else {
+            return Ok(None);
+        };
+        let snapshot =
+            self.set_final_reply_and_snapshot(project_id, &session_id, final_reply_marker, None)?;
+        Ok(Some(snapshot))
+    }
+
+    /// Refreshes the current marker and applies a receipt atomically. A stale opaque ID records a
+    /// newly discovered reply but can never become the read marker for that reply.
+    pub(crate) fn apply_read_receipt(
+        &mut self,
+        project_id: &str,
+        session_id: &str,
+        final_reply_marker: Option<String>,
+        read_reply_id: &str,
+    ) -> RemoteResult<(ReadReceiptResult, UnreadSnapshot)> {
+        let snapshot = self.set_final_reply_and_snapshot(
+            project_id,
+            session_id,
+            final_reply_marker,
+            Some(read_reply_id),
+        )?;
+        let current = snapshot.last_final_reply_id.as_deref() == Some(read_reply_id);
+        Ok((
+            if current {
+                ReadReceiptResult::Current
+            } else {
+                ReadReceiptResult::Stale
+            },
+            snapshot,
+        ))
+    }
+
+    pub(crate) fn unread_snapshot(
+        &self,
+        project_id: &str,
+        session_id: &str,
+    ) -> Option<UnreadSnapshot> {
+        let project = self
+            .document
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)?;
+        let session = project
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)?;
+        Some(snapshot_for(project, session, false))
+    }
+
+    fn set_final_reply_and_snapshot(
+        &mut self,
+        project_id: &str,
+        session_id: &str,
+        final_reply_marker: Option<String>,
+        read_reply_id: Option<&str>,
+    ) -> RemoteResult<UnreadSnapshot> {
+        let project_index = self
+            .document
+            .projects
+            .iter()
+            .position(|project| project.id == project_id)
+            .ok_or_else(|| RemoteError::InvalidConfiguration("unknown project ID".into()))?;
+        let session_index = self.document.projects[project_index]
+            .sessions
+            .iter()
+            .position(|session| session.id == session_id)
+            .ok_or_else(|| RemoteError::InvalidConfiguration("unknown session ID".into()))?;
+        let project = &mut self.document.projects[project_index];
+        let before = snapshot_for(project, &project.sessions[session_index], false);
+        project.sessions[session_index].final_reply_marker = final_reply_marker;
+        if !project.unread_initialized {
+            for session in &mut project.sessions {
+                session.read_final_reply_marker = session.final_reply_marker.clone();
+            }
+            project.unread_initialized = true;
+        }
+        let session = &mut project.sessions[session_index];
+        if let (Some(requested), Some(marker)) =
+            (read_reply_id, session.final_reply_marker.as_ref())
+        {
+            if opaque_final_reply_id(&session.id, marker) == requested {
+                session.read_final_reply_marker = Some(marker.clone());
+            }
+        }
+        let mut after = snapshot_for(project, &project.sessions[session_index], false);
+        after.changed = before.has_unread_final_reply != after.has_unread_final_reply
+            || before.last_final_reply_id != after.last_final_reply_id
+            || before.unread_session_count != after.unread_session_count;
+        self.persist()?;
+        Ok(after)
+    }
+
+    fn merge_active_session_record(
+        &mut self,
+        project_id: &str,
+        expected_project: &Path,
+        session_directory: &Path,
+        session_path: &Path,
+    ) -> RemoteResult<Option<String>> {
+        let Some(binding) = self.resolve_project_binding(project_id) else {
+            return Ok(None);
+        };
+        if !binding.trusted || binding.path != expected_project {
+            return Ok(None);
+        }
+        let Some(directory) = canonical_directory(session_directory) else {
+            return Ok(None);
+        };
+        let Some((path, identity)) = canonical_file_identity(session_path) else {
+            return Ok(None);
+        };
+        if !path.starts_with(&directory) {
+            return Ok(None);
+        }
+        let project = self
+            .document
+            .projects
+            .iter_mut()
+            .find(|project| project.id == project_id)
+            .expect("resolved project remains present");
+        if project.session_directory.as_ref() != Some(&directory) {
+            project.sessions.clear();
+            project.session_directory = Some(directory);
+        }
+        let id = if let Some(existing) = project
+            .sessions
+            .iter_mut()
+            .find(|session| session.path == path)
+        {
+            if existing.identity.as_ref() != Some(&identity) {
+                *existing = SessionRecord {
+                    id: opaque_id("session"),
+                    path,
+                    identity: Some(identity),
+                    final_reply_marker: None,
+                    read_final_reply_marker: None,
+                };
+            }
+            existing.id.clone()
+        } else {
+            let id = opaque_id("session");
+            project.sessions.push(SessionRecord {
+                id: id.clone(),
+                path,
+                identity: Some(identity),
+                final_reply_marker: None,
+                read_final_reply_marker: None,
+            });
+            id
+        };
+        Ok(Some(id))
     }
 
     pub(crate) fn clear_sessions(&mut self, project_id: &str) -> RemoteResult<()> {
@@ -450,6 +669,7 @@ impl ProjectCatalog {
         &self,
         project_id: &str,
         active: Option<&Path>,
+        include_unread: bool,
     ) -> Option<ProjectSummary> {
         let binding = self.resolve_project_binding(project_id)?;
         Some(ProjectSummary {
@@ -462,17 +682,24 @@ impl ProjectCatalog {
                 TrustState::Untrusted
             },
             is_active: active.is_some_and(|path| path == binding.path),
+            unread_session_count: include_unread.then(|| self.project_unread_count(project_id)),
         })
     }
 
     /// Safe wire-ready summaries. `display_path` is explicit display-only metadata; opaque IDs
     /// remain the only inputs accepted for project resolution.
-    pub(crate) fn safe_projects(&self, active: Option<&Path>) -> Vec<RemoteProjectSummary> {
+    pub(crate) fn safe_projects(
+        &self,
+        active: Option<&Path>,
+        include_unread: bool,
+    ) -> Vec<RemoteProjectSummary> {
         self.document
             .projects
             .iter()
             .filter_map(|project| {
                 let binding = self.resolve_project_binding(&project.id)?;
+                let unread_session_count =
+                    include_unread.then(|| self.project_unread_count(&binding.id));
                 Some(RemoteProjectSummary {
                     project_id: binding.id,
                     display_name: project_display_name(&binding.path),
@@ -483,9 +710,25 @@ impl ProjectCatalog {
                         "untrusted"
                     },
                     is_active: active.is_some_and(|path| path == binding.path),
+                    unread_session_count,
                 })
             })
             .collect()
+    }
+
+    fn project_unread_count(&self, project_id: &str) -> u64 {
+        self.document
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .map(|project| {
+                project
+                    .sessions
+                    .iter()
+                    .filter(|session| session_is_unread(session))
+                    .count() as u64
+            })
+            .unwrap_or(0)
     }
 
     fn persist(&self) -> RemoteResult<()> {
@@ -500,6 +743,45 @@ impl ProjectCatalog {
 
 fn opaque_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4())
+}
+
+fn opaque_final_reply_id(session_id: &str, marker: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"lemonpi-final-reply-v1\0");
+    digest.update(session_id.as_bytes());
+    digest.update(b"\0");
+    digest.update(marker.as_bytes());
+    let bytes = digest.finalize();
+    let mut encoded = String::with_capacity(6 + bytes.len() * 2);
+    encoded.push_str("reply_");
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn session_is_unread(session: &SessionRecord) -> bool {
+    session.final_reply_marker.is_some()
+        && session.final_reply_marker != session.read_final_reply_marker
+}
+
+fn snapshot_for(project: &ProjectRecord, session: &SessionRecord, changed: bool) -> UnreadSnapshot {
+    UnreadSnapshot {
+        project_id: project.id.clone(),
+        session_id: session.id.clone(),
+        has_unread_final_reply: session_is_unread(session),
+        last_final_reply_id: session
+            .final_reply_marker
+            .as_deref()
+            .map(|marker| opaque_final_reply_id(&session.id, marker)),
+        unread_session_count: project
+            .sessions
+            .iter()
+            .filter(|candidate| session_is_unread(candidate))
+            .count() as u64,
+        changed,
+    }
 }
 
 fn valid_opaque_id(value: &str, prefix: &str) -> bool {
@@ -812,6 +1094,7 @@ mod tests {
                 &sessions,
                 &[SessionSyncInput {
                     path: session.clone(),
+                    final_reply_marker: None,
                 }],
             )
             .unwrap();
@@ -824,6 +1107,180 @@ mod tests {
         assert!(catalog
             .resolve_session_path(&project_id, &session_id, &sessions)
             .is_none());
+    }
+
+    #[test]
+    fn unread_history_baselines_then_counts_only_new_final_replies() {
+        let root = tempdir().unwrap();
+        let storage = tempdir().unwrap();
+        let project = root.path().join("project");
+        let sessions = root.path().join("sessions");
+        let first = sessions.join("first.jsonl");
+        let second = sessions.join("second.jsonl");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&sessions).unwrap();
+        fs::write(&first, "first\n").unwrap();
+        fs::write(&second, "second\n").unwrap();
+        let mut catalog = ProjectCatalog::load_or_create(storage.path()).unwrap();
+        let project_id = serde_json::to_value(
+            &catalog
+                .sync_projects(&[input(&project, true)], None)
+                .unwrap()[0],
+        )
+        .unwrap()["projectId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        catalog
+            .sync_sessions(
+                &project_id,
+                &sessions,
+                &[
+                    SessionSyncInput {
+                        path: first.clone(),
+                        final_reply_marker: Some("internal-1".into()),
+                    },
+                    SessionSyncInput {
+                        path: second.clone(),
+                        final_reply_marker: None,
+                    },
+                ],
+            )
+            .unwrap();
+        let first_id = catalog
+            .session_id_for_path(&project_id, &sessions, &first)
+            .unwrap();
+        let baseline = catalog.unread_snapshot(&project_id, &first_id).unwrap();
+        assert!(!baseline.has_unread_final_reply);
+        assert_eq!(baseline.unread_session_count, 0);
+        assert!(baseline
+            .last_final_reply_id
+            .as_deref()
+            .unwrap()
+            .starts_with("reply_"));
+        assert!(!baseline
+            .last_final_reply_id
+            .as_deref()
+            .unwrap()
+            .contains("internal-1"));
+
+        catalog
+            .sync_sessions(
+                &project_id,
+                &sessions,
+                &[
+                    SessionSyncInput {
+                        path: first.clone(),
+                        final_reply_marker: Some("internal-2".into()),
+                    },
+                    SessionSyncInput {
+                        path: second.clone(),
+                        final_reply_marker: Some("internal-3".into()),
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            catalog
+                .unread_snapshot(&project_id, &first_id)
+                .unwrap()
+                .unread_session_count,
+            2
+        );
+    }
+
+    #[test]
+    fn current_receipts_are_idempotent_and_stale_receipts_cannot_clear_newer_replies() {
+        let root = tempdir().unwrap();
+        let storage = tempdir().unwrap();
+        let project = root.path().join("project");
+        let sessions = root.path().join("sessions");
+        let session = sessions.join("one.jsonl");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&sessions).unwrap();
+        fs::write(&session, "session\n").unwrap();
+        let mut catalog = ProjectCatalog::load_or_create(storage.path()).unwrap();
+        let project_id = serde_json::to_value(
+            &catalog
+                .sync_projects(&[input(&project, true)], None)
+                .unwrap()[0],
+        )
+        .unwrap()["projectId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        catalog
+            .sync_sessions(
+                &project_id,
+                &sessions,
+                &[SessionSyncInput {
+                    path: session.clone(),
+                    final_reply_marker: Some("first".into()),
+                }],
+            )
+            .unwrap();
+        let session_id = catalog
+            .session_id_for_path(&project_id, &sessions, &session)
+            .unwrap();
+        let old_reply_id = catalog
+            .unread_snapshot(&project_id, &session_id)
+            .unwrap()
+            .last_final_reply_id
+            .unwrap();
+        catalog
+            .sync_sessions(
+                &project_id,
+                &sessions,
+                &[SessionSyncInput {
+                    path: session.clone(),
+                    final_reply_marker: Some("second".into()),
+                }],
+            )
+            .unwrap();
+        let current_reply_id = catalog
+            .unread_snapshot(&project_id, &session_id)
+            .unwrap()
+            .last_final_reply_id
+            .unwrap();
+
+        let (stale, stale_snapshot) = catalog
+            .apply_read_receipt(
+                &project_id,
+                &session_id,
+                Some("second".into()),
+                &old_reply_id,
+            )
+            .unwrap();
+        assert_eq!(stale, ReadReceiptResult::Stale);
+        assert!(stale_snapshot.has_unread_final_reply);
+        let (current, read) = catalog
+            .apply_read_receipt(
+                &project_id,
+                &session_id,
+                Some("second".into()),
+                &current_reply_id,
+            )
+            .unwrap();
+        assert_eq!(current, ReadReceiptResult::Current);
+        assert!(!read.has_unread_final_reply);
+        let (duplicate, duplicate_snapshot) = catalog
+            .apply_read_receipt(
+                &project_id,
+                &session_id,
+                Some("second".into()),
+                &current_reply_id,
+            )
+            .unwrap();
+        assert_eq!(duplicate, ReadReceiptResult::Current);
+        assert!(!duplicate_snapshot.changed);
+
+        let reloaded = ProjectCatalog::load_or_create(storage.path()).unwrap();
+        assert!(
+            !reloaded
+                .unread_snapshot(&project_id, &session_id)
+                .unwrap()
+                .has_unread_final_reply
+        );
     }
 
     #[test]
@@ -852,6 +1309,7 @@ mod tests {
                 &sessions,
                 &[SessionSyncInput {
                     path: session.clone(),
+                    final_reply_marker: None,
                 }],
             )
         })
@@ -886,6 +1344,7 @@ mod tests {
                     &remote_sessions,
                     &[SessionSyncInput {
                         path: remote_session.clone(),
+                        final_reply_marker: None,
                     }],
                 )?;
                 Ok(true)
@@ -948,6 +1407,7 @@ mod tests {
                         &sessions,
                         &[SessionSyncInput {
                             path: session.clone(),
+                            final_reply_marker: None,
                         }],
                     )?;
                     catalog
@@ -994,6 +1454,7 @@ mod tests {
                 &sessions,
                 &[SessionSyncInput {
                     path: session.clone(),
+                    final_reply_marker: None,
                 }],
             )
             .unwrap();
@@ -1013,6 +1474,7 @@ mod tests {
                 &sessions,
                 &[SessionSyncInput {
                     path: session.clone(),
+                    final_reply_marker: None,
                 }],
             )
             .unwrap();
@@ -1069,6 +1531,7 @@ mod tests {
                 &sessions,
                 &[SessionSyncInput {
                     path: session.clone(),
+                    final_reply_marker: None,
                 }],
             )
             .unwrap();
@@ -1120,7 +1583,14 @@ mod tests {
             .unwrap()
             .to_string();
         catalog
-            .sync_sessions(&project_id, &sessions, &[SessionSyncInput { path: escape }])
+            .sync_sessions(
+                &project_id,
+                &sessions,
+                &[SessionSyncInput {
+                    path: escape,
+                    final_reply_marker: None,
+                }],
+            )
             .unwrap();
         assert!(catalog.document.projects[0].sessions.is_empty());
         assert_eq!(

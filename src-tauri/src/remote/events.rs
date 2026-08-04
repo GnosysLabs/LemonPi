@@ -23,6 +23,7 @@ pub(crate) const MAX_INTERNAL_EVENT_PAYLOAD_BYTES: usize = 1024 * 1024;
 pub(crate) enum EventKind {
     PiEvent,
     ProcessEvent,
+    UnreadUpdate,
     Gap,
     Truncated,
 }
@@ -32,6 +33,7 @@ impl EventKind {
         match self {
             Self::PiEvent => "piEvent",
             Self::ProcessEvent => "processEvent",
+            Self::UnreadUpdate => "unreadUpdate",
             Self::Gap => "gap",
             Self::Truncated => "truncated",
         }

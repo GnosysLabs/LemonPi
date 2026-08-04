@@ -27,9 +27,7 @@ export interface PiSessionState {
 }
 
 export interface PiSessionFinalReply {
-  /** Stable identifier for the most recent terminal agent reply in a session. */
-  marker: string;
-  /** Pi's record timestamp when available; it may be an ISO string or numeric string. */
+  /** Pi's record timestamp when available; internal receipt markers never cross the host boundary. */
   timestamp?: string;
 }
 
@@ -42,6 +40,10 @@ export interface PiSessionSummary {
   messageCount: number;
   firstMessage: string;
   lastFinalReply?: PiSessionFinalReply;
+  /** Host-authoritative unread projection, present when the desktop unread domain is available. */
+  hasUnreadFinalReply?: boolean;
+  /** Opaque token derived by the host from its private stable reply marker. */
+  lastFinalReplyId?: string;
 }
 
 export interface PiSessionStats {
@@ -118,6 +120,15 @@ export interface RemoteProjectSummary {
   displayName: string;
   trustState: "trusted" | "untrusted";
   isActive: boolean;
+  unreadSessionCount?: number;
+}
+
+export interface UnreadReceiptSnapshot {
+  projectId: string;
+  sessionId: string;
+  hasUnreadFinalReply: boolean;
+  lastFinalReplyId?: string;
+  unreadSessionCount: number;
 }
 
 export interface PiProcessEvent {

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { KnownProjectSyncInput, PiEvent, PiPackageInfo, PiPackagesSnapshot, PiProcessEvent, PiProcessInfo, PiSessionSummary, PiSettingsScope, PiSettingsSnapshot, RemoteProjectSummary, RpcCommand, SubagentActivityTarget, SubagentLiveActivity, SubagentRunStatus, SubagentSettingsScope, SubagentSettingsSnapshot } from "./pi-types";
+import type { KnownProjectSyncInput, PiEvent, PiPackageInfo, PiPackagesSnapshot, PiProcessEvent, PiProcessInfo, PiSessionSummary, PiSettingsScope, PiSettingsSnapshot, RemoteProjectSummary, RpcCommand, SubagentActivityTarget, SubagentLiveActivity, SubagentRunStatus, SubagentSettingsScope, SubagentSettingsSnapshot, UnreadReceiptSnapshot } from "./pi-types";
 
 export function isTauriRuntime(): boolean {
   return "__TAURI_INTERNALS__" in window;
@@ -20,6 +20,14 @@ export async function stopPi(): Promise<void> {
 
 export async function listPiSessions(cwd: string): Promise<PiSessionSummary[]> {
   return invoke<PiSessionSummary[]>("list_pi_sessions", { cwd });
+}
+
+export async function markPiSessionRead(
+  project: string,
+  sessionPath: string,
+  readReplyId: string,
+): Promise<UnreadReceiptSnapshot> {
+  return invoke<UnreadReceiptSnapshot>("mark_pi_session_read", { project, sessionPath, readReplyId });
 }
 
 /** Best-effort desktop refresh of opaque remote project mappings; this never enables remote access. */
