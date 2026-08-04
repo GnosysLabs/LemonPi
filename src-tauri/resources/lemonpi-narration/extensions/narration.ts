@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { realpathSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import {
   checkpointBlockersForSelection,
@@ -12,6 +13,7 @@ import {
   fastPathIssue,
   hiddenScopeExpansionIssue,
   internalContractFallback,
+  missionStateContentHash,
   recoveryAction,
   reviewDeduplicationIssue,
   reviewLedgerKey,
@@ -22,6 +24,7 @@ import {
   validationActivityLabel,
   validationDeduplicationIssue,
   workerContextLimits,
+  workerExecutionBudget,
   workerStatusMetrics,
   type ReviewRecord,
   type ValidationRecord,
@@ -73,7 +76,7 @@ const IndependentDispatchSchema = {
 const GitManagerSchema = {
   type: "object",
   properties: {
-    action: { type: "string", enum: ["inspect", "checkpoint", "commit", "create_branch", "switch_branch", "apply_patch", "integrate_worktree", "create_worktree", "remove_worktree", "cherry_pick"] },
+    action: { type: "string", enum: ["inspect", "checkpoint", "commit", "create_branch", "switch_branch", "apply_patch", "integrate_worker_result", "integrate_worktree", "create_worktree", "remove_worktree", "cherry_pick"] },
     cwd: { type: "string" },
     paths: { type: "array", items: { type: "string" } },
     missionPaths: { type: "array", items: { type: "string" } },
@@ -141,7 +144,7 @@ Independent dispatch is the default:
 6. Give each lane one coherent checkpoint outcome, its scope, its done condition, and exact \`Owned paths:\` for implementation. LemonPi compiles execution mode, safety, and acceptance. Keep assignments concise; five minutes is a decomposition aspiration, not a timeout or a mechanical prompt-length gate.
 7. Main Pi owns local Git through \`lemonpi_git\`. Inspect and classify every dirty path; checkpoint safe intentional work on a local recovery branch; ask one focused question containing the complete ambiguous path set, then retry once with those exact \`confirmedPaths\`; never repeatedly reconfirm the same checkpoint. Suspicious paths remain blocked. Never discard user data, force an operation, alter a remote, or push. Once clean and recoverable, reuse a prepared managed worktree by passing \`worktreePath\` and its \`baseRevision\` instead of rechecking a dirty source checkout. Apply accepted package patches directly; for async temp artifacts, pass the exact recorded \`artifactRunId\` to \`lemonpi_git apply_patch\`. Verify exact staged paths and create logical local integration commits as slices land.
 8. Independent review is reserved for explicit review requests or material security, privacy, money, migration, cryptography, concurrency, public-protocol, or release risk. Include one concrete \`Review justification:\` boundary. LemonPi deduplicates accepted reviews by repository, revision, diff, scope, and risk. Routine chunks and post-correction checks are reviewed directly by Main Pi.
-9. Run tests through \`lemonpi_validate\`: focused validation per slice, one broader run per integration wave, and one final holistic run. Its persistent ledger prevents identical unchanged commands and emits heartbeat progress for long-running checks. Never set model-authored timeout, turn, tool, or usage budgets and never call \`subagent_wait\`.
+9. Run tests through \`lemonpi_validate\`: focused validation per slice, one broader run per integration wave, and one final holistic run. Its persistent ledger prevents identical unchanged commands and emits heartbeat progress for long-running checks. LemonPi replaces model-authored limits with runtime-owned budgets; never call \`subagent_wait\`.
 10. Resume only the immediately preceding worker for a bounded correction, declared with \`Correction for previous slice:\` and a fresh \`Worker summary:\`. Unrelated, completed, failed-empty, wrong-mode, oversized, or repeatedly reused sessions get a fresh worker and concise structured handoff.
 11. Main Pi alone asks the user clarifying questions. For every non-trivial task, make the visible todo a real start-to-finish roadmap with short imperative subjects, concrete descriptions, dependency links, exactly one current item, every known implementation/integration lane, focused validation, and the final holistic check. Create the whole known roadmap before the first dispatch. Normal progress changes statuses; it does not reveal ordinary pre-existing work one item at a time. Append a new item only for genuinely unforeseen scope or recovery, and append it as soon as it is discovered. Never use generic placeholders such as "Complete delegated outcome," and never leave one broad parent item spinning while hidden slices finish.
 
@@ -156,21 +159,23 @@ Optimize for delivery latency and preserve the user's exact scope.
 2. Never silently expand a local UI request into synchronization, backend, protocol, or cross-platform work. Deliver the local visible slice first. State synchronization as a separate phase two and only implement it when the user asked for it or approves it.
 3. Use \`todo\` only when it improves visibility. Simple delegated work needs one to three meaningful milestones, not filler. Pass each worker milestone as \`todoId\` to \`lemonpi_dispatch\`; LemonPi owns its start, complete, fail, and stop status transitions.
 4. Delegate only work that is multi-repository, genuinely parallel, materially risky, or outside Main Pi's direct low-risk UI boundary. Implementation lanes require exact \`ownedPaths\`, \`executionMode\`, and a concrete eight-word-or-fewer \`summary\`. LemonPi generates artifact ownership metadata; never author acceptance metadata.
-5. Main Pi owns deterministic integration through \`lemonpi_git\`. Prefer \`integrate_worktree\` with an inspected registered worktree and exact paths; malformed worker prose or acceptance metadata must not invalidate code. Never discard, force, alter remotes, or push.
-6. Review is only for explicit review requests or material security, privacy, money, migration, cryptography, concurrency, public-protocol, or release risk.
+5. Main Pi owns deterministic integration through \`lemonpi_git\`. Use \`integrate_worker_result\` with the exact terminal \`artifactRunId\`; LemonPi reads the runtime-generated handoff manifest, verifies owned paths, applies and commits the patch atomically, and retires clean managed worktrees after validation. Use \`integrate_worktree\` only as the inspected fallback. Malformed worker prose or acceptance metadata must not invalidate code. Never discard, force, alter remotes, or push.
+6. Review is only for explicit review requests or material security, privacy, money, migration, cryptography, concurrency, public-protocol, or release risk. One coherent revision, diff, and scope gets one compatibility/security review even if its justification prose changes.
 7. Validation evidence is reused for the same repository revision plus diff hash, command, paths, and dependency state. Run one focused check per slice; run one broader check only once after a genuinely multi-slice integration. Do not repeat an unchanged suite under a different scope label.
 8. Completion wakes are deferred until Main Pi's current turn and every tool have ended. Never let a completion notice abort current validation or restart reconciliation.
 9. If the same LemonPi tool contract fails twice, stop negotiating with it. Take the safe fallback named in the error: use fast path for eligible UI work or \`integrate_worktree\` for inspected worker code, and continue.
-10. Main Pi alone asks clarifying questions. Do not wait or poll background workers; remain responsive and reconcile each terminal result once.
+10. LemonPi supplies live token, turn, tool-call, and wall-clock budgets. Routine repository scouts run read-only at low reasoning; implementation workers run medium unless material risk requires high. Main Pi reserves expensive reasoning for actual architecture decisions.
+11. Mission todos are append-only history. Update their lifecycle or append a correction; never delete the original worker milestone.
+12. Main Pi alone asks clarifying questions. Do not wait or poll background workers; remain responsive and reconcile each terminal result once.
 </lemonpi-orchestration>`;
 
 void LEGACY_ORCHESTRATION_CONTRACT;
 
 const CLOSING_REPAIR = `The previous response ended after tool activity without a visible closing explanation. Do not call more tools. Give the user a concise, specific closing explanation now: state the outcome, what changed, what was verified, and any blocker or next step. If the task is incomplete, say exactly where it stopped and why.`;
-const DELEGATION_RECOVERY = `A delegated run failed and no replacement delegation was launched before the turn settled. Own the failure now: inspect the exact status/error and any partial output, identify whether the cause was a parent-imposed timeout, unavailable model/tool, configuration problem, or task failure, preserve valid partial work, and re-delegate only the next bounded chunk with a concise corrected outcome. LemonPi will compile the mechanical execution and safety fields. For a parallel worktree wave, inspect parallelHandoff.path before retrying: integrate independently successful, in-scope patches and retry only failed or conflicting lanes, never the entire wave. If a legacy completion guard says a read-only child made no edits, treat that as a classification error: recover and use its valid artifact instead of rerunning completed work. Shrink genuinely failed tasks instead of adding a per-dispatch timeout, turn budget, tool budget, or usage budget. If the error says the model produced no output or returned an empty response, do not resume the bloated failed session: salvage concrete transcript findings and launch a fresh-context replacement with a smaller question and explicit deliverable. If retrying cannot help because the blocker is external, give the user the exact blocker and the evidence instead of claiming recovery.`;
+const DELEGATION_RECOVERY = `A delegated run failed and no replacement delegation was launched before the turn settled. Own the failure now: inspect the exact status/error and any partial output, identify whether the cause was a runtime budget, unavailable model/tool, configuration problem, or task failure, preserve valid partial work, and re-delegate only the next bounded chunk with a concise corrected outcome. LemonPi compiles and enforces execution budgets. For an implementation handoff, call lemonpi_git integrate_worker_result with the exact artifactRunId and retry only failed or conflicting work, never the completed patch. If a legacy completion guard says a read-only child made no edits, treat that as a classification error and use its valid artifact. If the model produced no output, launch a fresh smaller question instead of resuming bloated context. If the blocker is external, give the user the exact evidence instead of claiming recovery.`;
 const ATTENTION_RECOVERY = `A delegated run reported needs_attention and the previous response did not inspect or control it. Act now instead of narrating passive waiting. Use the subagent status/transcript controls for the exact run. If it remains alive without an active tool or new output, steer it once to return its result or blocker immediately. If intervention cannot be delivered, stop it and preserve useful transcript findings for one fresh, smaller replacement. Do not leave it marked running indefinitely and do not launch a competing writer.`;
 const PLAN_CONTINUATION = `Your visible task plan still contains unfinished work, but you settled with no delegated agent active. Continue the stranded plan now instead of waiting for another user message. Give the user a concise visible update, then execute or delegate the next bounded action. If the task is genuinely blocked or waiting for the user, move it out of in-progress state and explain the exact blocker; never leave an idle task spinning.`;
-const MISSION_INTEGRATION = `A durable LemonPi mission has delegated results waiting for Main Pi, but no child is active. Inspect the exact terminal run and integrate its result now. If more work remains, dispatch the next bounded lane in this turn. If the mission is complete or blocked, give the user a concrete explanation instead of leaving it idle.`;
+const MISSION_INTEGRATION = `A durable LemonPi mission has delegated results waiting for Main Pi, but no child is active. For completed implementation, call lemonpi_git integrate_worker_result with the exact artifactRunId; do not dispatch another model to copy the patch. If more work remains, dispatch only the next bounded lane. If complete or blocked, give the user a concrete explanation.`;
 const MISSION_RECONCILE_ATTENTION = `LemonPi could not automatically reconcile a recorded delegated run after a session lifecycle transition. Inspect the exact recorded run once and take the appropriate action. Do not poll it repeatedly: if it is active, end the turn; if it is terminal, integrate it; if it needs attention, intervene.`;
 const ACTIVE_DELEGATION_HANDOFF = `<lemonpi-active-delegation-handoff>
 The immediately preceding launch, resume, or status result is authoritative: delegated work is active. Do not call status again, do not wait or sleep, and do not run another tool merely to monitor it. Give the user one concise, specific progress update and end the turn now. LemonPi will wake Main Pi when the run completes or needs attention; a real new user message may still be answered and used to steer the worker.
@@ -245,6 +250,38 @@ function requestSubagentSpawn(pi: ExtensionAPI, params: Record<string, unknown>)
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function runtimeRoutedModel(agent: string, cwd: string | undefined, explicitModel: unknown, reasoning: "low" | "medium" | "high"): string | undefined {
+  const readSettings = (path: string): Record<string, unknown> => {
+    try { return asRecord(JSON.parse(readFileSync(path, "utf8"))) ?? {}; } catch { return {}; }
+  };
+  const agentDir = process.env.PI_CODING_AGENT_DIR || resolve(homedir(), ".pi/agent");
+  const user = readSettings(resolve(agentDir, "settings.json"));
+  const project = cwd ? readSettings(resolve(cwd, ".pi/settings.json")) : {};
+  const configuredAgentModel = (settings: Record<string, unknown>) => {
+    const subagents = asRecord(settings.subagents);
+    const overrides = asRecord(subagents?.agentOverrides);
+    const entry = asRecord(overrides?.[agent]);
+    return typeof entry?.model === "string" && entry.model.trim() ? entry.model.trim() : undefined;
+  };
+  const configuredDefault = (settings: Record<string, unknown>) => {
+    const value = asRecord(settings.subagents)?.defaultModel;
+    return typeof value === "string" && value.trim() ? value.trim() : undefined;
+  };
+  let model = typeof explicitModel === "string" && explicitModel.trim()
+    ? explicitModel.trim()
+    : configuredAgentModel(project)
+      ?? configuredAgentModel(user)
+      ?? configuredDefault(project)
+      ?? configuredDefault(user);
+  if (!model) {
+    const provider = typeof user.defaultProvider === "string" ? user.defaultProvider.trim() : "";
+    const defaultModel = typeof user.defaultModel === "string" ? user.defaultModel.trim() : "";
+    if (defaultModel) model = provider && !defaultModel.includes("/") ? `${provider}/${defaultModel}` : defaultModel;
+  }
+  if (!model) return undefined;
+  return `${model.replace(/:(?:off|minimal|low|medium|high|xhigh|max)$/i, "")}:${reasoning}`;
 }
 
 const CHUNK_OUTCOME = /(?:^|\n)\s*chunk outcome\s*:\s*\S/i;
@@ -459,7 +496,9 @@ export function compileDelegationContracts(input: Record<string, unknown>): void
       delete record.summary;
       const mode = inferredExecutionMode(record.agent, originalTask, record.executionMode);
       delete record.executionMode;
-      if (record.thinking === undefined) record.thinking = recommendedReasoning(record.agent, originalTask);
+      // Reasoning is a runtime-owned launch override. Keeping it out of the public
+      // task schema prevents model-authored or stale agent defaults from winning.
+      delete record.thinking;
       let task = originalTask;
       // Keep the human task first so Command Center shows the delegated outcome instead of
       // generic runtime metadata such as "Execution mode: read-only".
@@ -510,6 +549,7 @@ export function independentSpawnParams(lane: Record<string, unknown>): {
   delete prepared.baseRevision;
   delete prepared.ownedPaths;
   delete prepared.todoId;
+  delete prepared.thinking;
 
   if (implementation) {
     return {
@@ -930,6 +970,31 @@ function delegationSessionId(value: unknown): string | undefined {
   return typeof candidate === "string" && candidate.trim() ? candidate.trim() : undefined;
 }
 
+function workerHandoffPath(value: unknown): string | undefined {
+  const seen = new Set<object>();
+  const visit = (candidate: unknown, depth: number): string | undefined => {
+    if (depth > 8 || !candidate || typeof candidate !== "object" || seen.has(candidate as object)) return undefined;
+    seen.add(candidate as object);
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate.slice(0, 128)) {
+        const found = visit(entry, depth + 1);
+        if (found) return found;
+      }
+      return undefined;
+    }
+    const record = candidate as Record<string, unknown>;
+    if (typeof record.handoffPath === "string" && record.handoffPath.trim()) return record.handoffPath.trim();
+    const parallel = asRecord(record.parallelHandoff);
+    if (typeof parallel?.path === "string" && parallel.path.trim()) return parallel.path.trim();
+    for (const entry of Object.values(record).slice(0, 128)) {
+      const found = visit(entry, depth + 1);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  return visit(value, 0);
+}
+
 function terminalRunKey(sessionId: string | undefined, runId: string): string {
   return `${sessionId ?? "unknown"}:${runId}`;
 }
@@ -1144,8 +1209,26 @@ export function parsedMissionState(value: unknown): MissionState | undefined {
         sliceCount: Number.isInteger(attempt.sliceCount) ? Math.max(1, Number(attempt.sliceCount)) : 1,
         transcriptBytes: typeof attempt.transcriptBytes === "number" ? Math.max(0, attempt.transcriptBytes) : 0,
         tokens: typeof attempt.tokens === "number" ? Math.max(0, attempt.tokens) : 0,
+        ...(typeof attempt.turns === "number" ? { turns: Math.max(0, Math.floor(attempt.turns)) } : {}),
+        ...(typeof attempt.toolCalls === "number" ? { toolCalls: Math.max(0, Math.floor(attempt.toolCalls)) } : {}),
+        ...(typeof attempt.startedAt === "number" ? { startedAt: attempt.startedAt } : {}),
+        ...(typeof attempt.elapsedMs === "number" ? { elapsedMs: Math.max(0, attempt.elapsedMs) } : {}),
+        ...(typeof attempt.activityState === "string" ? { activityState: attempt.activityState.slice(0, 64) } : {}),
+        ...(typeof attempt.budgetStopReason === "string" ? { budgetStopReason: attempt.budgetStopReason.slice(0, 240) } : {}),
         ...(attempt.emptyOutput === true ? { emptyOutput: true } : {}),
         ...(attempt.corrupted === true ? { corrupted: true } : {}),
+        ...(typeof attempt.todoId === "number" && Number.isInteger(attempt.todoId) ? { todoId: attempt.todoId } : {}),
+        ...(typeof attempt.worktreePath === "string" ? { worktreePath: attempt.worktreePath } : {}),
+        ...(typeof attempt.repository === "string" ? { repository: attempt.repository } : {}),
+        ...(typeof attempt.baseRevision === "string" ? { baseRevision: attempt.baseRevision } : {}),
+        ...(Array.isArray(attempt.ownedPaths) ? { ownedPaths: attempt.ownedPaths.filter((path): path is string => typeof path === "string") } : {}),
+        ...(typeof attempt.artifactPath === "string" ? { artifactPath: attempt.artifactPath } : {}),
+        ...(typeof attempt.handoffPath === "string" ? { handoffPath: attempt.handoffPath } : {}),
+        ...(typeof attempt.integratedRevision === "string" ? { integratedRevision: attempt.integratedRevision } : {}),
+        ...(attempt.integrationStatus === "integrated" || attempt.integrationStatus === "no-changes" || attempt.integrationStatus === "pending"
+          ? { integrationStatus: attempt.integrationStatus }
+          : {}),
+        ...(attempt.cleanupPending === true ? { cleanupPending: true } : {}),
       }))
     : [];
   const validations = Array.isArray(record.validations)
@@ -1271,6 +1354,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   const delegationToolCalls = new Set<string>();
   const delegationLaunchToolCalls = new Set<string>();
   const delegationLaunchWidths = new Map<string, number>();
+  const delegationAttemptMetadata = new Map<string, { purpose: string; executionMode: "read-only" | "implementation"; startedAt: number }>();
   const activeDelegationWidths = new Map<string, number>();
   const activeWriterRuns = new Set<string>();
   const manuallyStoppedRuns = new Set<string>();
@@ -1306,6 +1390,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   const pendingIntegrationNotices: string[] = [];
   const internalContractCalls = new Map<string, string>();
   const internalContractFailures = new Map<string, number>();
+  const budgetStopsInFlight = new Set<string>();
+  let missionPersistTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastPersistedMissionHash = "";
 
   const publishTodoLifecycle = async (todoId: number, status: "pending" | "in_progress" | "completed") => {
     if (!todoSessionId) return;
@@ -1361,17 +1448,33 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     }, 0);
   };
 
-  const persistMission = () => {
+  const missionSnapshot = (): MissionState | undefined => mission ? {
+    ...mission,
+    activeRunIds: [...mission.activeRunIds],
+    activeRunWidths: Object.fromEntries(
+      [...activeDelegationRuns].map((runId) => [runId, activeDelegationWidths.get(runId) ?? 1]),
+    ),
+    ...(mission.remainingTask ? { remainingTask: { ...mission.remainingTask } } : {}),
+  } : undefined;
+
+  const persistMissionNow = () => {
+    if (missionPersistTimer) {
+      clearTimeout(missionPersistTimer);
+      missionPersistTimer = undefined;
+    }
     if (!mission) return;
+    const snapshot = missionSnapshot()!;
+    const hash = missionStateContentHash(snapshot);
+    if (hash === lastPersistedMissionHash) return;
     mission.updatedAt = Date.now();
-    pi.appendEntry<MissionState>(MISSION_ENTRY, {
-      ...mission,
-      activeRunIds: [...mission.activeRunIds],
-      activeRunWidths: Object.fromEntries(
-        [...activeDelegationRuns].map((runId) => [runId, activeDelegationWidths.get(runId) ?? 1]),
-      ),
-      ...(mission.remainingTask ? { remainingTask: { ...mission.remainingTask } } : {}),
-    });
+    snapshot.updatedAt = mission.updatedAt;
+    pi.appendEntry<MissionState>(MISSION_ENTRY, snapshot);
+    lastPersistedMissionHash = hash;
+  };
+
+  const persistMission = () => {
+    if (!mission || missionPersistTimer) return;
+    missionPersistTimer = setTimeout(persistMissionNow, 40);
   };
 
   const isManuallyStoppedRun = (runId: string) => [...manuallyStoppedRuns, ...(mission?.suppressedRunIds ?? [])]
@@ -1405,13 +1508,62 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     return mission;
   };
 
+  const updateAttemptTelemetry = (runId: string, value: unknown): WorkerAttempt | undefined => {
+    const attempt = mission?.attempts.find((candidate) => candidate.runId === runId);
+    if (!attempt) return undefined;
+    const metrics = workerStatusMetrics(value);
+    attempt.tokens = Math.max(attempt.tokens, metrics.tokens);
+    attempt.turns = Math.max(attempt.turns ?? 0, metrics.turns);
+    attempt.toolCalls = Math.max(attempt.toolCalls ?? 0, metrics.toolCalls);
+    attempt.elapsedMs = Math.max(attempt.elapsedMs ?? 0, metrics.elapsedMs, attempt.startedAt ? Date.now() - attempt.startedAt : 0);
+    if (metrics.startedAt !== undefined) attempt.startedAt = Math.min(attempt.startedAt ?? metrics.startedAt, metrics.startedAt);
+    if (metrics.activityState) attempt.activityState = metrics.activityState;
+    const handoffPath = workerHandoffPath(value);
+    if (handoffPath) attempt.handoffPath = handoffPath;
+    attempt.transcriptBytes = Math.max(
+      attempt.transcriptBytes,
+      ...metrics.transcriptPaths.map((filePath) => {
+        try { return statSync(filePath).size; } catch { return 0; }
+      }),
+    );
+    persistMission();
+    return attempt;
+  };
+
+  const enforceAttemptBudget = async (attempt: WorkerAttempt): Promise<void> => {
+    if (attempt.status !== "running" || budgetStopsInFlight.has(attempt.runId)) return;
+    const budget = workerExecutionBudget(attempt.executionMode, process.env);
+    const elapsedMs = Math.max(attempt.elapsedMs ?? 0, attempt.startedAt ? Date.now() - attempt.startedAt : 0);
+    const reason = attempt.tokens >= budget.maxTokens
+      ? `token budget reached (${attempt.tokens}/${budget.maxTokens})`
+      : (attempt.turns ?? 0) >= budget.maxTurns + 2
+        ? `turn budget reached (${attempt.turns}/${budget.maxTurns}+2 grace)`
+        : (attempt.toolCalls ?? 0) >= budget.maxToolCalls
+          ? `tool-call budget reached (${attempt.toolCalls}/${budget.maxToolCalls})`
+          : elapsedMs >= budget.maxRuntimeMs
+            ? `wall-clock budget reached (${Math.round(elapsedMs / 1_000)}s/${Math.round(budget.maxRuntimeMs / 1_000)}s)`
+            : undefined;
+    if (!reason) return;
+    attempt.budgetStopReason = reason;
+    budgetStopsInFlight.add(attempt.runId);
+    persistMission();
+    try {
+      await requestSubagentStop(pi, attempt.runId);
+    } catch {
+      budgetStopsInFlight.delete(attempt.runId);
+    }
+  };
+
   const recordTerminalAttempt = (runId: string, status: Exclude<WriterLifecycleStatus, "paused">) => {
     if (!mission) return;
     const attempt = [...mission.attempts].reverse().find((candidate) => candidate.runId === runId);
     if (!attempt) return;
+    const wasRunning = attempt.status === "running";
     attempt.status = status === "completed" ? "completed" : status === "stopped" ? "stopped" : "failed";
-    attempt.completedOrdinal = Math.max(0, ...mission.attempts.map((candidate) => candidate.completedOrdinal)) + 1;
-    mission.lastCompletedRunId = runId;
+    attempt.elapsedMs = Math.max(attempt.elapsedMs ?? 0, attempt.startedAt ? Date.now() - attempt.startedAt : 0);
+    if (wasRunning) attempt.completedOrdinal = Math.max(0, ...mission.attempts.map((candidate) => candidate.completedOrdinal)) + 1;
+    if (status === "completed") mission.lastCompletedRunId = runId;
+    budgetStopsInFlight.delete(runId);
     if (attempt.todoId) void publishTodoLifecycle(attempt.todoId, status === "completed" ? "completed" : "pending");
     const review = reviewByRun.get(runId);
     if (review) {
@@ -1631,6 +1783,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     restoreReconcileGeneration += 1;
     const generation = restoreReconcileGeneration;
     mission = restored;
+    lastPersistedMissionHash = restored && restored.migratedFromPolicyVersion === undefined
+      ? missionStateContentHash(restored)
+      : "";
     activeDelegationRuns.clear();
     activeDelegationWidths.clear();
     activeWriterRuns.clear();
@@ -1683,6 +1838,16 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     void requestMissionWake(mission?.phase === "integration" ? "integration" : "plan");
   }, 5_000);
 
+  const workerTelemetryScheduler = setInterval(() => {
+    const running = mission?.attempts.filter((attempt) => attempt.status === "running") ?? [];
+    if (running.length === 0) return;
+    void Promise.allSettled(running.map(async (attempt) => {
+      const status = await requestSubagentStatus(pi, attempt.runId);
+      const refreshed = updateAttemptTelemetry(attempt.runId, status);
+      if (refreshed && !workerStatusMetrics(status).terminal) await enforceAttemptBudget(refreshed);
+    }));
+  }, 5_000);
+
   pi.on("session_shutdown", async () => {
     missionWakeGeneration += 1;
     missionWakeCheck = undefined;
@@ -1691,7 +1856,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (independentCompletionTimer) clearTimeout(independentCompletionTimer);
     pendingIndependentCompletions.clear();
     activeFastPath = undefined;
+    persistMissionNow();
     clearInterval(missionScheduler);
+    clearInterval(workerTelemetryScheduler);
   });
 
   const rememberTerminalRun = (key: string) => {
@@ -1723,7 +1890,12 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     rememberTerminalRun(key);
     const deferred = deferredWriterLanesByRun.get(runId) ?? [];
     deferredWriterLanesByRun.delete(runId);
-    pendingIntegrationNotices.push(`- ${runId}${agent ? ` (${agent})` : ""}: ${status}${deferred.length > 0 ? `; deferred lanes: ${deferred.join(", ")}` : ""}`);
+    const terminalAttempt = mission?.attempts.find((attempt) => attempt.runId === runId);
+    const implementationHandle = terminalAttempt?.executionMode === "implementation" && status === "completed"
+      ? `; integrate deterministically with lemonpi_git { action: "integrate_worker_result", artifactRunId: "${runId}" }`
+      : "";
+    const budgetNotice = terminalAttempt?.budgetStopReason ? `; stopped by LemonPi: ${terminalAttempt.budgetStopReason}` : "";
+    pendingIntegrationNotices.push(`- ${runId}${agent ? ` (${agent})` : ""}: ${status}${budgetNotice}${implementationHandle}${deferred.length > 0 ? `; deferred lanes: ${deferred.join(", ")}` : ""}`);
     const currentMission = ensureMission("integration");
     currentMission.wakeAttempts = 0;
     persistMission();
@@ -1741,7 +1913,14 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     pendingIndependentCompletions.clear();
     if (completed.length === 0) return;
     completed.forEach(({ runId, sessionId }) => rememberTerminalRun(terminalRunKey(sessionId, runId)));
-    pendingIntegrationNotices.push(...completed.map(({ runId, status, agent }) => `- ${runId}${agent ? ` (${agent})` : ""}: ${status}`));
+    pendingIntegrationNotices.push(...completed.map(({ runId, status, agent }) => {
+      const terminalAttempt = mission?.attempts.find((attempt) => attempt.runId === runId);
+      const implementationHandle = terminalAttempt?.executionMode === "implementation" && status === "completed"
+        ? `; integrate deterministically with lemonpi_git { action: "integrate_worker_result", artifactRunId: "${runId}" }`
+        : "";
+      const budgetNotice = terminalAttempt?.budgetStopReason ? `; stopped by LemonPi: ${terminalAttempt.budgetStopReason}` : "";
+      return `- ${runId}${agent ? ` (${agent})` : ""}: ${status}${budgetNotice}${implementationHandle}`;
+    }));
     const currentMission = ensureMission("integration");
     currentMission.wakeAttempts = 0;
     persistMission();
@@ -1823,7 +2002,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         && !/^[A-Za-z]:[\\/]/.test(value)
         && !value.split(/[\\/]/).some((segment) => segment === "" || segment === "." || segment === "..");
       const paths = Array.isArray(params.paths) ? params.paths.map(String) : [];
-      const branchName = typeof params.branch === "string" ? params.branch.trim() : "";
+      let branchName = typeof params.branch === "string" ? params.branch.trim() : "";
       const validLocalBranch = async () => branchName.length > 0
         && (await git(["check-ref-format", "--branch", branchName], root)).code === 0;
       if (action === "inspect") {
@@ -1880,7 +2059,9 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           };
         }
         if (action === "checkpoint") {
-          if (!await validLocalBranch()) return { content: [{ type: "text", text: "Git rejected this recovery branch name. Use any valid project-appropriate local branch name." }], isError: true };
+          if (!await validLocalBranch()) {
+            branchName = `codex/lemonpi-recovery-${head.slice(0, 8)}-${contentHash(JSON.stringify({ paths: [...paths].sort(), message })).slice(0, 6)}`;
+          }
           const current = await git(["branch", "--show-current"], root);
           if (current.stdout.trim() !== branchName) {
             const exists = await git(["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`], root);
@@ -1925,6 +2106,134 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         return applied.code === 0
           ? { content: [{ type: "text", text: "Accepted worker patch applied after a clean preflight. Review and commit its exact paths next." }], details: { action, root, patch: canonicalPatch, artifactRunId } }
           : { content: [{ type: "text", text: applied.stderr || "Patch integration failed." }], isError: true };
+      }
+
+      if (action === "integrate_worker_result") {
+        const runId = typeof params.artifactRunId === "string" ? params.artifactRunId.trim() : "";
+        const attempt = mission?.attempts.find((candidate) => candidate.runId === runId);
+        if (!runId || !attempt || attempt.executionMode !== "implementation") {
+          return { content: [{ type: "text", text: "Integration requires the exact artifactRunId of a recorded implementation worker." }], isError: true };
+        }
+        if (attempt.integrationStatus === "integrated" || attempt.integrationStatus === "no-changes") {
+          return { content: [{ type: "text", text: `Worker ${runId} was already integrated; reusing revision ${attempt.integratedRevision ?? head}.` }], details: { action, root, runId, deduplicated: true, revision: attempt.integratedRevision ?? head } };
+        }
+        if (attempt.status !== "completed") {
+          return { content: [{ type: "text", text: `Worker ${runId} is ${attempt.status}; only a completed implementation handoff can be integrated atomically.` }], isError: true };
+        }
+        if (statusLines.length) {
+          return { content: [{ type: "text", text: "The integration checkout must be clean before applying a worker result." }], isError: true };
+        }
+        if (!attempt.handoffPath) {
+          try {
+            const workerStatus = await requestSubagentStatus(pi, runId);
+            updateAttemptTelemetry(runId, workerStatus);
+          } catch {
+            // The persisted exact runtime handle below remains authoritative.
+          }
+        }
+        const handoffPath = attempt.handoffPath;
+        if (!handoffPath) {
+          return { content: [{ type: "text", text: "The runtime did not publish its generated handoff manifest yet. Inspect this exact run once; do not launch another worker to copy its patch." }], isError: true };
+        }
+        let canonicalHandoff = "";
+        let manifest: Record<string, unknown>;
+        try {
+          canonicalHandoff = realpathSync(handoffPath);
+          if (!statSync(canonicalHandoff).isFile()) throw new Error("not a regular file");
+          manifest = JSON.parse(readFileSync(canonicalHandoff, "utf8")) as Record<string, unknown>;
+        } catch (error) {
+          return { content: [{ type: "text", text: `The generated handoff manifest is missing or malformed: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+        }
+        if (manifest.version !== 1 || manifest.runId !== runId || !Array.isArray(manifest.groups)) {
+          return { content: [{ type: "text", text: "The handoff manifest identity or version does not match the recorded worker run." }], isError: true };
+        }
+        const groups = manifest.groups.map(asRecord).filter((group): group is Record<string, unknown> => Boolean(group));
+        const children = groups.flatMap((group) => Array.isArray(group.children)
+          ? group.children.map(asRecord).filter((child): child is Record<string, unknown> => Boolean(child)).map((child) => ({ group, child }))
+          : []);
+        if (children.length !== 1 || children[0]!.child.status !== "completed") {
+          return { content: [{ type: "text", text: "Atomic worker integration requires the runtime-generated one-child completed handoff for this independent lane." }], isError: true };
+        }
+        const { group, child } = children[0]!;
+        const patchRecord = asRecord(child.patch);
+        if (!patchRecord || patchRecord.error || typeof patchRecord.path !== "string") {
+          return { content: [{ type: "text", text: `The runtime could not generate a usable worker patch${patchRecord?.error ? `: ${String(patchRecord.error)}` : "."}` }], isError: true };
+        }
+        const ownedPaths = attempt.ownedPaths ?? [];
+        if (ownedPaths.length === 0) {
+          return { content: [{ type: "text", text: "The runtime record has no exact owned paths, so deterministic integration is closed." }], isError: true };
+        }
+        if (patchRecord.changed !== true) {
+          attempt.integrationStatus = "no-changes";
+          attempt.integratedRevision = head;
+          persistMission();
+          return { content: [{ type: "text", text: `Worker ${runId} completed with no code changes; no copy worker or commit is needed.` }], details: { action, root, runId, manifest: canonicalHandoff, changed: false, revision: head } };
+        }
+        let canonicalPatch = "";
+        try {
+          canonicalPatch = realpathSync(patchRecord.path);
+          if (!statSync(canonicalPatch).isFile()) throw new Error("not a regular file");
+        } catch {
+          return { content: [{ type: "text", text: "The runtime-generated patch referenced by the handoff is missing." }], isError: true };
+        }
+        if (!trustedWorkerPatchPath(canonicalPatch, runId, mission?.attempts.map((candidate) => candidate.runId) ?? [])) {
+          return { content: [{ type: "text", text: "The handoff patch is outside LemonPi's runtime-owned artifact locations." }], isError: true };
+        }
+        const baseCommit = typeof group.baseCommit === "string" ? group.baseCommit : "";
+        if (!/^[0-9a-f]{40,64}$/i.test(baseCommit)) {
+          return { content: [{ type: "text", text: "The runtime-generated manifest has no exact base commit." }], isError: true };
+        }
+        const verifiedBase = await git(["cat-file", "-e", `${baseCommit}^{commit}`], root);
+        if (verifiedBase.code !== 0) {
+          return { content: [{ type: "text", text: "The worker manifest base commit is not present in the target repository." }], isError: true };
+        }
+        const repoRoot = typeof group.repoRoot === "string" ? group.repoRoot : "";
+        if (!repoRoot) return { content: [{ type: "text", text: "The worker manifest has no source repository identity." }], isError: true };
+        const sourceCommonResult = await git(["rev-parse", "--git-common-dir"], repoRoot);
+        const targetCommonResult = await git(["rev-parse", "--git-common-dir"], root);
+        if (sourceCommonResult.code !== 0 || targetCommonResult.code !== 0) {
+          return { content: [{ type: "text", text: "The handoff repository identity could not be verified." }], isError: true };
+        }
+        const sourceCommon = realpathSync(sourceCommonResult.stdout.trim().startsWith("/") ? sourceCommonResult.stdout.trim() : resolve(repoRoot, sourceCommonResult.stdout.trim()));
+        const targetCommon = realpathSync(targetCommonResult.stdout.trim().startsWith("/") ? targetCommonResult.stdout.trim() : resolve(root, targetCommonResult.stdout.trim()));
+        if (sourceCommon !== targetCommon) {
+          return { content: [{ type: "text", text: "The worker handoff belongs to a different Git repository." }], isError: true };
+        }
+        const numstat = await git(["apply", "--numstat", canonicalPatch], root);
+        const patchPaths = numstat.stdout.split(/\r?\n/).filter(Boolean).map((line) => line.split("\t").slice(2).join("\t"));
+        if (numstat.code !== 0 || patchPaths.length === 0 || patchPaths.some((path) => !path || path.includes(" => ") || !ownedPaths.some((owned) => path === owned || path.startsWith(`${owned}/`)))) {
+          return { content: [{ type: "text", text: `Runtime-owned path verification rejected the worker patch: ${patchPaths.join(", ") || numstat.stderr || "no paths"}.` }], isError: true };
+        }
+        const checked = await git(["apply", "--check", canonicalPatch], root);
+        if (checked.code !== 0) return { content: [{ type: "text", text: checked.stderr || "Worker patch preflight failed; no changes were applied." }], isError: true };
+        const applied = await git(["apply", "--3way", canonicalPatch], root);
+        if (applied.code !== 0) return { content: [{ type: "text", text: `${applied.stderr || "Worker patch integration failed."}\nLemonPi did not reset or discard anything.` }], isError: true };
+        const changedNames = await git(["diff", "--name-only"], root);
+        const changedPaths = changedNames.stdout.split(/\r?\n/).filter(Boolean);
+        if (!changedPaths.length || changedPaths.some((path) => !ownedPaths.some((owned) => path === owned || path.startsWith(`${owned}/`)))) {
+          return { content: [{ type: "text", text: `Post-apply ownership verification failed for: ${changedPaths.join(", ") || "no paths"}. Preserve the checkout for inspection.` }], isError: true };
+        }
+        const staged = await git(["add", "--", ...changedPaths], root);
+        if (staged.code !== 0) return { content: [{ type: "text", text: staged.stderr || "Could not stage the verified worker paths." }], isError: true };
+        const checkedDiff = await git(["diff", "--cached", "--check"], root);
+        if (checkedDiff.code !== 0) return { content: [{ type: "text", text: checkedDiff.stdout || checkedDiff.stderr || "The staged worker diff failed Git validation." }], isError: true };
+        const commitMessage = `LemonPi: integrate ${attempt.purpose}`.slice(0, 120);
+        const committed = await git(["commit", "-m", commitMessage], root);
+        if (committed.code !== 0) return { content: [{ type: "text", text: committed.stderr || committed.stdout || "Could not commit the verified worker result." }], isError: true };
+        const revision = await git(["rev-parse", "HEAD"], root);
+        attempt.integrationStatus = "integrated";
+        attempt.integratedRevision = revision.stdout.trim();
+        const cleanupTask = groups.flatMap((candidate) => {
+          const cleanup = asRecord(candidate.cleanup);
+          return Array.isArray(cleanup?.tasks) ? cleanup.tasks.map(asRecord).filter(Boolean) : [];
+        }).find((task) => task?.worktreeRemoved === false && typeof task.path === "string");
+        if (!attempt.worktreePath && typeof cleanupTask?.path === "string") attempt.worktreePath = cleanupTask.path;
+        attempt.cleanupPending = Boolean(attempt.worktreePath);
+        persistMission();
+        return {
+          content: [{ type: "text", text: `Integrated worker ${runId} directly from its runtime manifest as ${attempt.integratedRevision.slice(0, 12)}:\n- ${changedPaths.join("\n- ")}` }],
+          details: { action, root, runId, manifest: canonicalHandoff, patch: canonicalPatch, baseCommit, paths: changedPaths, revision: attempt.integratedRevision, cleanupPending: attempt.cleanupPending === true },
+        };
       }
 
       if (action === "integrate_worktree") {
@@ -1982,9 +2291,22 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           return { content: [{ type: "text", text: `Runtime-generated manifest rejected commit paths: ${manifestPaths.join(", ") || "none"}.` }], isError: true };
         }
         const picked = await git(["cherry-pick", sourceCommit], root);
-        return picked.code === 0
-          ? { content: [{ type: "text", text: `Integrated inspected worktree commit ${sourceCommit.slice(0, 12)} with runtime-owned manifest:\n- ${manifestPaths.join("\n- ")}` }], details: { action, root, worktreePath: sourceRoot, sourceCommit, paths: manifestPaths } }
-          : { content: [{ type: "text", text: `${picked.stderr || "Cherry-pick conflicted."}\nLemonPi preserved both checkouts and did not reset or discard anything.` }], isError: true };
+        if (picked.code !== 0) {
+          return { content: [{ type: "text", text: `${picked.stderr || "Cherry-pick conflicted."}\nLemonPi preserved both checkouts and did not reset or discard anything.` }], isError: true };
+        }
+        const linkedAttempt = mission?.attempts.find((attempt) => {
+          if (typeof params.artifactRunId === "string" && attempt.runId === params.artifactRunId) return true;
+          try { return Boolean(attempt.worktreePath && realpathSync(attempt.worktreePath) === sourceRoot); } catch { return false; }
+        });
+        if (linkedAttempt) {
+          const integratedHead = await git(["rev-parse", "HEAD"], root);
+          linkedAttempt.integrationStatus = "integrated";
+          linkedAttempt.integratedRevision = integratedHead.stdout.trim();
+          linkedAttempt.worktreePath = sourceRoot;
+          linkedAttempt.cleanupPending = true;
+          persistMission();
+        }
+        return { content: [{ type: "text", text: `Integrated inspected worktree commit ${sourceCommit.slice(0, 12)} with runtime-owned manifest:\n- ${manifestPaths.join("\n- ")}` }], details: { action, root, worktreePath: sourceRoot, sourceCommit, paths: manifestPaths, cleanupPending: Boolean(linkedAttempt) } };
       }
 
       if (action === "create_worktree") {
@@ -2019,6 +2341,39 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
 
       return { content: [{ type: "text", text: `Unsupported safe Git action: ${action}` }], isError: true };
     },
+  };
+
+  const retireValidatedWorktrees = async (checkoutRoot: string, relevantPaths: string[]): Promise<string[]> => {
+    const retired: string[] = [];
+    const candidates = mission?.attempts.filter((attempt) =>
+      attempt.integrationStatus === "integrated"
+      && attempt.cleanupPending
+      && attempt.worktreePath
+      && attempt.ownedPaths?.some((owned) => relevantPaths.some((relevant) => ownedPathsOverlap([owned], [relevant])))) ?? [];
+    if (candidates.length === 0) return retired;
+    const listed = await pi.exec("git", ["worktree", "list", "--porcelain"], { cwd: checkoutRoot, timeout: 10_000 });
+    if (listed.code !== 0) return retired;
+    const registered = listed.stdout.split(/\r?\n/).filter((line) => line.startsWith("worktree ")).map((line) => line.slice("worktree ".length).trim());
+    for (const attempt of candidates) {
+      const worktreePath = attempt.worktreePath!;
+      let canonical = "";
+      try { canonical = realpathSync(worktreePath); } catch {
+        attempt.cleanupPending = false;
+        continue;
+      }
+      if (canonical === realpathSync(checkoutRoot) || !registered.some((path) => {
+        try { return realpathSync(path) === canonical; } catch { return false; }
+      })) continue;
+      const status = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { cwd: canonical, timeout: 10_000 });
+      if (status.code !== 0 || status.stdout.trim()) continue;
+      const removed = await pi.exec("git", ["worktree", "remove", canonical], { cwd: checkoutRoot, timeout: 30_000 });
+      if (removed.code === 0) {
+        attempt.cleanupPending = false;
+        retired.push(canonical);
+      }
+    }
+    if (retired.length > 0) persistMission();
+    return retired;
   };
 
   const validationTool: ToolDefinition<any, Record<string, unknown>> = {
@@ -2065,7 +2420,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           activeFastPath.validationPassed = true;
           activeFastPath.validationCount = Math.max(1, activeFastPath.validationCount);
         }
-        return { content: [{ type: "text", text: `${duplicate} Reusing the recorded passing evidence.` }], details: { deduplicated: true, candidate } };
+        const retired = await retireValidatedWorktrees(checkoutRoot, params.relevantPaths);
+        return { content: [{ type: "text", text: `${duplicate} Reusing the recorded passing evidence.${retired.length ? ` Retired ${retired.length} clean managed worktree${retired.length === 1 ? "" : "s"}.` : ""}` }], details: { deduplicated: true, candidate, retiredWorktrees: retired } };
       }
       if (activeFastPath) {
         if (activeFastPath.validationPassed) return { content: [{ type: "text", text: "The fast-path slice already has passing focused evidence. Do not run another suite." }], isError: true };
@@ -2085,10 +2441,11 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           if (activeFastPath) activeFastPath.validationPassed = true;
           persistMission();
         }
+        const retired = result.code === 0 ? await retireValidatedWorktrees(checkoutRoot, params.relevantPaths) : [];
         return {
-          content: [{ type: "text", text: `${result.code === 0 ? "Validation passed" : "Validation failed"}: ${candidate.command} (${Math.round(elapsedMs / 100) / 10}s)\n${(result.stdout || result.stderr).trim().slice(-4_000)}` }],
+          content: [{ type: "text", text: `${result.code === 0 ? "Validation passed" : "Validation failed"}: ${candidate.command} (${Math.round(elapsedMs / 100) / 10}s)${retired.length ? `; retired ${retired.length} clean managed worktree${retired.length === 1 ? "" : "s"}` : ""}\n${(result.stdout || result.stderr).trim().slice(-4_000)}` }],
           ...(result.code === 0 ? {} : { isError: true }),
-          details: { deduplicated: false, active: false, elapsedMs, exitCode: result.code, candidate },
+          details: { deduplicated: false, active: false, elapsedMs, exitCode: result.code, candidate, retiredWorktrees: retired },
         };
       } finally {
         clearInterval(heartbeat);
@@ -2155,27 +2512,38 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         reviewRecord: undefined as Omit<ReviewRecord, "accepted"> | undefined,
         todoId: typeof lane.todoId === "number" && Number.isInteger(lane.todoId) ? lane.todoId : undefined,
         artifactPath: "",
+        reasoning: "medium" as "low" | "medium" | "high",
+        spawnAttempted: false,
         issue: undefined as string | undefined,
       }));
 
       await Promise.all(prepared.map(async (candidate) => {
         stripPerDispatchBudgets(candidate.lane);
+        const rawTask = typeof candidate.lane.task === "string" ? candidate.lane.task : "";
+        if (candidate.executionMode === "read-only"
+          && executableAgents.has("scout")
+          && ["context-builder", "explorer", "researcher"].includes(candidate.agent.toLowerCase())
+          && /\b(?:code|file|git|repository|repo|source|implementation)\b/i.test(rawTask)
+          && !/\b(?:internet|web|external research|paper|documentation site)\b/i.test(rawTask)) {
+          candidate.agent = "scout";
+          candidate.lane.agent = "scout";
+        }
         if (!availableAgents.includes(candidate.agent)) {
           candidate.issue = `Agent '${candidate.agent}' is not in the live executable roster.`;
           return;
         }
-        const rawTask = typeof candidate.lane.task === "string" ? candidate.lane.task : "";
+        candidate.reasoning = recommendedReasoning(candidate.agent, rawTask);
         if (candidate.todoId !== undefined && !visiblePlanTasks.some((task) => task.id === candidate.todoId && task.status !== "deleted" && task.status !== "completed")) {
           candidate.issue = `todoId ${candidate.todoId} is not an unfinished visible milestone.`;
           return;
         }
-        if (candidate.preparedWorktreePath && !/^[0-9a-f]{40,64}$/i.test(candidate.baseRevision)) {
-          candidate.issue = "Prepared worktree reuse requires its exact baseRevision so stale work cannot be dispatched.";
+        if (candidate.preparedWorktreePath && !/^[0-9a-f]{7,64}$/i.test(candidate.baseRevision)) {
+          candidate.issue = "Prepared worktree reuse requires a resolvable baseRevision so stale work cannot be dispatched.";
           return;
         }
         if (candidate.baseRevision && !candidate.preparedWorktreePath) {
-          candidate.issue = "baseRevision is only valid together with worktreePath.";
-          return;
+          delete candidate.lane.baseRevision;
+          candidate.baseRevision = "";
         }
         if (READ_ONLY_ROLE_NAMES.has(candidate.agent.toLowerCase()) && candidate.executionMode === "implementation") {
           candidate.issue = `Agent '${candidate.agent}' is read-only but this lane requires implementation. Choose a write-enabled agent before spending model tokens.`;
@@ -2259,6 +2627,11 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
                   try { return realpathSync(line.slice("worktree ".length).trim()) === canonicalPrepared; } catch { return false; }
                 });
               if (!registered) throw new Error("The prepared worktree is not registered with the source repository.");
+              if (candidate.baseRevision) {
+                const canonicalBase = await pi.exec("git", ["-C", canonicalPrepared, "rev-parse", `${candidate.baseRevision}^{commit}`], { cwd: ctx.cwd, timeout: 5_000 });
+                if (canonicalBase.code !== 0 || !canonicalBase.stdout.trim()) throw new Error(`Prepared worktree base '${candidate.baseRevision}' is not a valid local revision.`);
+                candidate.baseRevision = canonicalBase.stdout.trim();
+              }
               if (candidate.baseRevision && candidate.snapshot.head !== candidate.baseRevision) {
                 throw new Error(`Prepared worktree HEAD ${candidate.snapshot.head} does not match requested base ${candidate.baseRevision}.`);
               }
@@ -2313,10 +2686,14 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       const launched = await Promise.all(prepared.map(async (candidate) => {
         if (candidate.issue) return { ...candidate, result: undefined as unknown, runId: undefined as string | undefined };
         const spawn = independentSpawnParams(candidate.lane).params;
+        const budget = workerExecutionBudget(candidate.executionMode, process.env);
+        const routedModel = runtimeRoutedModel(candidate.agent, String(candidate.lane.cwd ?? ctx.cwd), candidate.lane.model, candidate.reasoning);
+        Object.assign(spawn, budget.spawn, ...(routedModel ? [{ model: routedModel }] : []));
         // Independent slices always start from concise fresh context. Bounded correction
         // continuity belongs exclusively to the guarded resume path below.
         spawn.context = "fresh";
         try {
+          candidate.spawnAttempted = true;
           const result = await requestSubagentSpawn(pi, spawn);
           const runId = delegationRunId(result);
           if (!runId) throw new Error("The subagent runtime acknowledged the lane without returning a run ID.");
@@ -2364,11 +2741,16 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
             sliceCount: 1,
             transcriptBytes: 0,
             tokens: 0,
+            turns: 0,
+            toolCalls: 0,
+            startedAt: Date.now(),
+            elapsedMs: 0,
             ...(candidate.todoId ? { todoId: candidate.todoId } : {}),
             ...(candidate.snapshot ? { repository: candidate.snapshot.root, baseRevision: candidate.snapshot.head } : {}),
             ...(candidate.preparedWorktreePath ? { worktreePath: candidate.preparedWorktreePath } : {}),
             ...(candidate.ownedPaths ? { ownedPaths: [...candidate.ownedPaths] } : {}),
             ...(candidate.artifactPath ? { artifactPath: candidate.artifactPath } : {}),
+            ...(candidate.implementation ? { integrationStatus: "pending" as const } : {}),
           });
         }
         currentMission.writerActive = writerOccupied;
@@ -2377,8 +2759,14 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       }
 
       if (successes.length === 0) {
-        delegationFailurePending = true;
-        lastDelegationFailure = failures.map((candidate) => `${candidate.agent}: ${candidate.issue ?? "launch failed"}`).join("\n").slice(0, 800);
+        const launchFailures = failures.filter((candidate) => candidate.spawnAttempted);
+        delegationFailurePending = launchFailures.length > 0;
+        lastDelegationFailure = launchFailures.length > 0
+          ? launchFailures.map((candidate) => `${candidate.agent}: ${candidate.issue ?? "launch failed"}`).join("\n").slice(0, 800)
+          : undefined;
+      } else {
+        delegationFailurePending = false;
+        lastDelegationFailure = undefined;
       }
       const summary = [
         successes.length > 0
@@ -2437,6 +2825,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
 
   pi.events.on("subagent:async-complete", (payload) => {
     const runId = delegationRunId(payload);
+    if (runId) updateAttemptTelemetry(runId, payload);
     const independentlyDispatched = runId ? independentDispatchRuns.delete(runId) : false;
     if (runId) {
       activeDelegationRuns.delete(runId);
@@ -2475,10 +2864,15 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", async (event) => {
+    if (process.env.PI_SUBAGENT_CHILD !== "1") {
+      const architectureDecision = /\b(?:architecture decision|choose architecture|system architecture|redesign architecture|migration strategy|security model|protocol design)\b/i.test(latestUserRequest);
+      const desiredThinking = architectureDecision ? "xhigh" as const : "medium" as const;
+      if (pi.getThinkingLevel() !== desiredThinking) pi.setThinkingLevel(desiredThinking);
+    }
     mainAgentRunning = true;
     mainTurnSettled = false;
     missionWakeGeneration += 1;
-    if (event.prompt === MISSION_INTEGRATION || event.prompt.startsWith(PLAN_CONTINUATION)) {
+    if (event.prompt.startsWith(MISSION_INTEGRATION) || event.prompt.startsWith(PLAN_CONTINUATION)) {
       missionWakeQueued = false;
     }
     return {
@@ -2600,6 +2994,20 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     if (process.env.PI_SUBAGENT_CHILD === "1") return;
 
     const input = event.input as Record<string, unknown>;
+    if (event.toolName === "todo") {
+      const protectedIds = new Set((mission?.attempts ?? []).flatMap((attempt) => attempt.todoId ? [attempt.todoId] : []));
+      const action = typeof input.action === "string" ? input.action : "";
+      const targetId = typeof input.id === "number" ? input.id : typeof input.todoId === "number" ? input.todoId : undefined;
+      const deletesProtected = action === "clear"
+        ? protectedIds.size > 0
+        : (action === "delete" || (action === "update" && input.status === "deleted")) && targetId !== undefined && protectedIds.has(targetId);
+      if (deletesProtected) {
+        return {
+          block: true,
+          reason: "Mission todo history is append-only. Update the original milestone's lifecycle status and append a correction or superseding item; do not delete the worker record.",
+        };
+      }
+    }
     if (["lemonpi_dispatch", "lemonpi_git", "lemonpi_validate", "lemonpi_fast_path"].includes(event.toolName)) {
       const signature = `${event.toolName}:${typeof input.action === "string" ? input.action : "execute"}`;
       const failures = internalContractFailures.get(signature) ?? 0;
@@ -2678,19 +3086,13 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       const correction = /(?:^|\n)\s*correction for (?:the )?(?:immediately )?previous slice\s*:/i.test(message);
       try {
         const status = await requestSubagentStatus(pi, previousRunId);
-        const metrics = workerStatusMetrics(status);
-        previousAttempt.tokens = Math.max(previousAttempt.tokens, metrics.tokens);
-        previousAttempt.transcriptBytes = Math.max(
-          previousAttempt.transcriptBytes,
-          ...metrics.transcriptPaths.map((filePath) => {
-            try {
-              return statSync(filePath).size;
-            } catch {
-              return 0;
-            }
-          }),
-        );
-        persistMission();
+        updateAttemptTelemetry(previousRunId, status);
+        const disposition = subagentStatusDisposition(status);
+        if (disposition === "completed") {
+          previousAttempt.status = "completed";
+          mission!.lastCompletedRunId = previousRunId;
+          persistMission();
+        }
       } catch {
         return {
           block: true,
@@ -2743,6 +3145,18 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       compileDelegationContracts(input);
       specs = delegatedSpecs(input);
       const writers = specs.filter(delegatesImplementation);
+      if (specs.length === 1 && writers.length === 0) {
+        const mode = "read-only" as const;
+        const budget = workerExecutionBudget(mode, process.env);
+        const reasoning = recommendedReasoning(specs[0]!.agent, specs[0]!.task);
+        const routedModel = runtimeRoutedModel(specs[0]!.agent, typeof input.cwd === "string" ? input.cwd : ctx.cwd, input.model, reasoning);
+        Object.assign(input, budget.spawn, ...(routedModel ? [{ model: routedModel }] : []));
+        delegationAttemptMetadata.set(event.toolCallId, {
+          purpose: normalizeWorkerSummary(workerSummaryFromTask(specs[0]!.task), specs[0]!.task),
+          executionMode: mode,
+          startedAt: Date.now(),
+        });
+      }
 
       if (writers.length > 0) {
         return {
@@ -3016,6 +3430,10 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
           sliceCount: resumedCall.sliceCount,
           transcriptBytes: 0,
           tokens: 0,
+          turns: 0,
+          toolCalls: 0,
+          startedAt: Date.now(),
+          elapsedMs: 0,
         });
         if (resumedCall.implementation) {
           writerOccupied = true;
@@ -3038,6 +3456,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         ? disposition
         : writerLifecycleStatus(event.result) ?? (event.isError ? "failed" : undefined);
       const runId = delegationRunId(event.result) ?? statusCall?.target;
+      if (runId && !event.isError) updateAttemptTelemetry(runId, event.result);
       if (status && status !== "paused") {
         if (runId) {
           activeDelegationRuns.delete(runId);
@@ -3085,6 +3504,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     const launchWidth = delegationLaunchWidths.get(event.toolCallId) ?? 1;
     delegationLaunchWidths.delete(event.toolCallId);
     if (!delegationToolCalls.delete(event.toolCallId)) return;
+    const attemptMetadata = delegationAttemptMetadata.get(event.toolCallId);
+    delegationAttemptMetadata.delete(event.toolCallId);
     const failure = writerCall && writerCall.async !== false
       ? asyncWriterLaunchFailure(event.result, event.isError)
       : delegationFailure(event.result, event.isError);
@@ -3097,6 +3518,22 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         activeDelegationHandoffPending = true;
         const currentMission = ensureMission("delegated");
         if (!currentMission.activeRunIds.includes(runId)) currentMission.activeRunIds.push(runId);
+        if (attemptMetadata && !currentMission.attempts.some((attempt) => attempt.runId === runId)) {
+          currentMission.attempts.push({
+            runId,
+            purpose: attemptMetadata.purpose,
+            status: "running",
+            executionMode: attemptMetadata.executionMode,
+            completedOrdinal: 0,
+            sliceCount: 1,
+            transcriptBytes: 0,
+            tokens: 0,
+            turns: 0,
+            toolCalls: 0,
+            startedAt: attemptMetadata.startedAt,
+            elapsedMs: 0,
+          });
+        }
         currentMission.wakeAttempts = 0;
         persistMission();
       } else if (mission) {

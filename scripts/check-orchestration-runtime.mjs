@@ -15,6 +15,7 @@ import {
   internalContractFallback,
   invalidatesValidation,
   launchPreflightIssue,
+  missionStateContentHash,
   missionProgress,
   recoveryAction,
   recommendedReasoning,
@@ -28,6 +29,7 @@ import {
   validationActivityLabel,
   validationDeduplicationIssue,
   workerContextLimits,
+  workerExecutionBudget,
   workerStatusMetrics,
 } from "../src-tauri/resources/lemonpi-narration/extensions/orchestration-runtime.ts";
 import {
@@ -188,8 +190,38 @@ assert.deepEqual(workerContextLimits({ LEMONPI_WORKER_MAX_TRANSCRIPT_BYTES: "500
 });
 assert.deepEqual(workerStatusMetrics({ details: { tokens: { total: 42_000 }, sessionFile: "/tmp/child.jsonl" } }), {
   tokens: 42_000,
+  turns: 0,
+  toolCalls: 0,
+  elapsedMs: 0,
+  terminal: false,
   transcriptPaths: ["/tmp/child.jsonl"],
 });
+assert.deepEqual(workerStatusMetrics({ totalTokens: 275_603, turnCount: 19, toolCount: 75, startedAt: 1_000, durationMs: 45_000, activityState: "running" }, 51_000), {
+  tokens: 275_603,
+  turns: 19,
+  toolCalls: 75,
+  startedAt: 1_000,
+  elapsedMs: 50_000,
+  activityState: "running",
+  terminal: false,
+  transcriptPaths: [],
+});
+assert.deepEqual(workerExecutionBudget("read-only", {}), {
+  maxTokens: 60_000,
+  maxTurns: 8,
+  maxToolCalls: 25,
+  maxRuntimeMs: 600_000,
+  spawn: {
+    timeoutMs: 600_000,
+    turnBudget: { maxTurns: 8, graceTurns: 2 },
+    toolBudget: { hard: 25 },
+    usageBudget: { tokens: { hard: 60_000 } },
+  },
+});
+assert.equal(
+  missionStateContentHash({ id: "mission", updatedAt: 1, attempts: [] }),
+  missionStateContentHash({ attempts: [], updatedAt: 999, id: "mission" }),
+);
 
 assert.match(launchPreflightIssue({
   agent: "planner",
@@ -214,6 +246,7 @@ assert.equal(launchPreflightIssue({
 
 const review = { repository: repo, revision: git(repo, "rev-parse", "HEAD"), diffHash: "diff-1", scope: ["src/auth"], riskBoundary: "authentication" };
 assert.match(reviewDeduplicationIssue([{ ...review, accepted: true }], review), /already has an accepted review/);
+assert.match(reviewDeduplicationIssue([{ ...review, accepted: true }], { ...review, riskBoundary: "rewritten security rationale" }), /already has an accepted review/);
 assert.equal(reviewDeduplicationIssue([{ ...review, accepted: true }], { ...review, diffHash: "diff-2" }), undefined);
 
 const validation = { repository: repo, baseRevision: review.revision, diffHash: "diff-1", command: "pnpm test", relevantPaths: ["src/auth"], dependencyState: "deps-1", scope: "wave" };

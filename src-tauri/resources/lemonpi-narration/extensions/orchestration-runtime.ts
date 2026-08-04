@@ -1,4 +1,4 @@
-export const CURRENT_ORCHESTRATION_POLICY_VERSION = 4;
+export const CURRENT_ORCHESTRATION_POLICY_VERSION = 5;
 
 export const ORCHESTRATION_POLICY_NOTICE = `<lemonpi-authoritative-policy version="${CURRENT_ORCHESTRATION_POLICY_VERSION}">
 The installed LemonPi orchestration policy is authoritative. Historical summaries preserve product facts and user decisions only. Any older scheduling, review, validation, model-routing, context-reuse, or Git instruction is superseded. Main Pi directly handles low-risk one-repository UI slices; only broader work uses independent delegated lanes. Main Pi owns safe local Git integration and exact validation reuse.
@@ -163,6 +163,12 @@ export interface WorkerAttempt {
   sliceCount: number;
   transcriptBytes: number;
   tokens: number;
+  turns?: number;
+  toolCalls?: number;
+  startedAt?: number;
+  elapsedMs?: number;
+  activityState?: string;
+  budgetStopReason?: string;
   emptyOutput?: boolean;
   corrupted?: boolean;
   todoId?: number;
@@ -171,6 +177,50 @@ export interface WorkerAttempt {
   baseRevision?: string;
   ownedPaths?: string[];
   artifactPath?: string;
+  handoffPath?: string;
+  integratedRevision?: string;
+  integrationStatus?: "pending" | "integrated" | "no-changes";
+  cleanupPending?: boolean;
+}
+
+export interface WorkerExecutionBudget {
+  maxTokens: number;
+  maxTurns: number;
+  maxToolCalls: number;
+  maxRuntimeMs: number;
+  spawn: {
+    timeoutMs: number;
+    turnBudget: { maxTurns: number; graceTurns: number };
+    toolBudget: { hard: number };
+    usageBudget: { tokens: { hard: number } };
+  };
+}
+
+export function workerExecutionBudget(
+  mode: ExecutionMode,
+  environment: Record<string, string | undefined> = {},
+): WorkerExecutionBudget {
+  const prefix = mode === "implementation" ? "LEMONPI_IMPLEMENTATION" : "LEMONPI_READONLY";
+  const positiveInteger = (suffix: string, fallback: number) => {
+    const parsed = Number(environment[`${prefix}_${suffix}`]);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+  };
+  const maxTokens = positiveInteger("MAX_TOKENS", mode === "implementation" ? 120_000 : 60_000);
+  const maxTurns = positiveInteger("MAX_TURNS", mode === "implementation" ? 12 : 8);
+  const maxToolCalls = positiveInteger("MAX_TOOL_CALLS", mode === "implementation" ? 45 : 25);
+  const maxRuntimeMs = positiveInteger("MAX_RUNTIME_MS", mode === "implementation" ? 15 * 60_000 : 10 * 60_000);
+  return {
+    maxTokens,
+    maxTurns,
+    maxToolCalls,
+    maxRuntimeMs,
+    spawn: {
+      timeoutMs: maxRuntimeMs,
+      turnBudget: { maxTurns, graceTurns: 2 },
+      toolBudget: { hard: maxToolCalls },
+      usageBudget: { tokens: { hard: maxTokens } },
+    },
+  };
 }
 
 export interface ResumeRequest {
@@ -197,8 +247,25 @@ export function workerContextLimits(environment: Record<string, string | undefin
   };
 }
 
-export function workerStatusMetrics(value: unknown): { tokens: number; transcriptPaths: string[] } {
+export interface WorkerStatusMetrics {
+  tokens: number;
+  turns: number;
+  toolCalls: number;
+  startedAt?: number;
+  elapsedMs: number;
+  activityState?: string;
+  terminal: boolean;
+  transcriptPaths: string[];
+}
+
+export function workerStatusMetrics(value: unknown, now = Date.now()): WorkerStatusMetrics {
   let tokens = 0;
+  let turns = 0;
+  let toolCalls = 0;
+  let startedAt: number | undefined;
+  let elapsedMs = 0;
+  let activityState: string | undefined;
+  let terminal = false;
   const transcriptPaths = new Set<string>();
   const seen = new Set<object>();
   const visit = (candidate: unknown, depth: number, parentKey = "") => {
@@ -217,6 +284,23 @@ export function workerStatusMetrics(value: unknown): { tokens: number; transcrip
         && typeof entry === "number" && Number.isFinite(entry)) {
         tokens = Math.max(tokens, Math.floor(entry));
       }
+      if ((key === "turnCount" || key === "totalTurns" || key === "turns") && typeof entry === "number" && Number.isFinite(entry)) {
+        turns = Math.max(turns, Math.floor(entry));
+      }
+      if ((key === "toolCount" || key === "toolCalls" || key === "totalToolCalls") && typeof entry === "number" && Number.isFinite(entry)) {
+        toolCalls = Math.max(toolCalls, Math.floor(entry));
+      }
+      if (key === "startedAt" && typeof entry === "number" && Number.isFinite(entry)) {
+        startedAt = startedAt === undefined ? entry : Math.min(startedAt, entry);
+      }
+      if ((key === "durationMs" || key === "elapsedMs") && typeof entry === "number" && Number.isFinite(entry)) {
+        elapsedMs = Math.max(elapsedMs, Math.floor(entry));
+      }
+      if ((key === "activityState" || key === "status") && typeof entry === "string") {
+        const normalized = entry.toLowerCase();
+        if (key === "activityState" || !activityState) activityState = normalized;
+        if (/^(?:complete|completed|failed|rejected|stopped|cancelled|canceled)$/.test(normalized)) terminal = true;
+      }
       visit(entry, depth + 1, key);
     }
   };
@@ -233,7 +317,8 @@ export function workerStatusMetrics(value: unknown): { tokens: number; transcrip
     const parsed = Number(match[1]!.replace(/,/g, ""));
     if (Number.isFinite(parsed)) tokens = Math.max(tokens, Math.floor(parsed));
   }
-  return { tokens, transcriptPaths: [...transcriptPaths] };
+  if (startedAt !== undefined) elapsedMs = Math.max(elapsedMs, Math.max(0, now - startedAt));
+  return { tokens, turns, toolCalls, ...(startedAt !== undefined ? { startedAt } : {}), elapsedMs, ...(activityState ? { activityState } : {}), terminal, transcriptPaths: [...transcriptPaths] };
 }
 
 export function resumeWorkerIssue(input: ResumeRequest): string | undefined {
@@ -264,6 +349,18 @@ export function contentHash(value: string): string {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
+export function missionStateContentHash(value: unknown): string {
+  const stable = (candidate: unknown): unknown => {
+    if (Array.isArray(candidate)) return candidate.map(stable);
+    if (!candidate || typeof candidate !== "object") return candidate;
+    return Object.fromEntries(Object.entries(candidate as Record<string, unknown>)
+      .filter(([key]) => key !== "updatedAt")
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, stable(entry)]));
+  };
+  return contentHash(JSON.stringify(stable(value)));
+}
+
 export interface ReviewRecord {
   repository: string;
   revision: string;
@@ -274,14 +371,14 @@ export interface ReviewRecord {
 }
 
 export function reviewLedgerKey(value: Omit<ReviewRecord, "accepted">): string {
-  const { repository, revision, diffHash, scope, riskBoundary } = value as ReviewRecord;
-  return contentHash(JSON.stringify({ repository, revision, diffHash, scope: [...scope].sort(), riskBoundary }));
+  const { repository, revision, diffHash, scope } = value as ReviewRecord;
+  return contentHash(JSON.stringify({ repository, revision, diffHash, scope: [...scope].sort() }));
 }
 
 export function reviewDeduplicationIssue(records: ReviewRecord[], candidate: Omit<ReviewRecord, "accepted">): string | undefined {
   const key = reviewLedgerKey(candidate);
   return records.some((record) => record.accepted && reviewLedgerKey(record) === key)
-    ? "This exact revision, diff, scope, and risk boundary already has an accepted review."
+    ? "This exact revision, diff, and scope already has an accepted review. Reuse it instead of commissioning another rationale for the same patch."
     : undefined;
 }
 
