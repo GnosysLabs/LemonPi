@@ -2,6 +2,10 @@
 
 Policy v6 makes user-selected agent routing and budget-boundary result preservation runtime invariants.
 
+## Main Pi system prompt
+
+LemonPi injects a versioned Main Pi operating manual through `before_agent_start` on every Main Pi turn. Child processes identified by `PI_SUBAGENT_CHILD=1` never receive it. The manual is procedural rather than aspirational: it starts with the fast-path/read-only-child/dispatch decision, enumerates legal dispatch fields, explains immutable settings and runtime budgets, maps every terminal state to its required next action, distinguishes same-context resume from fresh `continuationOf`, and closes with integration, validation reuse, Git, recovery, and communication rules. This prevents each new task from rediscovering the orchestration flow through tool errors. The runtime still enforces every safety and routing boundary independently of model compliance.
+
 ## Authoritative launch bindings
 
 Fresh child runs resolve both model and thinking from the user-level `subagents.agentOverrides[agent]`. `lemonpi_dispatch` does not expose model, provider, thinking, reasoning, effort, or tier fields. Runtime preflight recursively rejects model or thinking fields on dispatch lanes and direct subagent spawns before any child exists. The configured provider/model must be authenticated and present in Pi's current model registry. Agent or repository `fallbackModels` are rejected before launch, so provider failure cannot silently substitute another model.

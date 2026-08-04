@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import {
+  MAIN_PI_OPERATING_MANUAL,
   authoritativeRuntimeWorkerState,
   appendCheckoutSnapshot,
   applyDelegationSafetyContracts,
   authoredWorkerSummaryIssue,
+  buildMainPiSystemPrompt,
   compileDelegationContracts,
   declaredExecutionMode,
   delegatesImplementation,
@@ -16,6 +18,7 @@ import {
   remainingPlanFromTodoResult,
   replayMissionState,
   restoredStatusAction,
+  shouldInjectMainPiOperatingManual,
   shouldSuppressStatusPoll,
   shouldWakeForPlanContinuation,
   subagentStatusDisposition,
@@ -208,5 +211,33 @@ assert.deepEqual(restored.activeRunWidths, { "run-a": 1, "run-b": 1 });
 
 assert.equal(isManagedWorktreePatchCommand({ command: "git apply --check .pi-subagents/artifacts/worktree-diffs/run.patch" }), true);
 assert.equal(isManagedWorktreePatchCommand({ command: "git apply /tmp/untrusted.patch" }), false);
+
+assert.match(MAIN_PI_OPERATING_MANUAL, /Follow this procedure from the beginning of every new user task/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /FAST PATH:[\s\S]*lemonpi_fast_path[\s\S]*one focused/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /lemonpi_fast_path\(\{ action: "start", cwd, paths, summary \}\)/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /lemonpi_validate\(\{ cwd, program, args, relevantPaths: paths, scope: "focused" \}\)/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /ONE READ-ONLY CHILD:[\s\S]*exactly one bounded read-only investigation/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /DISPATCH:[\s\S]*every implementation outside the fast path/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /subagent\(\{ action: "list" \}\)/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /Do not supply model, provider, thinking[\s\S]*usage budget[\s\S]*acceptance metadata/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /subagents\.agentOverrides\[agent\]\.model[\s\S]*\.thinking/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /subagent\(\{ action: "resume", id, message \}\)[\s\S]*Correction for previous slice:[\s\S]*Worker summary:/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /completed > partial > budget_exhausted > stopped > failed/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /partial[\s\S]*continuationOf[\s\S]*Do not repeat completed reads, edits, or validation/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /integrate_worker_result[\s\S]*exact terminal[\s\S]*artifactRunId/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /lemonpi_git\(\{ action: "integrate_worker_result", cwd, artifactRunId \}\)/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /Never call `subagent_wait`, sleep, or repeatedly poll status/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /same LemonPi tool contract fails twice[\s\S]*safe fallback/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /Never rerun an unchanged suite/);
+assert.doesNotMatch(MAIN_PI_OPERATING_MANUAL, /Create the whole known roadmap before|complete visible roadmap/);
+const injectedPrompt = buildMainPiSystemPrompt("BASE SYSTEM PROMPT", { runId: "run-attention", index: 2 });
+assert.match(injectedPrompt, /^BASE SYSTEM PROMPT/);
+assert.match(injectedPrompt, /lemonpi-authoritative-policy version="6"/);
+assert.match(injectedPrompt, /lemonpi-visible-narration/);
+assert.match(injectedPrompt, /lemonpi-main-pi-operating-manual version="1"/);
+assert.match(injectedPrompt, /Run run-attention child 2 needs intervention now/);
+assert.equal(shouldInjectMainPiOperatingManual({}), true);
+assert.equal(shouldInjectMainPiOperatingManual({ PI_SUBAGENT_CHILD: "0" }), true);
+assert.equal(shouldInjectMainPiOperatingManual({ PI_SUBAGENT_CHILD: "1" }), false);
 
 console.log("Narration orchestration contracts passed.");

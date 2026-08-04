@@ -2,6 +2,10 @@
 
 First-party Pi extension bundled with LemonPi. It supplies visible narration, a direct low-risk UI fast path, independent delegated-run scheduling for broader work, durable mission recovery, and direct steering/stop controls without patching `pi-subagents`.
 
+## Main Pi operating manual
+
+The `before_agent_start` hook injects a versioned operating manual into Main Pi's system prompt on every Main Pi turn, including the first turn of a new task and synthetic recovery wakes. `PI_SUBAGENT_CHILD=1` explicitly suppresses it in workers, so children receive their own role contract instead of supervisor instructions. The manual teaches the complete decision flow: fast path versus one read-only child versus independent dispatch, exact lane fields, settings-owned model/thinking and budgets, asynchronous handoff behavior, every terminal state's required next action, partial continuation, deterministic integration, validation reuse, Git boundaries, and the two-failure infrastructure fallback. Runtime enforcement remains authoritative when old conversation text conflicts with the manual.
+
 ## Direct UI fast path
 
 One-repository changes to one to five ordinary UI files run directly in Main Pi through `lemonpi_fast_path`. The runtime permits edits only to the declared paths and one focused `lemonpi_validate` check. This path has no worktree, delegation, roadmap gate, reviewer, wave check, or final holistic check. Eligible UI work is rejected by `lemonpi_dispatch` so the slower path cannot be selected accidentally.
@@ -24,7 +28,7 @@ Main Pi integrates each completed writer slice individually. `lemonpi_git integr
 
 ## Agent behavior
 
-Main Pi briefly maps the complete dependency graph, including later-step work whose inputs are already stable, then keeps the ready queue full as results arrive. It selects from the live built-in and custom agent roster by capability. Planners, designers, scouts, context builders, reviewers, and other specialists are used when their output changes a real decision; neither familiar-role monoculture nor artificial diversity is a goal.
+For work outside the fast path, Main Pi briefly maps the useful dependency graph and keeps the ready queue full as results arrive. It selects from the live built-in and custom agent roster by capability. Planners, designers, scouts, context builders, reviewers, and other specialists are used when their output changes a real decision; neither familiar-role monoculture nor artificial diversity is a goal.
 
 Delegated work uses one to three meaningful todo milestones for simple requests. A lane can declare `todoId`; LemonPi updates that item to in-progress when the worker starts, completed when it succeeds, and pending when it genuinely fails or is stopped. Partial and budget-exhausted work stays in progress with its handoff attached. Mission todo history is append-only: corrections supersede earlier items instead of deleting them. The lifecycle snapshot is persisted and restored without relying on the model to remember status updates.
 
