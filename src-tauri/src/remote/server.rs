@@ -16,6 +16,7 @@ use super::{
     identity::HostIdentity,
     policy::allows_peer,
     projects::{InternalProjectBinding, ProjectCatalog, RemoteProjectSummary, SessionSyncInput},
+    restrict_file_permissions,
     protocol::{
         Capability, Envelope, EventEnvelope as WireEventEnvelope, EventKind as WireEventKind,
         EventPayload, Health, Hello, Limits, MessagesResponse, PairRequest, PairResponse,
@@ -47,7 +48,9 @@ use rustls::{
 };
 use serde::Serialize;
 use std::{
+    fs::{self, OpenOptions},
     future::Future,
+    io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -163,10 +166,17 @@ enum RpcResourceError {
 
 struct RpcResource {
     project: InternalProjectBinding,
-    session_path: PathBuf,
+    session_path: Option<PathBuf>,
+}
+
+/// Server-private evidence that this request created the session file. It is never serialized.
+struct CreatedPiSession {
+    path: PathBuf,
+    command_path: String,
 }
 
 enum ValidatedRpcCommand {
+    NewSession,
     Prompt(String),
     Abort,
     SwitchSession,
@@ -797,10 +807,7 @@ async fn events(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     uri: Uri,
-    websocket: Result<
-        WebSocketUpgrade,
-        axum::extract::ws::rejection::WebSocketUpgradeRejection,
-    >,
+    websocket: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Response {
     let context = match validate_request(&headers, peer, state.config.access_mode) {
         Ok(context) => context,
@@ -1072,9 +1079,7 @@ fn project_wire_event(
                 WireEventKind::ProcessEvent,
                 project_process_payload(&event.payload)?,
             ),
-            InternalEventKind::Gap => {
-                (WireEventKind::Gap, project_gap_payload(&event.payload)?)
-            }
+            InternalEventKind::Gap => (WireEventKind::Gap, project_gap_payload(&event.payload)?),
             InternalEventKind::Truncated => (
                 WireEventKind::Truncated,
                 project_truncated_payload(&event.payload)?,
@@ -1096,7 +1101,10 @@ fn project_wire_event(
     if bytes.len() <= EVENT_ENVELOPE_BYTES as usize {
         return Ok(Some(bytes));
     }
-    if !matches!(projected.kind, WireEventKind::PiEvent | WireEventKind::ProcessEvent) {
+    if !matches!(
+        projected.kind,
+        WireEventKind::PiEvent | WireEventKind::ProcessEvent
+    ) {
         return Ok(None);
     }
     let original_kind = match projected.kind {
@@ -1171,7 +1179,9 @@ fn collect_pi_id_secrets(payload: &serde_json::Value, secrets: &mut Vec<String>)
     ] {
         if let Some(value) = payload.pointer(pointer) {
             match value {
-                serde_json::Value::String(value) if !value.is_empty() => secrets.push(value.clone()),
+                serde_json::Value::String(value) if !value.is_empty() => {
+                    secrets.push(value.clone())
+                }
                 serde_json::Value::Number(value) => secrets.push(value.to_string()),
                 _ => {}
             }
@@ -1239,7 +1249,7 @@ fn project_pi_event(
         }
         "response" => {
             let command = match raw.get("command")?.as_str()? {
-                command @ ("prompt" | "abort" | "switch_session") => command,
+                command @ ("new_session" | "prompt" | "abort" | "switch_session") => command,
                 _ => return None,
             };
             let success = raw.get("success")?.as_bool()?;
@@ -1283,8 +1293,11 @@ fn project_safe_message(
         .get("isError")
         .and_then(serde_json::Value::as_bool)
         .or_else(|| {
-            (message.get("stopReason").and_then(serde_json::Value::as_str) == Some("error"))
-                .then_some(true)
+            (message
+                .get("stopReason")
+                .and_then(serde_json::Value::as_str)
+                == Some("error"))
+            .then_some(true)
         });
     let (tool_name, tool_status) = if role == "tool" {
         let name = message
@@ -1334,9 +1347,8 @@ fn safe_message_content(
                         }
                     }
                     Some("thinking") => {
-                        if let Some(value) = part
-                            .get("thinking")
-                            .and_then(serde_json::Value::as_str)
+                        if let Some(value) =
+                            part.get("thinking").and_then(serde_json::Value::as_str)
                         {
                             thinking.push(value);
                         }
@@ -1451,7 +1463,11 @@ fn project_process_payload(payload: &serde_json::Value) -> Option<EventPayload> 
     let mut projected = empty_event_payload();
     projected.state = Some(state.to_string());
     projected.exit_code = exit_code;
-    if state == "error" && payload.get("message").is_some_and(|message| !message.is_null()) {
+    if state == "error"
+        && payload
+            .get("message")
+            .is_some_and(|message| !message.is_null())
+    {
         projected.message = Some("The Pi process encountered an error.".to_string());
     }
     Some(projected)
@@ -1528,22 +1544,48 @@ async fn rpc(
         Ok(request) => request,
         Err(_) => return malformed_rpc_request(&context.request_id),
     };
-    let Some(session_id) = request.session_id.as_deref() else {
-        return malformed_rpc_request(&context.request_id);
-    };
-    if !valid_opaque_id(&request.project_id) || !valid_opaque_id(session_id) {
+    if !valid_opaque_id(&request.project_id) {
         return malformed_rpc_request(&context.request_id);
     }
-
+    let session_id = request.session_id.as_deref();
     let validated_command = match request.command_type.as_str() {
-        "prompt" => match exact_prompt_text(&request.payload) {
-            Some(text) => ValidatedRpcCommand::Prompt(text),
-            None => return malformed_rpc_request(&context.request_id),
-        },
-        "abort" if request.payload.is_empty() => ValidatedRpcCommand::Abort,
-        "abort" => return malformed_rpc_request(&context.request_id),
+        "new_session" => {
+            if request.session_id.is_some()
+                || rpc_request_includes_session_member(&body)
+                || !request.payload.is_empty()
+            {
+                return malformed_rpc_request(&context.request_id);
+            }
+            ValidatedRpcCommand::NewSession
+        }
+        "prompt" => {
+            let Some(session_id) = session_id else {
+                return malformed_rpc_request(&context.request_id);
+            };
+            if !valid_opaque_id(session_id) {
+                return malformed_rpc_request(&context.request_id);
+            }
+            match exact_prompt_text(&request.payload) {
+                Some(text) => ValidatedRpcCommand::Prompt(text),
+                None => return malformed_rpc_request(&context.request_id),
+            }
+        }
+        "abort" => {
+            let Some(session_id) = session_id else {
+                return malformed_rpc_request(&context.request_id);
+            };
+            if !valid_opaque_id(session_id) || !request.payload.is_empty() {
+                return malformed_rpc_request(&context.request_id);
+            }
+            ValidatedRpcCommand::Abort
+        }
         "switch_session" => {
-            if !exact_switch_session_payload(&request.payload, session_id) {
+            let Some(session_id) = session_id else {
+                return malformed_rpc_request(&context.request_id);
+            };
+            if !valid_opaque_id(session_id)
+                || !exact_switch_session_payload(&request.payload, session_id)
+            {
                 return malformed_rpc_request(&context.request_id);
             }
             ValidatedRpcCommand::SwitchSession
@@ -1561,9 +1603,9 @@ async fn rpc(
 
     let storage = state.storage.clone();
     let project_id = request.project_id.clone();
-    let requested_session_id = session_id.to_string();
+    let requested_session_id = request.session_id.clone();
     let resource = match tokio::task::spawn_blocking(move || {
-        rpc_resource(&storage, &project_id, &requested_session_id)
+        rpc_resource(&storage, &project_id, requested_session_id.as_deref())
     })
     .await
     {
@@ -1574,29 +1616,28 @@ async fn rpc(
         }
     };
 
+    let is_new_session = matches!(&validated_command, ValidatedRpcCommand::NewSession);
     let private_id = Uuid::new_v4().to_string();
     let command = match validated_command {
-        ValidatedRpcCommand::Prompt(text) => serde_json::json!({
+        ValidatedRpcCommand::NewSession => None,
+        ValidatedRpcCommand::Prompt(text) => Some(serde_json::json!({
             "type": "prompt",
             "id": private_id,
             "message": text,
-        }),
-        ValidatedRpcCommand::Abort => serde_json::json!({
+        })),
+        ValidatedRpcCommand::Abort => Some(serde_json::json!({
             "type": "abort",
             "id": private_id,
-        }),
+        })),
         ValidatedRpcCommand::SwitchSession => {
-            let Some(session_path) = resource.session_path.to_str() else {
-                return rpc_resource_error(
-                    &context.request_id,
-                    RpcResourceError::HostUnavailable,
-                );
+            let Some(session_path) = resource.session_path.as_deref().and_then(Path::to_str) else {
+                return rpc_resource_error(&context.request_id, RpcResourceError::HostUnavailable);
             };
-            serde_json::json!({
+            Some(serde_json::json!({
                 "type": "switch_session",
                 "id": private_id,
                 "sessionPath": session_path,
-            })
+            }))
         }
     };
 
@@ -1604,16 +1645,16 @@ async fn rpc(
     // across the asynchronous stdin write, and a replaced project/session cannot receive a command.
     let storage = state.storage.clone();
     let project_id = request.project_id.clone();
-    let requested_session_id = session_id.to_string();
+    let requested_session_id = request.session_id.clone();
     let expected_project = resource.project.path.clone();
     let expected_session = resource.session_path.clone();
     match tokio::task::spawn_blocking(move || {
         revalidate_rpc_resource(
             &storage,
             &project_id,
-            &requested_session_id,
+            requested_session_id.as_deref(),
             &expected_project,
-            &expected_session,
+            expected_session.as_deref(),
         )
     })
     .await
@@ -1625,17 +1666,55 @@ async fn rpc(
         }
     }
 
-    // Hold the bearer lease through the generation check, write, flush, and successful response.
-    // A local token revocation therefore cannot race a command accepted under stale authority.
+    // Hold the bearer lease through session-file creation, Pi stdin write/flush, and the accepted
+    // response. A local token revocation therefore cannot race a command accepted under stale
+    // authority.
     let Some(_authentication_lease) = authentication_lease(&headers, &state).await else {
         return unauthenticated(&context.request_id);
     };
+
+    let created_session = if is_new_session {
+        let storage = state.storage.clone();
+        let project_id = request.project_id.clone();
+        let expected_project = resource.project.path.clone();
+        match tokio::task::spawn_blocking(move || {
+            // Recheck the trusted catalogue binding in the same blocking operation that creates
+            // the file. The request has no path, name, or Pi-session identifier input.
+            revalidate_rpc_resource(&storage, &project_id, None, &expected_project, None)?;
+            create_empty_pi_v3_session(&expected_project)
+                .map_err(|_| RpcResourceError::HostUnavailable)
+        })
+        .await
+        {
+            Ok(Ok(created)) => Some(created),
+            Ok(Err(error_kind)) => return rpc_resource_error(&context.request_id, error_kind),
+            Err(_) => {
+                return rpc_resource_error(&context.request_id, RpcResourceError::HostUnavailable)
+            }
+        }
+    } else {
+        None
+    };
+
+    let command = match (command, created_session.as_ref()) {
+        (_, Some(created)) => serde_json::json!({
+            "type": "switch_session",
+            "id": private_id,
+            "sessionPath": created.command_path,
+        }),
+        (Some(command), None) => command,
+        (None, None) => return rpc_resource_error(&context.request_id, RpcResourceError::HostUnavailable),
+    };
+
     if state
         .manager
         .remote_submit(&resource.project.path, &command)
         .await
         .is_err()
     {
+        if let Some(created) = created_session {
+            let _ = tokio::task::spawn_blocking(move || remove_created_pi_session(&created)).await;
+        }
         return rpc_resource_error(&context.request_id, RpcResourceError::HostUnavailable);
     }
 
@@ -1665,8 +1744,17 @@ fn exact_switch_session_payload(
     expected_session_id: &str,
 ) -> bool {
     payload.len() == 1
-        && payload.get("sessionId").and_then(serde_json::Value::as_str)
-            == Some(expected_session_id)
+        && payload.get("sessionId").and_then(serde_json::Value::as_str) == Some(expected_session_id)
+}
+
+/// `Option<String>` cannot distinguish an omitted `sessionId` from JSON null. New-session is
+/// intentionally stricter: its session member must be absent, while unrelated future members stay
+/// serde-forward-compatible.
+fn rpc_request_includes_session_member(body: &[u8]) -> bool {
+    match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(serde_json::Value::Object(members)) => members.contains_key("sessionId"),
+        _ => true,
+    }
 }
 
 fn malformed_rpc_request(request_id: &str) -> Response {
@@ -1682,21 +1770,27 @@ fn malformed_rpc_request(request_id: &str) -> Response {
 fn rpc_resource(
     storage: &Path,
     project_id: &str,
-    session_id: &str,
+    session_id: Option<&str>,
 ) -> Result<RpcResource, RpcResourceError> {
-    let catalog = ProjectCatalog::load_or_create(storage)
-        .map_err(|_| RpcResourceError::HostUnavailable)?;
+    let catalog =
+        ProjectCatalog::load_or_create(storage).map_err(|_| RpcResourceError::HostUnavailable)?;
     let project = catalog
         .resolve_project_binding(project_id)
         .ok_or(RpcResourceError::ProjectNotFound)?;
     if !project.trusted {
         return Err(RpcResourceError::HostUnavailable);
     }
-    let directory =
-        session_directory(&project.path).map_err(|_| RpcResourceError::HostUnavailable)?;
-    let session_path = catalog
-        .resolve_session_path(project_id, session_id, &directory)
-        .ok_or(RpcResourceError::SessionNotFound)?;
+    let session_path = if let Some(session_id) = session_id {
+        let directory =
+            session_directory(&project.path).map_err(|_| RpcResourceError::HostUnavailable)?;
+        Some(
+            catalog
+                .resolve_session_path(project_id, session_id, &directory)
+                .ok_or(RpcResourceError::SessionNotFound)?,
+        )
+    } else {
+        None
+    };
     Ok(RpcResource {
         project,
         session_path,
@@ -1706,12 +1800,12 @@ fn rpc_resource(
 fn revalidate_rpc_resource(
     storage: &Path,
     project_id: &str,
-    session_id: &str,
+    session_id: Option<&str>,
     expected_project: &Path,
-    expected_session: &Path,
+    expected_session: Option<&Path>,
 ) -> Result<(), RpcResourceError> {
-    let catalog = ProjectCatalog::load_or_create(storage)
-        .map_err(|_| RpcResourceError::HostUnavailable)?;
+    let catalog =
+        ProjectCatalog::load_or_create(storage).map_err(|_| RpcResourceError::HostUnavailable)?;
     let project = catalog
         .resolve_project_binding(project_id)
         .ok_or(RpcResourceError::ProjectNotFound)?;
@@ -1721,15 +1815,22 @@ fn revalidate_rpc_resource(
     if project.path != expected_project {
         return Err(RpcResourceError::ProjectNotFound);
     }
-    let directory =
-        session_directory(&project.path).map_err(|_| RpcResourceError::HostUnavailable)?;
-    let session_path = catalog
-        .resolve_session_path(project_id, session_id, &directory)
-        .ok_or(RpcResourceError::SessionNotFound)?;
-    if session_path != expected_session {
-        return Err(RpcResourceError::SessionNotFound);
+    match (session_id, expected_session) {
+        (None, None) => Ok(()),
+        (Some(session_id), Some(expected_session)) => {
+            let directory =
+                session_directory(&project.path).map_err(|_| RpcResourceError::HostUnavailable)?;
+            let session_path = catalog
+                .resolve_session_path(project_id, session_id, &directory)
+                .ok_or(RpcResourceError::SessionNotFound)?;
+            if session_path.as_path() == expected_session {
+                Ok(())
+            } else {
+                Err(RpcResourceError::SessionNotFound)
+            }
+        }
+        _ => Err(RpcResourceError::HostUnavailable),
     }
-    Ok(())
 }
 
 fn rpc_resource_error(request_id: &str, kind: RpcResourceError) -> Response {
