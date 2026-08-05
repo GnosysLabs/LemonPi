@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CURRENT_ORCHESTRATION_POLICY_VERSION,
-  FINALIZATION_BLOCKED_TOOLS,
   checkpointBlocker,
   checkpointBlockersForSelection,
   classifyDirtyTree,
@@ -79,7 +79,7 @@ const migrated = parsedMissionState({
   updatedAt: Date.now(),
   suppressedRunIds: ["manual-stop-run"],
 });
-assert.equal(migrated?.version, 4);
+assert.equal(migrated?.version, 5);
 assert.equal(migrated?.policyVersion, CURRENT_ORCHESTRATION_POLICY_VERSION);
 assert.equal(migrated?.migratedFromPolicyVersion, 0);
 assert.deepEqual(migrated?.suppressedRunIds, ["manual-stop-run"]);
@@ -122,7 +122,7 @@ const terminalPartialMission = parsedMissionState({
   attempts: [{ runId: "partial-run", purpose: "Implement bounded UI", status: "partial", executionMode: "implementation", completedOrdinal: 1, sliceCount: 1, transcriptBytes: 1, tokens: 1 }],
 });
 assert.equal(terminalPartialMission?.attempts[0].status, "partial");
-assert.equal(terminalPartialMission?.outcomes[0].status, "pending");
+assert.equal(terminalPartialMission?.outcomes[0].status, "partial");
 const staleSummary = "Product decision: keep opaque IDs. Workflow rule: use one writer at a time.";
 const superseded = supersedeHistoricalPolicy(staleSummary);
 assert.match(superseded, /Product decision: keep opaque IDs/);
@@ -243,8 +243,6 @@ assert.match(resumeWorkerIssue({ run: { ...priorAttempt, transcriptBytes: 10_000
 assert.match(resumeWorkerIssue({ run: { ...priorAttempt, executionMode: "read-only" }, lastCompletedRunId: "run-1", purpose: "Apply patch", correction: true }), /wrong-execution-mode/);
 assert.deepEqual(workerContextLimits({ LEMONPI_WORKER_MAX_TRANSCRIPT_BYTES: "500000", LEMONPI_WORKER_MAX_TOKENS: "30000", LEMONPI_WORKER_MAX_SLICES: "1" }), {
   maxTranscriptBytes: 500_000,
-  maxTokens: 30_000,
-  maxSlices: 1,
 });
 const typedLegacyStatus = typedTargetStatusFromRunStatus({
   runId: "run-1",
@@ -321,30 +319,16 @@ assert.throws(() => workerStatusMetrics({ ...contaminatedFleetStatus, target: { 
 assert.equal(telemetryUpdateIssue({ telemetryObservedAt: 50_000 }, { observedAt: 49_000 }), "stale telemetry observation");
 assert.equal(telemetryUpdateIssue({ telemetrySequence: 10 }, { observedAt: 51_000, sequence: 9 }), "stale telemetry sequence");
 assert.equal(telemetryUpdateIssue({ telemetrySequence: 10 }, { observedAt: 51_000, sequence: 10 }), undefined);
-assert.deepEqual(workerExecutionBudget("scout", "read-only", {}), {
-  warning: { tokens: 48_000, turns: 8, toolCalls: 25, runtimeMs: 480_000 },
-  work: { tokens: 60_000, turns: 10, toolCalls: 30, runtimeMs: 600_000 },
-  finalization: { tokens: 6_000, turns: 2, runtimeMs: 120_000 },
-  hard: { tokens: 66_000, turns: 12, toolCalls: 30, runtimeMs: 720_000 },
-  spawn: {
-    timeoutMs: 720_000,
-    turnBudget: { maxTurns: 10, graceTurns: 2 },
-    toolBudget: { soft: 25, hard: 30, block: FINALIZATION_BLOCKED_TOOLS },
-    usageBudget: { tokens: { soft: 48_000, hard: 66_000 } },
-  },
-});
+const defaultLimitPolicy = workerExecutionBudget("scout", "read-only", {});
+assert.equal(defaultLimitPolicy.enabled, false);
+assert.equal(defaultLimitPolicy.source, "disabled-default");
+assert.deepEqual(defaultLimitPolicy.spawn, {});
+assert.equal(workerBudgetPhase({ tokens: 130_730, turns: 44, toolCalls: 46, elapsedMs: 20 * 60_000 }, defaultLimitPolicy).hardStopReason, undefined);
 
 const implementationBudget = workerExecutionBudget("worker", "implementation", {});
-const workerTotals = new Map([["run-a", 128_168], ["run-b", 39_319], ["run-c", 85_663], ["run-d", 61_547]]);
-const stoppedByBudget = [];
-for (const [runId, tokens] of workerTotals) {
-  const phase = workerBudgetPhase({ tokens, turns: 1, toolCalls: 1, elapsedMs: 1_000 }, implementationBudget);
-  if (phase.hardStopReason) stoppedByBudget.push(runId);
-}
-assert.deepEqual(stoppedByBudget, ["run-a"]);
-const finalizingAtBoundary = workerBudgetPhase({ tokens: implementationBudget.work.tokens, turns: 1, toolCalls: 1, elapsedMs: 1_000 }, implementationBudget);
-assert.equal(finalizingAtBoundary.phase, "finalizing");
-assert.equal(finalizingAtBoundary.hardStopReason, undefined);
+assert.equal(implementationBudget.enabled, false);
+assert.deepEqual(implementationBudget.spawn, {});
+assert.deepEqual(workerBudgetPhase({ tokens: 130_730, turns: 44, toolCalls: 46, elapsedMs: 60 * 60_000 }, implementationBudget), { phase: "work" });
 const finalizationAttempt = { finalizationInstructionSent: false };
 assert.equal(finalizationInstructionNeeded(finalizationAttempt, "finalizing"), true);
 finalizationAttempt.finalizationInstructionSent = true;
@@ -364,81 +348,60 @@ const bindingResolution = resolveAgentLaunchBinding({
   availableModels: ["openai/gpt-5.6"],
 });
 assert.ok(bindingResolution.binding);
-const boundAttempt = {
-  runId: "budget-run",
-  agent: "worker",
-  task: "Implement the bounded UI slice.\nDone when: unread dot renders.",
-  purpose: "Render unread dot",
-  status: "budget_exhausted",
-  executionMode: "implementation",
-  model: bindingResolution.binding.model,
-  provider: bindingResolution.binding.provider,
-  modelId: bindingResolution.binding.modelId,
-  thinking: bindingResolution.binding.thinking,
-  settingsSource: bindingResolution.binding.source,
-  settingsHash: bindingResolution.binding.settingsHash,
-  completedOrdinal: 1,
-  sliceCount: 1,
-  transcriptBytes: 10,
-  tokens: 128_168,
-  ownedPaths: ["src/ui/Inbox.tsx"],
-  preservedPatchPath: "/tmp/budget-run.patch",
-  primaryValidation: { program: "pnpm", args: ["test", "Inbox"] },
-  checkpoint: "Unread indicator renders",
-  stopProvenance: { cause: "budget", initiator: "lemonpi-budget-controller", reason: "token budget exhausted", requestedAt: 5_000 },
-};
-const partialHandoff = buildPartialWorkerHandoff({ attempt: boundAttempt, evidence: { output: "Unread component implemented; integration remains." }, stopReason: "token budget exhausted" });
-assert.ok(partialHandoff);
-assert.equal(partialHandoff.stop.cause, "budget");
-assert.equal(partialHandoff.currentDiff.patchPath, "/tmp/budget-run.patch");
-assert.equal(partialHandoff.continuationOf, "budget-run");
-assert.doesNotMatch(partialHandoff.continuationTask, /repeat discovery/i);
-assert.match(partialHandoff.continuationTask, /restore the preserved patch at \/tmp\/budget-run\.patch from the exact prior base/i);
-assert.equal(continuationIssue({ previous: boundAttempt, handoff: partialHandoff, priorFingerprints: [] }), undefined);
-assert.match(continuationIssue({ previous: { ...boundAttempt, continuationDepth: 2 }, handoff: partialHandoff, priorFingerprints: [] }), /limit reached/i);
-assert.match(continuationIssue({ previous: boundAttempt, handoff: partialHandoff, priorFingerprints: [partialHandoff.progressFingerprint] }), /no measurable progress/i);
-assert.deepEqual(immutableResumeBinding(boundAttempt), bindingResolution.binding);
-
 const continuationRepo = join(root, "continuation-repo");
 mkdirSync(join(continuationRepo, "src"), { recursive: true });
 git(root, "init", continuationRepo);
 git(continuationRepo, "config", "user.email", "lemonpi-tests@example.invalid");
 git(continuationRepo, "config", "user.name", "LemonPi Tests");
-writeFileSync(join(continuationRepo, "src", "Inbox.tsx"), "export const unread = false;\n");
+writeFileSync(join(continuationRepo, "src", "feature.js"), "export const feature = 'base';\n");
+writeFileSync(join(continuationRepo, "src", "registry.js"), "export const registry = [];\n");
+writeFileSync(join(continuationRepo, "package.json"), "{\"type\":\"module\"}\n");
+writeFileSync(join(continuationRepo, ".gitignore"), ".pi-subagents/\n");
 commitAll(continuationRepo, "base continuation fixture");
 const continuationBase = git(continuationRepo, "rev-parse", "HEAD");
+writeFileSync(join(continuationRepo, "user-notes.txt"), "pre-existing unrelated work\n");
+
+// Disabled limits allow a productive worker to cross the former thresholds,
+// receive a diagnostic, fix it, and validate in the same filesystem state.
+const unlimitedWorktree = join(root, "unlimited-worker");
+git(continuationRepo, "worktree", "add", "--detach", unlimitedWorktree, continuationBase);
+writeFileSync(join(unlimitedWorktree, "src", "feature.js"), "export const feature = { enabled: true };\n");
+writeFileSync(join(unlimitedWorktree, "src", "registry.js"), "import { feature } from './feature.js';\nexport const registry = [feature]\n");
+assert.equal(workerBudgetPhase({ tokens: 130_730, turns: 44, toolCalls: 46, elapsedMs: 20 * 60_000 }, implementationBudget).phase, "work");
+assert.equal(spawnSync(process.execPath, ["--input-type=module", "-e", "import('./src/registry.js')"], { cwd: unlimitedWorktree }).status, 0);
+git(continuationRepo, "worktree", "remove", "--force", unlimitedWorktree);
+
+// Explicit hard-limit variant: preserve a substantial multi-file patch in a
+// hidden checkpoint commit, then physically create continuation at that commit.
 const interruptedWorktree = join(root, "interrupted-worker");
 git(continuationRepo, "worktree", "add", "--detach", interruptedWorktree, continuationBase);
-writeFileSync(join(interruptedWorktree, "src", "Inbox.tsx"), "export const unread = true; // preserved partial slice\n");
-const preservedPatch = join(root, "budget-run.patch");
-writeFileSync(preservedPatch, gitRaw(interruptedWorktree, "diff", "--binary", continuationBase, "--", "src/Inbox.tsx"));
+writeFileSync(join(interruptedWorktree, "src", "feature.js"), "export const feature = { enabled: true, unread: 3 };\n");
+writeFileSync(join(interruptedWorktree, "src", "registry.js"), "import { feature } from './feature.js';\nexport const registry = [feature\n");
+assert.notEqual(spawnSync(process.execPath, ["--input-type=module", "-e", "import('./src/registry.js')"], { cwd: interruptedWorktree }).status, 0);
+const preservedPatch = join(continuationRepo, ".pi-subagents", "artifacts", "worktree-diffs", "budget-run.patch");
+mkdirSync(join(continuationRepo, ".pi-subagents", "artifacts", "worktree-diffs"), { recursive: true });
+const patchBytes = gitRaw(interruptedWorktree, "diff", "--binary", continuationBase, "--", "src/feature.js", "src/registry.js");
+writeFileSync(preservedPatch, patchBytes);
+const patchDigest = createHash("sha256").update(patchBytes).digest("hex");
+git(interruptedWorktree, "add", "--", "src/feature.js", "src/registry.js");
+git(interruptedWorktree, "commit", "-m", "LemonPi checkpoint budget-run");
+const checkpointCommit = git(interruptedWorktree, "rev-parse", "HEAD");
+git(continuationRepo, "update-ref", "refs/lemonpi/checkpoints/budget-run", checkpointCommit);
+assert.equal(createHash("sha256").update(readFileSync(preservedPatch)).digest("hex"), patchDigest);
 git(continuationRepo, "worktree", "remove", "--force", interruptedWorktree);
-const resumedWorktree = join(root, "resumed-worker");
-git(continuationRepo, "worktree", "add", "--detach", resumedWorktree, continuationBase);
-git(resumedWorktree, "apply", "--3way", preservedPatch);
-assert.match(readFileSync(join(resumedWorktree, "src", "Inbox.tsx"), "utf8"), /preserved partial slice/);
-assert.equal(git(resumedWorktree, "diff", "--name-only", continuationBase), "src/Inbox.tsx");
-assert.equal(terminalOutcome({ reportedStatus: "stopped", budgetStopReason: "token budget exhausted", stopCause: "budget" }).status, "budget_exhausted");
-assert.equal(terminalOutcome({ reportedStatus: "stopped", stopCause: "user" }).status, "stopped");
-assert.equal(terminalOutcome({ reportedStatus: "stopped", stopCause: "user", evidence: { output: "Completed before stop", exitCode: 0 } }).status, "completed");
-assert.equal(terminalOutcome({ reportedStatus: "stopped", budgetStopReason: "token budget exhausted", stopCause: "budget", evidence: { output: "Completed bounded slice", exitCode: 0 } }).status, "completed");
 
-const simulatedFourWorkerMission = [...workerTotals].map(([runId, tokens]) => {
-  const budgetState = workerBudgetPhase({ tokens, turns: 1, toolCalls: 1, elapsedMs: 1_000 }, implementationBudget);
-  if (!budgetState.hardStopReason) return { runId, state: "running", tokens, stop: undefined };
-  const attempt = { ...boundAttempt, runId, tokens, stopProvenance: { ...boundAttempt.stopProvenance, reason: budgetState.hardStopReason } };
-  const handoff = buildPartialWorkerHandoff({ attempt, evidence: { patchPath: attempt.preservedPatchPath, output: "Bounded partial implementation preserved." }, stopReason: budgetState.hardStopReason });
-  return { runId, state: "budget_exhausted", tokens, stop: attempt.stopProvenance, handoff, continuationAllowed: continuationIssue({ previous: attempt, handoff, priorFingerprints: [] }) === undefined };
-});
-assert.deepEqual(simulatedFourWorkerMission.map(({ runId, state }) => [runId, state]), [
-  ["run-a", "budget_exhausted"],
-  ["run-b", "running"],
-  ["run-c", "running"],
-  ["run-d", "running"],
-]);
-assert.equal(simulatedFourWorkerMission[0].stop.cause, "budget");
-assert.equal(simulatedFourWorkerMission[0].continuationAllowed, true);
-assert.equal(JSON.stringify(simulatedFourWorkerMission).includes("stopped by user"), false);
+const resumedWorktree = join(root, "resumed-worker");
+git(continuationRepo, "worktree", "add", "--detach", resumedWorktree, checkpointCommit);
+assert.deepEqual(git(resumedWorktree, "diff", "--name-only", continuationBase, "HEAD").split("\n"), ["src/feature.js", "src/registry.js"]);
+assert.match(readFileSync(join(resumedWorktree, "src", "feature.js"), "utf8"), /unread: 3/);
+assert.notEqual(readFileSync(join(resumedWorktree, "src", "registry.js"), "utf8"), "export const registry = [];\n");
+writeFileSync(join(resumedWorktree, "src", "registry.js"), "import { feature } from './feature.js';\nexport const registry = [feature];\n");
+assert.equal(spawnSync(process.execPath, ["--input-type=module", "-e", "import('./src/registry.js')"], { cwd: resumedWorktree }).status, 0);
+commitAll(resumedWorktree, "fix: complete checkpoint continuation");
+const continuationFinalCommit = git(resumedWorktree, "rev-parse", "HEAD");
+assert.equal(git(resumedWorktree, "merge-base", "--is-ancestor", checkpointCommit, continuationFinalCommit), "");
+assert.equal(terminalOutcome({ reportedStatus: "stopped", budgetStopReason: "configured hard limit", stopCause: "optional_budget" }).status, "budget_exhausted");
+assert.equal(terminalOutcome({ reportedStatus: "stopped", stopCause: "user" }).status, "stopped");
 
 assert.doesNotThrow(() => validateSubagentRpcHandshake({
   version: 1,
@@ -481,7 +444,7 @@ assert.equal(reviewDeduplicationIssue([{ ...review, accepted: true }], { ...revi
 const validation = { repository: repo, baseRevision: review.revision, diffHash: "diff-1", executable: "/usr/local/bin/pnpm", args: ["test"], cwd: repo, environmentHash: "env-1", command: "pnpm test", relevantPaths: ["src/auth"], dependencyState: "deps-1", scope: "wave" };
 const validationRecord = { ...validation, passed: true, elapsedMs: 2_000 };
 assert.match(validationDeduplicationIssue([validationRecord], validation), /already passed/);
-assert.equal(validationDeduplicationIssue([validationRecord], { ...validation, scope: "final" }), undefined);
+assert.match(validationDeduplicationIssue([validationRecord], { ...validation, scope: "final" }), /already passed/);
 assert.equal(validationDeduplicationIssue([validationRecord], { ...validation, diffHash: "diff-2" }), undefined);
 assert.equal(validationDeduplicationIssue([validationRecord], { ...validation, executable: "C:/tools/pnpm.cmd" }), undefined);
 assert.equal(validationLaunchFailure(-1, "spawn pnpm ENOENT"), true);
@@ -527,6 +490,146 @@ writeFileSync(join(sourceOne, "src", "indicator.ts"), "export const indicator = 
 commitAll(sourceOne, "correct visible slice");
 writeFileSync(join(transactionRepo, "local-notes.txt"), "unrelated baseline change\n");
 
+const continuationHandoffPath = join(continuationRepo, ".pi-subagents", "artifacts", "lemonpi-handoffs", "mission-checkpoint", "budget-run.json");
+mkdirSync(join(continuationRepo, ".pi-subagents", "artifacts", "lemonpi-handoffs", "mission-checkpoint"), { recursive: true });
+const checkpointAttempt = {
+  runId: "budget-run",
+  agent: "worker",
+  originalObjective: "Complete the checkpoint feature",
+  originalTask: "Complete the two-file feature.\nDone when: registry imports the feature and validation passes.",
+  task: "Do not recursively embed this generated task.",
+  purpose: "Complete checkpoint feature",
+  status: "budget_exhausted",
+  executionMode: "implementation",
+  model: "openai/gpt-5.6",
+  provider: "openai",
+  modelId: "gpt-5.6",
+  thinking: "high",
+  settingsSource: "user-agent-override",
+  settingsHash: "fixture-settings",
+  completedOrdinal: 1,
+  sliceCount: 1,
+  transcriptBytes: 100,
+  tokens: 130_730,
+  repository: continuationRepo,
+  baseRevision: continuationBase,
+  ownedPaths: ["src/feature.js", "src/registry.js", "package.json"],
+  preservedPatchPath: preservedPatch,
+  checkpointRef: "refs/lemonpi/checkpoints/budget-run",
+  checkpointCommit,
+  checkpointBaseRevision: continuationBase,
+  checkpointPatchDigest: patchDigest,
+  checkpointChangedPaths: ["src/feature.js", "src/registry.js"],
+  primaryValidation: { program: process.execPath, args: ["--input-type=module", "-e", "import('./src/registry.js')"] },
+  checkpoint: "Feature files exist and focused validation is ready",
+  stopProvenance: { cause: "optional_budget", initiator: "fixture", reason: "explicit fixture hard limit", requestedAt: 1 },
+};
+const checkpointHandoff = buildPartialWorkerHandoff({ attempt: checkpointAttempt, evidence: { latestOutput: "Compiler diagnostic remains in registry.js" }, stopReason: "explicit fixture hard limit" });
+assert.ok(checkpointHandoff?.checkpoint);
+writeFileSync(continuationHandoffPath, `${JSON.stringify(checkpointHandoff, null, 2)}\n`);
+
+const continuationRpcListeners = new Map();
+let actualContinuationWorktree = "";
+let actualContinuationSpawn;
+let actualContinuationSpawnCount = 0;
+const continuationEvents = {
+  on(name, handler) {
+    const listeners = continuationRpcListeners.get(name) ?? new Set();
+    listeners.add(handler);
+    continuationRpcListeners.set(name, listeners);
+    return () => listeners.delete(handler);
+  },
+  emit(name, payload) {
+    if (name === "subagents:rpc:v1:request") {
+      const request = payload;
+      let data;
+      if (request.method === "ping") {
+        data = { version: 1, methods: ["ping", "status", "spawn", "steer", "stop"], capabilities: { processTerminalProof: { lifecycleArtifactVersion: 3 } } };
+      } else if (request.method === "spawn") {
+        actualContinuationSpawnCount += 1;
+        actualContinuationSpawn = structuredClone(request.params);
+        actualContinuationWorktree = request.params.cwd;
+        assert.equal(request.params.tasks[0].reads, false);
+        assert.equal(request.params.tasks[0].task.includes("context.md"), false);
+        assert.equal(request.params.tasks[0].task.includes("plan.md"), false);
+        assert.match(readFileSync(join(actualContinuationWorktree, "src", "feature.js"), "utf8"), /unread: 3/);
+        assert.match(readFileSync(join(actualContinuationWorktree, "src", "registry.js"), "utf8"), /registry = \[feature/);
+        assert.deepEqual(git(actualContinuationWorktree, "diff", "--name-only", continuationBase, "HEAD").split("\n"), ["src/feature.js", "src/registry.js"]);
+        data = { runId: "continuation-run" };
+      } else {
+        data = { protocolVersion: 2, target: { runId: request.params.id, state: "running", metrics: { totalTokens: 1, turns: 1, toolCalls: 1, runtimeMs: 1 }, terminal: false, observedAt: Date.now() } };
+      }
+      continuationEvents.emit(`subagents:rpc:v1:reply:${request.requestId}`, { version: 1, requestId: request.requestId, method: request.method, success: true, data });
+      return;
+    }
+    for (const handler of continuationRpcListeners.get(name) ?? []) handler(payload);
+  },
+};
+const continuationTools = new Map();
+const continuationHandlers = new Map();
+const continuationPi = {
+  registerTool(tool) { continuationTools.set(tool.name, tool); },
+  on(event, handler) { continuationHandlers.set(event, handler); },
+  appendEntry() {},
+  sendMessage() {},
+  events: continuationEvents,
+  async exec(program, args, options = {}) {
+    const result = spawnSync(program, args, { cwd: options.cwd, encoding: "utf8", env: options.env ?? process.env, timeout: options.timeout });
+    return { code: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? result.error?.message ?? "" };
+  },
+};
+lemonPiNarration(continuationPi);
+const continuationBranch = [{ type: "custom", customType: "lemonpi-mission-state", data: {
+  version: 5,
+  policyVersion: CURRENT_ORCHESTRATION_POLICY_VERSION,
+  id: "mission-checkpoint",
+  phase: "integration",
+  request: "Complete the checkpoint feature",
+  activeRunIds: [],
+  writerActive: false,
+  wakeAttempts: 0,
+  updatedAt: Date.now(),
+  attempts: [{ ...checkpointAttempt, partialHandoffPath: continuationHandoffPath, progressFingerprint: checkpointHandoff.progressFingerprint, outcomeId: "checkpoint-outcome" }],
+  outcomes: [{ id: "checkpoint-outcome", subject: "Complete checkpoint feature", status: "partial", runIds: ["budget-run"], repository: continuationRepo, relevantPaths: checkpointAttempt.ownedPaths, updatedAt: Date.now() }],
+  validations: [],
+  reviews: [],
+  pendingContinuations: [{ priorRunId: "budget-run", handoffPath: continuationHandoffPath, outcomeId: "checkpoint-outcome", progressFingerprint: checkpointHandoff.progressFingerprint, scheduledAt: Date.now() }],
+} }];
+const continuationContext = {
+  cwd: continuationRepo,
+  sessionManager: { getBranch: () => continuationBranch, getSessionId: () => "checkpoint-session" },
+  modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt-5.6" }] },
+};
+continuationHandlers.get("session_start")?.({}, continuationContext);
+const actualContinuationLaunch = await continuationTools.get("lemonpi_dispatch").execute("actual-continuation", { lanes: [{
+  agent: "worker",
+  summary: "Finish checkpoint continuation",
+  task: "Only the unresolved compiler correction remains.",
+  cwd: continuationRepo,
+  executionMode: "implementation",
+  ownedPaths: checkpointAttempt.ownedPaths,
+  primaryValidation: checkpointAttempt.primaryValidation,
+  checkpoint: checkpointAttempt.checkpoint,
+  continuationOf: "budget-run",
+}] }, undefined, () => {}, continuationContext);
+assert.equal(actualContinuationLaunch.isError, undefined);
+assert.equal(actualContinuationLaunch.details.runs[0].runId, "continuation-run");
+assert.equal(actualContinuationSpawn.turnBudget, undefined);
+assert.equal(actualContinuationSpawn.toolBudget, undefined);
+assert.equal(actualContinuationSpawn.usageBudget, undefined);
+assert.equal(actualContinuationSpawn.timeoutMs, undefined);
+const expandedOwnership = await continuationTools.get("lemonpi_expand_ownership").execute("expand-continuation-test", {
+  runId: "continuation-run",
+  paths: ["src/feature.test.js"],
+  category: "direct-test",
+  reason: "The focused fixture test imports the new feature directly.",
+});
+assert.equal(expandedOwnership.isError, undefined);
+assert.deepEqual(expandedOwnership.details.paths, ["src/feature.test.js"]);
+assert.equal(actualContinuationSpawnCount, 1);
+await continuationHandlers.get("session_shutdown")?.();
+if (actualContinuationWorktree) git(continuationRepo, "worktree", "remove", "--force", actualContinuationWorktree);
+
 const registeredTools = new Map();
 const extensionHandlers = new Map();
 const sentMessages = [];
@@ -558,6 +661,20 @@ const fakePi = {
 lemonPiNarration(fakePi);
 const gitTool = registeredTools.get("lemonpi_git");
 assert.ok(gitTool);
+const continuationIntegration = await gitTool.execute("checkpoint-continuation-integration", {
+  action: "integrate_worktree",
+  cwd: continuationRepo,
+  worktreePath: resumedWorktree,
+  paths: ["src/feature.js", "src/registry.js"],
+  message: "integrate validated checkpoint continuation",
+}, undefined, undefined, { cwd: continuationRepo });
+assert.equal(continuationIntegration.isError, undefined);
+assert.match(readFileSync(join(continuationRepo, "src", "feature.js"), "utf8"), /unread: 3/);
+assert.match(readFileSync(join(continuationRepo, "src", "registry.js"), "utf8"), /\[feature\];/);
+assert.equal(git(continuationRepo, "status", "--porcelain=v1"), "?? user-notes.txt");
+assert.equal(git(continuationRepo, "log", "--format=%s", "--all").split("\n").filter((subject) => subject === "integrate validated checkpoint continuation").length, 1);
+rmSync(join(continuationRepo, "user-notes.txt"));
+assert.equal(git(continuationRepo, "status", "--porcelain=v1"), "");
 const integrationResult = await gitTool.execute("transaction-success", {
   action: "integrate_worktree",
   cwd: transactionRepo,
@@ -751,20 +868,11 @@ assert.ok(currentMetrics.integrationCommits > 0);
 writeFileSync(join(repo, "logical.txt"), `${contentHash(JSON.stringify(currentMetrics))}\n`);
 commitAll(repo, "feat: logical final integration");
 assert.equal(git(repo, "status", "--porcelain=v1"), "");
-const narrationSource = readFileSync(new URL("../src-tauri/resources/lemonpi-narration/extensions/narration.ts", import.meta.url), "utf8");
-assert.doesNotMatch(narrationSource, /git\s+reset\s+--hard|git\s+clean\s+-|force-push/);
-assert.match(narrationSource, /Refusing to commit.*classified as/);
-assert.doesNotMatch(narrationSource, /branches must use codex|Recovery branches must use codex/i);
-assert.match(narrationSource, /subagentOnlyExtensions = \[FINALIZATION_GUARD_PATH\]/);
-assert.match(narrationSource, /worktree", "add", "--detach", continuationWorktree/);
-assert.match(narrationSource, /"apply", "--3way", canonicalPatch/);
-assert.match(narrationSource, /Continue from the existing diff; do not recreate completed work/);
-const hardStopBlock = narrationSource.slice(narrationSource.indexOf("if (!state.hardStopReason) return"), narrationSource.indexOf("const recordTerminalAttempt"));
-assert.ok(hardStopBlock.indexOf("preserveAttemptPatch") < hardStopBlock.indexOf("requestSubagentStop"));
-
 console.log(JSON.stringify({
   policyVersion: CURRENT_ORCHESTRATION_POLICY_VERSION,
-  scenarios: 29,
+  scenarios: 31,
+  physicalCheckpointContinuation: true,
+  sourceRegexAssertions: 0,
   oldPolicy: oldMetrics,
   currentPolicy: currentMetrics,
   deltas: {

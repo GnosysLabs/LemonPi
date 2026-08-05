@@ -1,4 +1,4 @@
-export const CURRENT_ORCHESTRATION_POLICY_VERSION = 9;
+export const CURRENT_ORCHESTRATION_POLICY_VERSION = 10;
 
 export const ORCHESTRATION_POLICY_NOTICE = `<lemonpi-authoritative-policy version="${CURRENT_ORCHESTRATION_POLICY_VERSION}">
 The installed LemonPi orchestration policy is authoritative. Historical summaries preserve product facts and user decisions only. Any older scheduling, review, validation, model-routing, context-reuse, or Git instruction is superseded. Main Pi directly handles low-risk one-repository UI slices; only broader work uses independent delegated lanes. Main Pi owns safe local Git integration and exact validation reuse.
@@ -121,7 +121,7 @@ export const SUBAGENT_RPC_PROTOCOL_VERSION = 1;
 export const SUBAGENT_LIFECYCLE_ARTIFACT_VERSION = 3;
 export const REQUIRED_SUBAGENT_RPC_METHODS = ["ping", "status", "spawn", "steer", "stop"] as const;
 
-export type WorkerStopCause = "user" | "budget" | "runtime_shutdown" | "superseded" | "main_agent" | "operator" | "dependency_failure" | "unknown";
+export type WorkerStopCause = "user" | "user_shutdown" | "optional_budget" | "inactivity_watchdog" | "process_crash" | "application_shutdown" | "superseded" | "dependency_failure" | "unknown";
 
 export interface WorkerStopProvenance {
   cause: WorkerStopCause;
@@ -283,8 +283,9 @@ export function resolveAgentLaunchBinding(input: {
 export function launchOverridePath(value: unknown, path = "subagent"): string | undefined {
   const record = objectRecord(value);
   if (!record) return undefined;
-  if (Object.hasOwn(record, "model")) return `${path}.model`;
-  if (Object.hasOwn(record, "thinking")) return `${path}.thinking`;
+  for (const field of ["model", "provider", "thinking", "reasoning", "effort", "timeoutMs", "maxRuntimeMs", "turnBudget", "toolBudget", "usageBudget", "limitPolicy", "limits"] as const) {
+    if (Object.hasOwn(record, field)) return `${path}.${field}`;
+  }
   for (const key of ["lanes", "tasks", "chain", "parallel"] as const) {
     const nested = record[key];
     if (Array.isArray(nested)) {
@@ -343,6 +344,8 @@ export interface WorkerAttempt {
   launchId?: string;
   agent?: string;
   task?: string;
+  originalObjective?: string;
+  originalTask?: string;
   purpose: string;
   status: "running" | "completed" | "partial" | "budget_exhausted" | "failed" | "stopped";
   executionMode: ExecutionMode;
@@ -361,20 +364,42 @@ export interface WorkerAttempt {
   startedAt?: number;
   elapsedMs?: number;
   activityState?: string;
+  currentTool?: string;
+  currentPath?: string;
   budgetStopReason?: string;
   budgetPhase?: "work" | "warning" | "finalizing";
   budgetWarningSent?: boolean;
+  limitPolicy?: WorkerLimitPolicy;
+  hardLimitPending?: boolean;
+  hardLimitBoundaryToolCount?: number;
   finalizationInstructionSent?: boolean;
   finalizationMarkerPath?: string;
   preservedPatchPath?: string;
   stopProvenance?: WorkerStopProvenance;
   telemetryObservedAt?: number;
   telemetrySequence?: number;
+  lastHealthCheckAt?: number;
+  healthCheckFailures?: number;
+  lastMeaningfulProgressAt?: number;
+  lastProgressFingerprint?: string;
+  repeatedProgressFingerprint?: number;
+  progressNudgeCount?: number;
   continuationOf?: string;
   continuationDepth?: number;
   progressFingerprint?: string;
   primaryValidation?: PrimaryValidationTarget;
   checkpoint?: string;
+  checkpointRef?: string;
+  checkpointCommit?: string;
+  checkpointPatchDigest?: string;
+  checkpointBaseRevision?: string;
+  checkpointChangedPaths?: string[];
+  checkpointCreatedAt?: number;
+  checkpointArchivedAt?: number;
+  latestDiagnostics?: string[];
+  completedConditions?: string[];
+  unresolvedConditions?: string[];
+  ownershipExpansions?: Array<{ paths: string[]; reason: string; category: OwnershipExpansionCategory; expandedAt: number }>;
   terminalCommittedAt?: number;
   usableOutput?: boolean;
   partialHandoffPath?: string;
@@ -383,8 +408,11 @@ export interface WorkerAttempt {
   todoId?: number;
   outcomeId?: string;
   worktreePath?: string;
+  runtimeDirectory?: string;
   repository?: string;
   baseRevision?: string;
+  /** Original user-branch base used to integrate a cumulative continuation chain. */
+  integrationBaseRevision?: string;
   ownedPaths?: string[];
   artifactPath?: string;
   handoffPath?: string;
@@ -393,17 +421,17 @@ export interface WorkerAttempt {
   cleanupPending?: boolean;
 }
 
-export interface WorkerExecutionBudget {
-  warning: { tokens: number; turns: number; toolCalls: number; runtimeMs: number };
-  work: { tokens: number; turns: number; toolCalls: number; runtimeMs: number };
-  finalization: { tokens: number; turns: number; runtimeMs: number };
-  hard: { tokens: number; turns: number; toolCalls: number; runtimeMs: number };
-  spawn: {
-    timeoutMs: number;
-    turnBudget: { maxTurns: number; graceTurns: number };
-    toolBudget: { soft: number; hard: number; block: string[] };
-    usageBudget: { tokens: { soft: number; hard: number } };
-  };
+export type WorkerHardLimitBehavior = "warn-only" | "checkpoint-and-pause" | "checkpoint-and-stop";
+
+export interface WorkerLimitPolicy {
+  enabled: boolean;
+  source: "disabled-default" | "user-settings";
+  behavior: WorkerHardLimitBehavior;
+  warning: { tokens?: number; turns?: number; toolCalls?: number; runtimeMs?: number };
+  hard: { tokens?: number; turns?: number; toolCalls?: number; runtimeMs?: number };
+  settingsHash: string;
+  /** Native package budgets stay empty. LemonPi supervises optional limits at safe tool boundaries. */
+  spawn: Record<string, never>;
 }
 
 export interface PrimaryValidationTarget {
@@ -412,85 +440,81 @@ export interface PrimaryValidationTarget {
   cwd?: string;
 }
 
-export const FINALIZATION_BLOCKED_TOOLS = [
-  "grep", "find", "ls", "glob", "search", "web_search", "fetch", "fetch_content",
-  "browser", "subagent", "subagent_wait", "todo", "edit", "write", "apply_patch", "patch",
-  "write_file", "edit_file", "create_file", "delete_file", "move_file",
-] as const;
-
 export function workerExecutionBudget(
   agent: string,
-  mode: ExecutionMode,
+  _mode: ExecutionMode,
   userSettings: unknown,
-): WorkerExecutionBudget {
-  const defaults = mode === "implementation"
-    ? { tokens: 120_000, turns: 12, tools: 45, runtime: 15 * 60_000, finalTokens: 8_000, finalTurns: 2, finalRuntime: 2 * 60_000 }
-    : { tokens: 60_000, turns: 10, tools: 30, runtime: 10 * 60_000, finalTokens: 6_000, finalTurns: 2, finalRuntime: 2 * 60_000 };
+): WorkerLimitPolicy {
   const settings = objectRecord(userSettings) ?? {};
   const subagents = objectRecord(settings.subagents) ?? {};
-  const budgets = objectRecord(subagents.agentBudgets) ?? {};
-  const configured = objectRecord(budgets[agent]) ?? {};
-  const positiveInteger = (name: string, fallback: number) => {
+  const limits = objectRecord(subagents.agentLimits) ?? {};
+  const configured = objectRecord(limits[agent]) ?? {};
+  const positiveInteger = (name: string) => {
     const parsed = configured[name];
-    return typeof parsed === "number" && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+    return typeof parsed === "number" && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
   };
-  const work = {
-    tokens: positiveInteger("workMaxTokens", defaults.tokens),
-    turns: positiveInteger("workMaxTurns", defaults.turns),
-    toolCalls: positiveInteger("workMaxToolCalls", defaults.tools),
-    runtimeMs: positiveInteger("workMaxRuntimeMs", defaults.runtime),
-  };
-  const finalization = {
-    tokens: positiveInteger("finalizationTokens", defaults.finalTokens),
-    turns: positiveInteger("finalizationTurns", defaults.finalTurns),
-    runtimeMs: positiveInteger("finalizationRuntimeMs", defaults.finalRuntime),
-  };
+  const enabled = configured.enabled === true;
+  const behavior = configured.hardStopBehavior === "checkpoint-and-pause" || configured.hardStopBehavior === "checkpoint-and-stop"
+    ? configured.hardStopBehavior
+    : "warn-only";
   const warning = {
-    tokens: Math.min(work.tokens, positiveInteger("warningTokens", Math.floor(work.tokens * 0.8))),
-    turns: Math.min(work.turns, positiveInteger("warningTurns", Math.max(1, work.turns - 2))),
-    toolCalls: Math.min(work.toolCalls, positiveInteger("warningToolCalls", Math.max(1, work.toolCalls - 5))),
-    runtimeMs: Math.min(work.runtimeMs, positiveInteger("warningRuntimeMs", Math.floor(work.runtimeMs * 0.8))),
+    ...(positiveInteger("tokenWarning") !== undefined ? { tokens: positiveInteger("tokenWarning") } : {}),
+    ...(positiveInteger("turnWarning") !== undefined ? { turns: positiveInteger("turnWarning") } : {}),
+    ...(positiveInteger("toolWarning") !== undefined ? { toolCalls: positiveInteger("toolWarning") } : {}),
+    ...(positiveInteger("runtimeWarningMs") !== undefined ? { runtimeMs: positiveInteger("runtimeWarningMs") } : {}),
   };
   const hard = {
-    tokens: work.tokens + finalization.tokens,
-    turns: work.turns + finalization.turns,
-    toolCalls: work.toolCalls,
-    runtimeMs: work.runtimeMs + finalization.runtimeMs,
+    ...(positiveInteger("tokenHardStop") !== undefined ? { tokens: positiveInteger("tokenHardStop") } : {}),
+    ...(positiveInteger("turnHardStop") !== undefined ? { turns: positiveInteger("turnHardStop") } : {}),
+    ...(positiveInteger("toolHardStop") !== undefined ? { toolCalls: positiveInteger("toolHardStop") } : {}),
+    ...(positiveInteger("runtimeHardStopMs") !== undefined ? { runtimeMs: positiveInteger("runtimeHardStopMs") } : {}),
   };
   return {
-    warning,
-    work,
-    finalization,
-    hard,
-    spawn: {
-      timeoutMs: hard.runtimeMs,
-      turnBudget: { maxTurns: work.turns, graceTurns: finalization.turns },
-      toolBudget: { soft: warning.toolCalls, hard: work.toolCalls, block: [...FINALIZATION_BLOCKED_TOOLS] },
-      usageBudget: { tokens: { soft: warning.tokens, hard: hard.tokens } },
-    },
+    enabled,
+    source: enabled ? "user-settings" : "disabled-default",
+    behavior,
+    warning: enabled ? warning : {},
+    hard: enabled ? hard : {},
+    settingsHash: contentHash(JSON.stringify(stableValue({ agent, enabled, behavior, warning: enabled ? warning : {}, hard: enabled ? hard : {} }))),
+    spawn: {},
   };
 }
 
 export function workerBudgetPhase(
   metrics: { tokens: number; turns: number; toolCalls: number; elapsedMs: number },
-  budget: WorkerExecutionBudget,
+  budget: WorkerLimitPolicy,
 ): { phase: "work" | "warning" | "finalizing"; hardStopReason?: string } {
-  const hardStopReason = metrics.tokens >= budget.hard.tokens
-    ? `token budget exhausted (${metrics.tokens}/${budget.hard.tokens})`
-    : metrics.turns > budget.hard.turns
-      ? `turn budget exhausted (${metrics.turns}/${budget.work.turns}+${budget.finalization.turns} finalization)`
-      : metrics.elapsedMs >= budget.hard.runtimeMs
-        ? `wall-clock budget exhausted (${Math.round(metrics.elapsedMs / 1_000)}s/${Math.round(budget.hard.runtimeMs / 1_000)}s)`
-        : undefined;
-  const finalizing = metrics.tokens >= budget.work.tokens
-    || metrics.turns >= budget.work.turns
-    || metrics.toolCalls >= budget.work.toolCalls
-    || metrics.elapsedMs >= budget.work.runtimeMs;
-  const warning = metrics.tokens >= budget.warning.tokens
-    || metrics.turns >= budget.warning.turns
-    || metrics.toolCalls >= budget.warning.toolCalls
-    || metrics.elapsedMs >= budget.warning.runtimeMs;
-  return { phase: finalizing ? "finalizing" : warning ? "warning" : "work", ...(hardStopReason ? { hardStopReason } : {}) };
+  if (!budget.enabled) return { phase: "work" };
+  const crossed = (value: number, threshold: number | undefined) => threshold !== undefined && value >= threshold;
+  const hardStopReason = crossed(metrics.tokens, budget.hard.tokens)
+    ? `optional token hard stop reached (${metrics.tokens}/${budget.hard.tokens})`
+    : crossed(metrics.turns, budget.hard.turns)
+      ? `optional turn hard stop reached (${metrics.turns}/${budget.hard.turns})`
+      : crossed(metrics.toolCalls, budget.hard.toolCalls)
+        ? `optional tool hard stop reached (${metrics.toolCalls}/${budget.hard.toolCalls})`
+        : crossed(metrics.elapsedMs, budget.hard.runtimeMs)
+          ? `optional runtime hard stop reached (${Math.round(metrics.elapsedMs / 1_000)}s/${Math.round(budget.hard.runtimeMs! / 1_000)}s)`
+          : undefined;
+  const warning = crossed(metrics.tokens, budget.warning.tokens)
+    || crossed(metrics.turns, budget.warning.turns)
+    || crossed(metrics.toolCalls, budget.warning.toolCalls)
+    || crossed(metrics.elapsedMs, budget.warning.runtimeMs)
+    || Boolean(hardStopReason);
+  if (hardStopReason && budget.behavior !== "warn-only") return { phase: "finalizing", hardStopReason };
+  return { phase: warning ? "warning" : "work" };
+}
+
+export function hardLimitBoundaryDecision(input: {
+  policy: WorkerLimitPolicy;
+  hardStopReason?: string;
+  checkpointReady: boolean;
+  hardLimitPending: boolean;
+  currentTool?: string;
+}): "continue" | "checkpoint-and-finalize" | "wait-for-tool-boundary" | "stop-at-boundary" {
+  if (!input.policy.enabled || input.policy.behavior === "warn-only" || !input.hardStopReason) return "continue";
+  if (!input.checkpointReady || !input.hardLimitPending) return "checkpoint-and-finalize";
+  if (input.currentTool) return "wait-for-tool-boundary";
+  return "stop-at-boundary";
 }
 
 export function finalizationInstructionNeeded(
@@ -534,7 +558,8 @@ export function finalizationToolIssue(input: {
     if (/^git (?:status(?: --(?:short|porcelain(?:=v1)?))?|diff(?: --(?:cached|check|stat|name-only|binary))*|rev-parse HEAD)(?: |$)/.test(command)) return undefined;
     const validation = input.primaryValidation ? exactCommand(input.primaryValidation.program, input.primaryValidation.args) : "";
     if (validation && command === validation) return undefined;
-    return "Finalization permits only Git status/diff inspection or the lane's one declared validation command.";
+    if (/^(?:cargo fmt(?: --check)?|(?:pnpm|npm|yarn|bun) (?:run )?(?:format|fmt)(?: -- [A-Za-z0-9_./-]+)*|(?:npx )?prettier --write [A-Za-z0-9_./ -]+)$/.test(command)) return undefined;
+    return "Finalization permits only Git status/diff inspection, bounded formatting, or the lane's one declared validation command. LemonPi creates the durable checkpoint outside the child tool stream.";
   }
   return "LemonPi finalization-only mode blocks new exploration, scope expansion, delegation, and edits. Return the preserved result or handoff now.";
 }
@@ -622,13 +647,15 @@ export function terminalOutcome(input: {
   budgetStopReason?: string;
   stopCause?: WorkerStopCause;
 }): { status: WorkerTerminalStatus; usableOutput: boolean; summary: ReturnType<typeof terminalEvidenceSummary> } {
-  const summary = terminalEvidenceSummary(input.evidence);
+  const root = objectRecord(input.evidence);
+  const isolatedEvidence = root?.protocolVersion === 2 && objectRecord(root.target) ? root.target : input.evidence;
+  const summary = terminalEvidenceSummary(isolatedEvidence);
   const usableOutput = !summary.corrupt && Boolean(summary.usefulOutput || summary.hasStructuredOutput || summary.artifactPaths.length > 0);
   const budgetReached = Boolean(input.budgetStopReason) || summary.budgetReached;
   if (usableOutput && (input.reportedStatus === "completed" || summary.cleanExit)) return { status: "completed", usableOutput, summary };
-  if (input.stopCause === "user") return { status: usableOutput ? "partial" : "stopped", usableOutput, summary };
+  if (input.stopCause === "user" || input.stopCause === "user_shutdown") return { status: usableOutput ? "partial" : "stopped", usableOutput, summary };
   if (usableOutput) return { status: "partial", usableOutput, summary };
-  if (budgetReached) return { status: "budget_exhausted", usableOutput, summary };
+  if (input.stopCause === "optional_budget" || budgetReached) return { status: "budget_exhausted", usableOutput, summary };
   return { status: input.reportedStatus === "completed" ? "failed" : input.reportedStatus, usableOutput, summary };
 }
 
@@ -654,7 +681,7 @@ export function immutableResumeBinding(attempt: WorkerAttempt): AgentLaunchBindi
 }
 
 export interface PartialWorkerHandoff {
-  version: 2;
+  version: 3;
   originalObjective: string;
   originalTask: string;
   agent: string;
@@ -668,7 +695,16 @@ export interface PartialWorkerHandoff {
   ownedPaths: string[];
   completedWork: string[];
   unresolvedWork: string[];
-  currentDiff?: { patchPath: string };
+  checkpoint?: {
+    ref: string;
+    commit: string;
+    baseRevision: string;
+    patchPath: string;
+    patchDigest: string;
+    changedPaths: string[];
+  };
+  relevantChangedPaths: string[];
+  latestDiagnostics: string[];
   validations: Array<{ program: string; args: string[]; status: "not_run" | "passed" | "failed" }>;
   remainingRisks: string[];
   completedConditions: string[];
@@ -677,7 +713,7 @@ export interface PartialWorkerHandoff {
   stop: WorkerStopProvenance;
   continuationOf: string;
   progressFingerprint: string;
-  continuationTask: string;
+  exactNextAction: string;
   continuation: { priorRunId: string; mode: "fresh"; unresolvedOnly: true };
 }
 
@@ -689,11 +725,14 @@ export function buildPartialWorkerHandoff(input: {
   const attempt = input.attempt;
   if (!attempt.task || !attempt.agent || !attempt.model || !attempt.thinking || !attempt.settingsSource || !attempt.settingsHash) return undefined;
   const evidence = terminalEvidenceSummary(input.evidence);
-  const completedConditions = evidence.usefulOutput ? ["Preserve and verify the useful output captured below."] : [];
-  const declaredConditions = attempt.task.split(/\r?\n/).flatMap((line) => {
+  const originalTask = attempt.originalTask ?? attempt.task;
+  const completedConditions = attempt.completedConditions?.length
+    ? attempt.completedConditions
+    : evidence.usefulOutput ? ["Preserve and verify the useful output captured below."] : [];
+  const declaredConditions = (attempt.unresolvedConditions?.length ? attempt.unresolvedConditions : originalTask.split(/\r?\n/).flatMap((line) => {
     const match = /^\s*(?:done when|completion condition|acceptance condition)\s*:\s*(.+)$/i.exec(line);
     return match?.[1]?.trim() ? [match[1].trim()] : [];
-  });
+  }));
   const unresolvedConditions = declaredConditions.length > 0
     ? declaredConditions
     : [`Complete only the unresolved scope from the original task after '${input.stopReason}'.`];
@@ -701,7 +740,7 @@ export function buildPartialWorkerHandoff(input: {
   const completedWork = evidence.usefulOutput ? [evidence.usefulOutput] : artifacts.length > 0 ? ["A durable implementation patch was preserved."] : [];
   const unresolvedWork = [...unresolvedConditions];
   const stop = attempt.stopProvenance ?? {
-    cause: attempt.budgetStopReason ? "budget" : "unknown",
+    cause: attempt.budgetStopReason ? "optional_budget" : "unknown",
     initiator: "lemonpi-runtime",
     initiatingRunId: attempt.runId,
     reason: input.stopReason,
@@ -709,14 +748,30 @@ export function buildPartialWorkerHandoff(input: {
   } satisfies WorkerStopProvenance;
   const progressFingerprint = contentHash(JSON.stringify({
     completedWork,
-    artifacts,
+    checkpoint: attempt.checkpointCommit ?? attempt.checkpointPatchDigest,
     ownedPaths: attempt.ownedPaths ?? [],
     unresolvedWork,
+    diagnostics: attempt.latestDiagnostics ?? [],
   }));
+  const checkpoint = attempt.checkpointRef
+    && attempt.checkpointCommit
+    && attempt.checkpointBaseRevision
+    && attempt.preservedPatchPath
+    && attempt.checkpointPatchDigest
+    ? {
+      ref: attempt.checkpointRef,
+      commit: attempt.checkpointCommit,
+      baseRevision: attempt.checkpointBaseRevision,
+      patchPath: attempt.preservedPatchPath,
+      patchDigest: attempt.checkpointPatchDigest,
+      changedPaths: [...(attempt.checkpointChangedPaths ?? attempt.ownedPaths ?? [])],
+    }
+    : undefined;
+  const exactNextAction = unresolvedConditions[0] ?? "Run the declared focused validation and return the final result.";
   return {
-    version: 2,
-    originalObjective: attempt.purpose,
-    originalTask: attempt.task,
+    version: 3,
+    originalObjective: attempt.originalObjective ?? attempt.purpose,
+    originalTask,
     agent: attempt.agent,
     model: attempt.model,
     thinking: attempt.thinking,
@@ -728,7 +783,9 @@ export function buildPartialWorkerHandoff(input: {
     ownedPaths: [...(attempt.ownedPaths ?? [])],
     completedWork,
     unresolvedWork,
-    ...(attempt.preservedPatchPath ? { currentDiff: { patchPath: attempt.preservedPatchPath } } : {}),
+    ...(checkpoint ? { checkpoint } : {}),
+    relevantChangedPaths: [...(attempt.checkpointChangedPaths ?? attempt.ownedPaths ?? [])],
+    latestDiagnostics: [...(attempt.latestDiagnostics ?? [])].slice(-8),
     validations: attempt.primaryValidation
       ? [{ ...attempt.primaryValidation, status: "not_run" }]
       : [],
@@ -739,22 +796,31 @@ export function buildPartialWorkerHandoff(input: {
     stop,
     continuationOf: attempt.runId,
     progressFingerprint,
-    continuationTask: `Continue only the unresolved portion of this task. Do not repeat completed investigation or overwrite preserved artifacts.${attempt.preservedPatchPath ? ` LemonPi must restore the preserved patch at ${attempt.preservedPatchPath} from the exact prior base before work resumes.` : ""}\n\nOriginal task:\n${attempt.task}\n\nPreserved findings:\n${evidence.usefulOutput ?? "No reliable final output was returned before the limit."}\n\nUnresolved condition:\n${unresolvedConditions[0]}`,
+    exactNextAction,
     continuation: { priorRunId: attempt.runId, mode: "fresh", unresolvedOnly: true },
   };
+}
+
+export function renderContinuationPrompt(handoff: PartialWorkerHandoff): string {
+  const bounded = (values: string[], fallback: string) => (values.length ? values : [fallback])
+    .slice(-8)
+    .map((value) => `- ${value.replace(/\s+/g, " ").trim().slice(0, 500)}`)
+    .join("\n");
+  const checkpoint = handoff.checkpoint
+    ? `Checkpoint already materialized before launch: ${handoff.checkpoint.ref} at ${handoff.checkpoint.commit}.\nOriginal base: ${handoff.checkpoint.baseRevision}.\nChanged paths:\n${bounded(handoff.checkpoint.changedPaths, "No changed paths recorded")}`
+    : "No filesystem checkpoint was available; do not recreate completed implementation without escalating.";
+  return `Continue run ${handoff.continuationOf} from its verified filesystem checkpoint. Work only on unresolved conditions; do not repeat repository discovery or embed another continuation task.\n\nObjective:\n${handoff.originalObjective.slice(0, 1_000)}\n\nCompleted conditions:\n${bounded(handoff.completedConditions, "No completed condition was claimed")}\n\nUnresolved conditions:\n${bounded(handoff.unresolvedConditions, "Return the validated final result")}\n\n${checkpoint}\n\nLatest diagnostics:\n${bounded(handoff.latestDiagnostics, "No compiler or validation diagnostic recorded")}\n\nValidations already recorded:\n${bounded(handoff.validations.map((validation) => `${validation.program} ${validation.args.join(" ")} — ${validation.status}`), "None")}\n\nExact next action:\n${handoff.exactNextAction.slice(0, 1_000)}`;
 }
 
 export function continuationIssue(input: {
   previous: WorkerAttempt;
   handoff: PartialWorkerHandoff;
-  maxDepth?: number;
   priorFingerprints?: string[];
 }): string | undefined {
-  const maxDepth = input.maxDepth ?? 2;
   if (input.previous.status !== "partial" && input.previous.status !== "budget_exhausted") return "Only partial or budget-exhausted work may continue automatically.";
-  if (input.previous.stopProvenance?.cause === "user") return "Explicitly user-stopped work must not continue automatically.";
-  if ((input.previous.continuationDepth ?? 0) >= maxDepth) return `Automatic continuation limit reached (${maxDepth}).`;
+  if (input.previous.stopProvenance?.cause === "user" || input.previous.stopProvenance?.cause === "user_shutdown") return "Explicitly user-stopped work must not continue automatically.";
   if (input.handoff.continuationOf !== input.previous.runId) return "Continuation handoff does not match the exact prior run.";
+  if (input.previous.executionMode === "implementation" && !input.handoff.checkpoint) return "Implementation continuation requires a verified filesystem checkpoint.";
   if (input.priorFingerprints?.includes(input.handoff.progressFingerprint)) return "Continuation made no measurable progress; another automatic retry is blocked.";
   return undefined;
 }
@@ -764,13 +830,11 @@ export interface ResumeRequest {
   lastCompletedRunId?: string;
   purpose: string;
   correction: boolean;
-  limits?: { maxTranscriptBytes?: number; maxTokens?: number; maxSlices?: number };
+  limits?: { maxTranscriptBytes?: number };
 }
 
 export function workerContextLimits(environment: Record<string, string | undefined> = {}): {
   maxTranscriptBytes: number;
-  maxTokens: number;
-  maxSlices: number;
 } {
   const positiveInteger = (name: string, fallback: number) => {
     const parsed = Number(environment[name]);
@@ -778,8 +842,6 @@ export function workerContextLimits(environment: Record<string, string | undefin
   };
   return {
     maxTranscriptBytes: positiveInteger("LEMONPI_WORKER_MAX_TRANSCRIPT_BYTES", 2_000_000),
-    maxTokens: positiveInteger("LEMONPI_WORKER_MAX_TOKENS", 120_000),
-    maxSlices: positiveInteger("LEMONPI_WORKER_MAX_SLICES", 2),
   };
 }
 
@@ -791,6 +853,10 @@ export interface WorkerStatusMetrics {
   startedAt?: number;
   elapsedMs: number;
   activityState?: string;
+  currentTool?: string;
+  currentPath?: string;
+  lastActivityAt?: number;
+  latestOutput?: string;
   terminal: boolean;
   transcriptPaths: string[];
   observedAt: number;
@@ -836,6 +902,12 @@ export function typedTargetStatusFromRunStatus(value: unknown, requestedRunId: s
       ...(typeof status.sequence === "number" ? { sequence: finite(status.sequence, "sequence") } : {}),
       ...(typeof status.sessionFile === "string" ? { sessionFile: status.sessionFile } : {}),
       ...(typeof status.activityState === "string" ? { activityState: status.activityState } : {}),
+      ...(typeof status.currentTool === "string" ? { currentTool: status.currentTool } : {}),
+      ...(typeof status.currentPath === "string" ? { currentPath: status.currentPath } : {}),
+      ...(typeof status.lastActivityAt === "number" ? { lastActivityAt: finite(status.lastActivityAt, "lastActivityAt") } : {}),
+      ...(Array.isArray(status.recentOutput)
+        ? { latestOutput: status.recentOutput.filter((entry): entry is string => typeof entry === "string").at(-1) }
+        : {}),
     },
   };
 }
@@ -902,6 +974,10 @@ export function workerStatusMetrics(value: unknown, requestedRunId: string, now 
     : typeof metrics.activityState === "string"
       ? metrics.activityState.trim().toLowerCase()
       : state;
+  const currentTool = typeof target.currentTool === "string" && target.currentTool.trim() ? target.currentTool.trim() : undefined;
+  const currentPath = typeof target.currentPath === "string" && target.currentPath.trim() ? target.currentPath.trim() : undefined;
+  const lastActivityAt = target.lastActivityAt === undefined ? undefined : finiteCount(target.lastActivityAt, "lastActivityAt");
+  const latestOutput = typeof target.latestOutput === "string" && target.latestOutput.trim() ? target.latestOutput.trim().slice(-2_000) : undefined;
   const terminal = typeof target.terminal === "boolean"
     ? target.terminal
     : /^(?:complete|completed|failed|rejected|stopped|cancelled|canceled|partial|budget_exhausted)$/.test(state);
@@ -918,6 +994,10 @@ export function workerStatusMetrics(value: unknown, requestedRunId: string, now 
     ...(startedAt !== undefined ? { startedAt } : {}),
     elapsedMs,
     activityState,
+    ...(currentTool ? { currentTool } : {}),
+    ...(currentPath ? { currentPath } : {}),
+    ...(lastActivityAt !== undefined ? { lastActivityAt } : {}),
+    ...(latestOutput ? { latestOutput } : {}),
     terminal,
     transcriptPaths: [...new Set(transcriptPaths)],
     observedAt,
@@ -934,6 +1014,68 @@ export function telemetryUpdateIssue(
   return undefined;
 }
 
+export interface WorkerProgressObservation {
+  diffFingerprint?: string;
+  inspectedEvidence?: string;
+  diagnostic?: string;
+  validation?: string;
+  checkpointCommit?: string;
+  currentTool?: string;
+  currentPath?: string;
+  lastActivityAt?: number;
+}
+
+export function workerProgressFingerprint(observation: WorkerProgressObservation): string {
+  return contentHash(JSON.stringify(stableValue({
+    diffFingerprint: observation.diffFingerprint,
+    inspectedEvidence: observation.inspectedEvidence,
+    diagnostic: observation.diagnostic,
+    validation: observation.validation,
+    checkpointCommit: observation.checkpointCommit,
+    currentTool: observation.currentTool,
+    currentPath: observation.currentPath,
+  })));
+}
+
+export function progressSupervisionDecision(input: {
+  now: number;
+  lastMeaningfulProgressAt?: number;
+  healthCheckFailures: number;
+  progressNudgeCount: number;
+  fingerprintChanged: boolean;
+}): "continue" | "nudge" | "checkpoint-and-escalate" | "health-check-escalation" {
+  if (input.fingerprintChanged || input.lastMeaningfulProgressAt === undefined) return "continue";
+  const inactiveMs = Math.max(0, input.now - input.lastMeaningfulProgressAt);
+  if (input.healthCheckFailures >= 3 && inactiveMs >= 2 * 60_000) return "health-check-escalation";
+  if (inactiveMs >= 20 * 60_000 && input.progressNudgeCount > 0) return "checkpoint-and-escalate";
+  if (inactiveMs >= 10 * 60_000 && input.progressNudgeCount === 0) return "nudge";
+  return "continue";
+}
+
+export type OwnershipExpansionCategory = "compiler-required" | "registration" | "lockfile" | "direct-test" | "formatting";
+
+export function ownershipExpansionIssue(input: {
+  runId: string;
+  currentPaths: string[];
+  requestedPaths: string[];
+  reason: string;
+  category: OwnershipExpansionCategory;
+  activeLanes: Array<{ runId: string; paths: string[] }>;
+}): string | undefined {
+  const requested = [...new Set(input.requestedPaths.map(normalizedOwnedPath).filter(Boolean))];
+  if (!input.reason.trim()) return "Ownership expansion requires a recorded mechanical reason.";
+  if (requested.length === 0) return "Ownership expansion requires at least one exact repository-relative path.";
+  if (requested.some((path) => path === "." || path.startsWith("../") || /[*?\[\]{}]/.test(path))) return "Ownership expansion accepts exact repository-relative paths only.";
+  const newPaths = requested.filter((path) => !input.currentPaths.map(normalizedOwnedPath).includes(path));
+  if (newPaths.length === 0) return "Every requested path is already owned by this lane.";
+  for (const lane of input.activeLanes) {
+    if (lane.runId === input.runId) continue;
+    const overlap = newPaths.find((path) => lane.paths.some((owned) => pathOverlap(path, normalizedOwnedPath(owned))));
+    if (overlap) return `Ownership expansion conflicts with active run ${lane.runId} at ${overlap}.`;
+  }
+  return undefined;
+}
+
 export function resumeWorkerIssue(input: ResumeRequest): string | undefined {
   const limits = { ...workerContextLimits(), ...input.limits };
   if (!input.correction) return "Completed workers may only resume for a bounded correction to their immediately preceding slice.";
@@ -942,8 +1084,6 @@ export function resumeWorkerIssue(input: ResumeRequest): string | undefined {
   if (input.run.emptyOutput || input.run.corrupted) return "Empty-output or corrupted sessions require a fresh smaller context.";
   if (input.run.executionMode !== "implementation") return "A wrong-execution-mode implementation attempt cannot be resumed.";
   if (input.run.transcriptBytes >= limits.maxTranscriptBytes) return "The worker transcript is too large; launch a fresh bounded worker.";
-  if (input.run.tokens >= limits.maxTokens) return "The worker token history is too large; launch a fresh bounded worker.";
-  if (input.run.sliceCount >= limits.maxSlices) return "The worker has reached its correction-slice limit; launch a fresh bounded worker.";
   if (!input.purpose.trim()) return "A resumed worker needs a fresh concrete purpose.";
   return undefined;
 }
@@ -1012,8 +1152,8 @@ export interface ValidationRecord {
 }
 
 export function validationLedgerKey(value: Omit<ValidationRecord, "passed" | "elapsedMs">): string {
-  const { repository, baseRevision, diffHash, executable, args, cwd, environmentHash, relevantPaths, dependencyState, scope } = value as ValidationRecord;
-  return contentHash(JSON.stringify({ repository, baseRevision, diffHash, executable, args, cwd, environmentHash, relevantPaths: [...relevantPaths].sort(), dependencyState, scope }));
+  const { repository, baseRevision, diffHash, executable, args, cwd, environmentHash, relevantPaths, dependencyState } = value as ValidationRecord;
+  return contentHash(JSON.stringify({ repository, baseRevision, diffHash, executable, args, cwd, environmentHash, relevantPaths: [...relevantPaths].sort(), dependencyState }));
 }
 
 export function validationDeduplicationIssue(records: ValidationRecord[], candidate: Omit<ValidationRecord, "passed" | "elapsedMs">): string | undefined {

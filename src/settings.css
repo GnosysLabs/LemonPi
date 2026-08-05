@@ -794,6 +794,41 @@
   line-height: 1.35;
 }
 
+.agent-limit-settings {
+  min-width: 0;
+  margin-top: 12px;
+  grid-column: 2 / -1;
+  border-top: 1px solid var(--matte-line);
+}
+
+.agent-limit-settings > summary {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--settings-muted);
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 620;
+  list-style: none;
+}
+.agent-limit-settings > summary::-webkit-details-marker { display: none; }
+.agent-limit-settings > summary::before { content: "+"; width: 14px; color: var(--settings-faint); font-family: var(--mono); }
+.agent-limit-settings[open] > summary::before { content: "−"; }
+.agent-limit-settings > summary > span { margin-right: auto; }
+.agent-limit-settings > summary > i { color: var(--settings-faint); font-style: normal; font-weight: 520; }
+.agent-limit-settings[open] > summary > i { color: var(--rail-accent); }
+
+.agent-limit-settings__body {
+  overflow: hidden;
+  margin: 0 0 4px 14px;
+  border: 1px solid var(--matte-line);
+  border-radius: 12px;
+  background: var(--bg-raised);
+}
+.agent-limit-settings__body .package-security-note { margin: 12px; }
+
 /* Loading, empty, and error states */
 
 .settings-loading {

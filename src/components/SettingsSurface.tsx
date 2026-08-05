@@ -556,6 +556,26 @@ function FieldList({
   return <>{fields.map((field) => <SettingRow field={field} snapshot={snapshot} busy={Boolean(saving[field.path])} onSave={onSave} key={field.path} />)}</>;
 }
 
+function agentLimitFields(agent: string): SettingField[] {
+  const root = `subagents.agentLimits.${agent}`;
+  return [
+    { path: `${root}.enabled`, label: "Optional limits", description: "Disabled by default. Only this all-project user setting can activate limits for the agent.", kind: "boolean", userOnly: true },
+    { path: `${root}.hardStopBehavior`, label: "Hard-stop behavior", description: "Warn only, or checkpoint before pausing or stopping at a completed tool boundary.", kind: "select", userOnly: true, options: [
+      { value: "warn-only", label: "Warn only" },
+      { value: "checkpoint-and-pause", label: "Checkpoint and pause" },
+      { value: "checkpoint-and-stop", label: "Checkpoint and stop" },
+    ] },
+    { path: `${root}.tokenWarning`, label: "Token / cost warning", description: "Optional cumulative billed-token warning. This is not model context size.", kind: "number", min: 1, userOnly: true },
+    { path: `${root}.tokenHardStop`, label: "Token hard stop", description: "Optional cumulative billed-token boundary.", kind: "number", min: 1, userOnly: true },
+    { path: `${root}.turnWarning`, label: "Turn warning", description: "Optional assistant-turn warning.", kind: "number", min: 1, userOnly: true },
+    { path: `${root}.turnHardStop`, label: "Turn hard stop", description: "Optional assistant-turn boundary.", kind: "number", min: 1, userOnly: true },
+    { path: `${root}.toolWarning`, label: "Tool warning", description: "Optional completed tool-call warning.", kind: "number", min: 1, userOnly: true },
+    { path: `${root}.toolHardStop`, label: "Tool hard stop", description: "Optional completed tool-call boundary; an active mutation or validation is never interrupted.", kind: "number", min: 1, userOnly: true },
+    { path: `${root}.runtimeWarningMs`, label: "Runtime warning (ms)", description: "Optional productive-runtime warning in milliseconds.", kind: "number", min: 1, userOnly: true },
+    { path: `${root}.runtimeHardStopMs`, label: "Runtime hard stop (ms)", description: "Optional productive-runtime boundary in milliseconds. Inactivity supervision remains separate.", kind: "number", min: 1, userOnly: true },
+  ];
+}
+
 const NAV_GROUPS: Array<{ label: string; items: Array<{ key: Section; icon: Icon; label: string }> }> = [
   {
     label: "Preferences",
@@ -859,7 +879,7 @@ export function SettingsSurface({
               </>
             )}
 
-            {!loading && !error && section === "agents" && agentSnapshot && (
+            {!loading && !error && section === "agents" && settings && agentSnapshot && (
               <>
                 <div className="settings-toolbar">
                   <label className="settings-search"><MagnifyingGlass size={14} aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search agents, models, or providers…" aria-label="Search agents" />{query && <button type="button" onClick={() => setQuery("")} aria-label="Clear search"><X size={12} /></button>}</label>
@@ -879,6 +899,8 @@ export function SettingsSurface({
                           const displayedThinking = agent.effectiveThinking ?? "Not configured — launch blocked";
                           const modelSaving = saving[`${agent.name}:model`]; const thinkingSaving = saving[`${agent.name}:thinking`];
                           const configuredModelMissing = agent.modelOverride && !models.some((model) => modelKey(model) === agent.modelOverride);
+                          const limitRoot = `subagents.agentLimits.${agent.name}`;
+                          const limitsEnabled = getPath(settings.settings, `${limitRoot}.enabled`) === true;
                           return (
                             <article className="agent-setting-row" data-live={activeAgents.has(agent.name) || undefined} data-shadowed={agent.shadowedByProject || undefined} key={agent.name}>
                               <span className="agent-setting-row__status" aria-hidden="true" />
@@ -908,6 +930,15 @@ export function SettingsSurface({
                                   onChange={(next) => void updateAgent(agent, "thinking", next)}
                                 />
                               </div>
+                              {scope === "user" && (
+                                <details className="agent-limit-settings">
+                                  <summary><span>Optional productivity limits</span><i>{limitsEnabled ? "Enabled" : "Disabled by default"}</i></summary>
+                                  <div className="agent-limit-settings__body">
+                                    <div className="package-security-note"><CheckCircle size={15} /><span>Prompts, repositories, skills, Main Pi, and workers cannot enable or lower these values. LemonPi records this user-owned policy before launch.</span></div>
+                                    <FieldList fields={agentLimitFields(agent.name)} snapshot={settings} saving={saving} onSave={saveSetting} />
+                                  </div>
+                                </details>
+                              )}
                               {rowErrors[agent.name] && <div className="agent-setting-row__error" role="alert">{rowErrors[agent.name]}</div>}
                             </article>
                           );

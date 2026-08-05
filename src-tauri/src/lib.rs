@@ -45,7 +45,60 @@ const SUBAGENT_PROMPT_MAX_CHARS: usize = 256 * 1024;
 const SUBAGENT_ACTIVITY_EVENTS: usize = 12;
 const MAX_SETTINGS_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_AGENT_FILE_BYTES: u64 = 256 * 1024;
-const LEMONPI_ORCHESTRATION_POLICY_VERSION: u32 = 9;
+const LEMONPI_ORCHESTRATION_POLICY_VERSION: u32 = 10;
+const PI_SUBAGENTS_COMPATIBILITY_VERSION: u32 = 1;
+const PI_SUBAGENTS_RPC_IMPORT_ORIGINAL: &str =
+    "import { resolveCurrentSessionId } from \"../shared/session-identity.ts\";";
+const PI_SUBAGENTS_RPC_IMPORT_PATCHED: &str = "import { resolveCurrentSessionId } from \"../shared/session-identity.ts\";\nimport { writeAtomicJson } from \"../shared/atomic-json.ts\"; // LemonPi compatibility v1";
+const PI_SUBAGENTS_RPC_STOP_ORIGINAL: &str = r#"	try {
+		deliverStopRequest({
+			asyncDir: location.asyncDir,
+			pid: status.pid,
+			kill: options.kill,
+			now: options.now,
+			source: "rpc-stop",
+		});
+"#;
+const PI_SUBAGENTS_RPC_STOP_PATCHED: &str = r#"	try {
+		const input = assertRecordParams(params, "stop");
+		const supportedCauses = new Set(["user", "user_shutdown", "optional_budget", "inactivity_watchdog", "process_crash", "application_shutdown", "superseded", "dependency_failure", "unknown"]);
+		if (input.cause !== undefined && (typeof input.cause !== "string" || !supportedCauses.has(input.cause))) {
+			throw new SubagentRpcError("invalid_params", "RPC stop cause is unsupported.");
+		}
+		const cause = typeof input.cause === "string" ? input.cause : "user";
+		const initiator = typeof input.initiator === "string" && input.initiator.trim() ? input.initiator.trim() : "pi-subagents-rpc";
+		const reason = typeof input.reason === "string" && input.reason.trim() ? input.reason.trim() : (cause === "user" ? "Explicit user stop request." : "No stop reason was supplied.");
+		const requestedAt = typeof input.requestedAt === "number" && Number.isFinite(input.requestedAt) ? input.requestedAt : (options.now?.() ?? Date.now());
+		const provenance = { version: 1, runId, cause, initiator, ...(typeof input.initiatingRunId === "string" ? { initiatingRunId: input.initiatingRunId } : {}), reason, requestedAt };
+		writeAtomicJson(path.join(location.asyncDir, "stop-provenance.json"), provenance);
+		deliverStopRequest({
+			asyncDir: location.asyncDir,
+			pid: status.pid,
+			kill: options.kill,
+			now: options.now,
+			source: `rpc-stop:${cause}`,
+		});
+"#;
+const PI_SUBAGENTS_RUNNER_MESSAGE_ORIGINAL: &str =
+    "\tconst stopMessage = \"Subagent stopped by user.\";";
+const PI_SUBAGENTS_RUNNER_MESSAGE_PATCHED: &str =
+    "\tlet stopMessage = \"Subagent stopped by user.\"; // LemonPi compatibility v1";
+const PI_SUBAGENTS_RUNNER_STOP_ORIGINAL: &str = r#"	const stopRunner = () => {
+		if (stopped || timedOut || interrupted || statusPayload.state !== "running") return;
+		stopped = true;
+"#;
+const PI_SUBAGENTS_RUNNER_STOP_PATCHED: &str = r#"	const stopRunner = () => {
+		if (stopped || timedOut || interrupted || statusPayload.state !== "running") return;
+		try {
+			const provenance = JSON.parse(fs.readFileSync(path.join(asyncDir, "stop-provenance.json"), "utf8")) as { runId?: unknown; cause?: unknown; initiator?: unknown; reason?: unknown; requestedAt?: unknown };
+			if (provenance.runId === id && typeof provenance.cause === "string" && typeof provenance.reason === "string") {
+				const initiator = typeof provenance.initiator === "string" ? provenance.initiator : "LemonPi";
+				stopMessage = `Worker stopped (${provenance.cause.replaceAll("_", " ")}, initiated by ${initiator}): ${provenance.reason}`;
+				(statusPayload as typeof statusPayload & { stopProvenance?: typeof provenance }).stopProvenance = provenance;
+			}
+		} catch { /* A package-native user stop has no LemonPi provenance sidecar. */ }
+		stopped = true;
+"#;
 
 #[derive(Default)]
 pub(crate) struct PiManager {
@@ -493,6 +546,83 @@ fn required_pi_package_installed(agent_dir: &Path, package: &RequiredPiPackage) 
         })
 }
 
+fn apply_exact_package_patch(path: &Path, replacements: &[(&str, &str)]) -> Result<(), String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
+    if metadata.len() > 4 * 1024 * 1024 {
+        return Err(format!(
+            "Refusing to patch unexpectedly large package file {}.",
+            path.display()
+        ));
+    }
+    let original = fs::read_to_string(path)
+        .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    let mut updated = original.clone();
+    for (before, after) in replacements {
+        if updated.contains(after) {
+            continue;
+        }
+        if updated.matches(before).count() != 1 {
+            return Err(format!(
+                "Pinned pi-subagents source no longer matches LemonPi compatibility v{} at {}.",
+                PI_SUBAGENTS_COMPATIBILITY_VERSION,
+                path.display()
+            ));
+        }
+        updated = updated.replacen(before, after, 1);
+    }
+    if updated == original {
+        return Ok(());
+    }
+    let temporary = path.with_extension("ts.lemonpi.tmp");
+    fs::write(&temporary, updated)
+        .map_err(|error| format!("Could not write {}: {error}", temporary.display()))?;
+    if path.exists() {
+        #[cfg(windows)]
+        fs::remove_file(path)
+            .map_err(|error| format!("Could not replace {}: {error}", path.display()))?;
+    }
+    fs::rename(&temporary, path)
+        .map_err(|error| format!("Could not replace {}: {error}", path.display()))
+}
+
+fn ensure_pi_subagents_compatibility(agent_dir: &Path) -> Result<(), String> {
+    let package = REQUIRED_PI_PACKAGES
+        .iter()
+        .find(|package| package.npm_name == "pi-subagents")
+        .expect("pi-subagents is a required package");
+    if !required_pi_package_installed(agent_dir, package) {
+        return Err("Cannot apply LemonPi's pi-subagents compatibility patch before the pinned package is installed.".to_string());
+    }
+    let root = agent_dir.join("npm/node_modules/pi-subagents/src");
+    apply_exact_package_patch(
+        &root.join("extension/rpc.ts"),
+        &[
+            (
+                PI_SUBAGENTS_RPC_IMPORT_ORIGINAL,
+                PI_SUBAGENTS_RPC_IMPORT_PATCHED,
+            ),
+            (
+                PI_SUBAGENTS_RPC_STOP_ORIGINAL,
+                PI_SUBAGENTS_RPC_STOP_PATCHED,
+            ),
+        ],
+    )?;
+    apply_exact_package_patch(
+        &root.join("runs/background/subagent-runner.ts"),
+        &[
+            (
+                PI_SUBAGENTS_RUNNER_MESSAGE_ORIGINAL,
+                PI_SUBAGENTS_RUNNER_MESSAGE_PATCHED,
+            ),
+            (
+                PI_SUBAGENTS_RUNNER_STOP_ORIGINAL,
+                PI_SUBAGENTS_RUNNER_STOP_PATCHED,
+            ),
+        ],
+    )
+}
+
 async fn ensure_required_pi_packages(executable: &PathBuf) -> Result<(), String> {
     let agent_dir = pi_agent_dir()?;
     let settings = read_settings_object(&agent_dir.join("settings.json"))?;
@@ -530,7 +660,7 @@ async fn ensure_required_pi_packages(executable: &PathBuf) -> Result<(), String>
             ));
         }
     }
-    Ok(())
+    ensure_pi_subagents_compatibility(&agent_dir)
 }
 
 async fn pi_version(executable: &PathBuf) -> Result<String, String> {
@@ -3665,6 +3795,58 @@ fn read_lemonpi_mission_attempts(session_file: &Path) -> HashMap<String, Value> 
     latest
 }
 
+fn replace_inaccurate_package_stop_message(status: &mut Value, provenance: &Value) {
+    let cause = provenance
+        .get("cause")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if cause == "user" {
+        return;
+    }
+    let initiator = provenance
+        .get("initiator")
+        .and_then(Value::as_str)
+        .unwrap_or("LemonPi");
+    let reason = provenance
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("No additional reason was recorded.");
+    let truthful = format!(
+        "Worker stopped ({}, initiated by {}): {}",
+        cause.replace('_', " "),
+        initiator,
+        reason
+    );
+
+    fn replace(value: &mut Value, truthful: &str) {
+        match value {
+            Value::String(text) if text.contains("Subagent stopped by user") => {
+                *text = truthful.to_string();
+            }
+            Value::Array(values) => {
+                for value in values {
+                    replace(value, truthful);
+                }
+            }
+            Value::Object(fields) => {
+                for (key, value) in fields {
+                    if key == "steps"
+                        || matches!(
+                            key.as_str(),
+                            "error" | "message" | "finalOutput" | "recentOutput"
+                        )
+                    {
+                        replace(value, truthful);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    replace(status, &truthful);
+}
+
 #[tauri::command]
 async fn get_subagent_runs(session_file: String) -> Result<Vec<Value>, String> {
     let lemonpi_attempts = read_lemonpi_mission_attempts(Path::new(&session_file));
@@ -3700,6 +3882,24 @@ async fn get_subagent_runs(session_file: String) -> Result<Vec<Value>, String> {
         };
         if status.get("sessionId").and_then(Value::as_str) != Some(session_file.as_str()) {
             continue;
+        }
+        if let Some(directory) = path.parent() {
+            let provenance_path = directory.join("stop-provenance.json");
+            if let Ok(contents) = fs::read_to_string(&provenance_path) {
+                if contents.len() <= 64 * 1024 {
+                    if let Ok(provenance) = serde_json::from_str::<Value>(&contents) {
+                        let same_run = provenance.get("runId").and_then(Value::as_str)
+                            == status.get("runId").and_then(Value::as_str);
+                        let valid_cause = provenance.get("cause").and_then(Value::as_str).is_some();
+                        if same_run && valid_cause {
+                            replace_inaccurate_package_stop_message(&mut status, &provenance);
+                            if let Some(fields) = status.as_object_mut() {
+                                fields.insert("stopProvenance".to_string(), provenance);
+                            }
+                        }
+                    }
+                }
+            }
         }
         // pi-subagents 0.40 can leave activityState latched at
         // `needs_attention` after the child has resumed. Reconcile the public
@@ -3773,7 +3973,14 @@ async fn get_subagent_runs(session_file: String) -> Result<Vec<Value>, String> {
                     "settingsHash",
                     "budgetPhase",
                     "budgetStopReason",
+                    "limitPolicy",
                     "partialHandoffPath",
+                    "checkpointRef",
+                    "checkpointCommit",
+                    "checkpointPatchDigest",
+                    "checkpointChangedPaths",
+                    "checkpointCreatedAt",
+                    "checkpointArchivedAt",
                     "stopProvenance",
                     "provider",
                     "modelId",
@@ -4049,6 +4256,49 @@ mod tests {
     }
 
     #[test]
+    fn pinned_pi_subagents_patch_is_reproducible_and_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        let package_dir = root.path().join("npm/node_modules/pi-subagents");
+        let rpc = package_dir.join("src/extension/rpc.ts");
+        let runner = package_dir.join("src/runs/background/subagent-runner.ts");
+        fs::create_dir_all(rpc.parent().unwrap()).unwrap();
+        fs::create_dir_all(runner.parent().unwrap()).unwrap();
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"pi-subagents","version":"0.40.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            &rpc,
+            format!(
+                "{}\nfunction stop() {{\n{}\t}}\n}}\n",
+                PI_SUBAGENTS_RPC_IMPORT_ORIGINAL, PI_SUBAGENTS_RPC_STOP_ORIGINAL
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &runner,
+            format!(
+                "function run() {{\n{}\n{}\t}};\n}}\n",
+                PI_SUBAGENTS_RUNNER_MESSAGE_ORIGINAL, PI_SUBAGENTS_RUNNER_STOP_ORIGINAL
+            ),
+        )
+        .unwrap();
+
+        ensure_pi_subagents_compatibility(root.path()).unwrap();
+        let first_rpc = fs::read_to_string(&rpc).unwrap();
+        let first_runner = fs::read_to_string(&runner).unwrap();
+        assert!(first_rpc.contains("LemonPi compatibility v1"));
+        assert!(first_rpc.contains("stop-provenance.json"));
+        assert!(first_runner.contains("LemonPi compatibility v1"));
+        assert!(first_runner.contains("statusPayload as typeof statusPayload"));
+
+        ensure_pi_subagents_compatibility(root.path()).unwrap();
+        assert_eq!(fs::read_to_string(&rpc).unwrap(), first_rpc);
+        assert_eq!(fs::read_to_string(&runner).unwrap(), first_runner);
+    }
+
+    #[test]
     fn attention_episode_recovers_only_after_new_child_work() {
         let waiting = r#"{"type":"subagent.control","event":{"to":"needs_attention","ts":100,"index":0}}
 {"type":"message_end","observedAt":101,"subagentStepIndex":0,"message":{"role":"toolResult"}}
@@ -4079,6 +4329,50 @@ mod tests {
                 .and_then(|episode| episode.recovered_at),
             None
         );
+    }
+
+    #[test]
+    fn non_user_stop_provenance_replaces_package_user_claim() {
+        let mut status = json!({
+            "runId": "run-1",
+            "state": "stopped",
+            "error": "Subagent stopped by user.",
+            "steps": [{
+                "agent": "worker",
+                "status": "stopped",
+                "error": "Subagent stopped by user.",
+                "recentOutput": ["Subagent stopped by user."]
+            }]
+        });
+        let provenance = json!({
+            "cause": "optional_budget",
+            "initiator": "lemonpi_limit_supervisor",
+            "reason": "User-configured turn limit reached."
+        });
+
+        replace_inaccurate_package_stop_message(&mut status, &provenance);
+
+        let expected = "Worker stopped (optional budget, initiated by lemonpi_limit_supervisor): User-configured turn limit reached.";
+        assert_eq!(status["error"], expected);
+        assert_eq!(status["steps"][0]["error"], expected);
+        assert_eq!(status["steps"][0]["recentOutput"][0], expected);
+    }
+
+    #[test]
+    fn explicit_user_stop_keeps_package_user_claim() {
+        let mut status = json!({
+            "state": "stopped",
+            "error": "Subagent stopped by user."
+        });
+        let provenance = json!({
+            "cause": "user",
+            "initiator": "user",
+            "reason": "Stopped from Command Center."
+        });
+
+        replace_inaccurate_package_stop_message(&mut status, &provenance);
+
+        assert_eq!(status["error"], "Subagent stopped by user.");
     }
 
     #[test]

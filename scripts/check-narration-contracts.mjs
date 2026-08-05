@@ -68,6 +68,7 @@ assert.equal(writerSpawn.params.async, true);
 assert.equal(writerSpawn.params.clarify, false);
 assert.equal(writerSpawn.params.tasks.length, 1);
 assert.equal(writerSpawn.params.tasks[0].cwd, undefined);
+assert.equal(writerSpawn.params.tasks[0].reads, false);
 
 const readOnlySpawn = independentSpawnParams(readOnlyLaunch);
 assert.equal(readOnlySpawn.implementation, false);
@@ -154,8 +155,8 @@ const restored = replayMissionState([
 ]);
 assert.deepEqual(restored.activeRunIds, ["run-a", "run-b"]);
 assert.deepEqual(restored.activeRunWidths, { "run-a": 1, "run-b": 1 });
-assert.equal(restored.version, 4);
-assert.equal(restored.policyVersion, 9);
+assert.equal(restored.version, 5);
+assert.equal(restored.policyVersion, 10);
 assert.deepEqual(restored.outcomes, []);
 
 assert.equal(isManagedWorktreePatchCommand({ command: "git apply --check .pi-subagents/artifacts/worktree-diffs/run.patch" }), true);
@@ -173,7 +174,9 @@ assert.match(MAIN_PI_OPERATING_MANUAL, /Do not supply model, provider, thinking[
 assert.match(MAIN_PI_OPERATING_MANUAL, /subagents\.agentOverrides\[agent\]\.model[\s\S]*\.thinking/);
 assert.match(MAIN_PI_OPERATING_MANUAL, /subagent\(\{ action: "resume", id, message \}\)[\s\S]*Correction for previous slice:[\s\S]*Worker summary:/);
 assert.match(MAIN_PI_OPERATING_MANUAL, /completed > partial > budget_exhausted > stopped > failed/);
-assert.match(MAIN_PI_OPERATING_MANUAL, /partial[\s\S]*continuationOf[\s\S]*Do not repeat completed reads, edits, or validation/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /partial[\s\S]*continuationOf[\s\S]*Do not repeat completed reads, edits, full-plan discovery, or validation/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /limits are disabled by default[\s\S]*subagents\.agentLimits\[agent\]/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /mechanically required[\s\S]*lemonpi_expand_ownership/);
 assert.match(MAIN_PI_OPERATING_MANUAL, /integrate_worker_result[\s\S]*exact terminal[\s\S]*artifactRunId/);
 assert.match(MAIN_PI_OPERATING_MANUAL, /lemonpi_git\(\{ action: "integrate_worker_result", cwd, artifactRunId \}\)/);
 assert.match(MAIN_PI_OPERATING_MANUAL, /Never call `subagent_wait`, sleep, or repeatedly poll status/);
@@ -182,9 +185,9 @@ assert.match(MAIN_PI_OPERATING_MANUAL, /Never rerun an unchanged suite/);
 assert.doesNotMatch(MAIN_PI_OPERATING_MANUAL, /Create the whole known roadmap before|complete visible roadmap/);
 const injectedPrompt = buildMainPiSystemPrompt("BASE SYSTEM PROMPT", { runId: "run-attention", index: 2 });
 assert.match(injectedPrompt, /^BASE SYSTEM PROMPT/);
-assert.match(injectedPrompt, /lemonpi-authoritative-policy version="9"/);
+assert.match(injectedPrompt, /lemonpi-authoritative-policy version="10"/);
 assert.match(injectedPrompt, /lemonpi-visible-narration/);
-assert.match(injectedPrompt, /lemonpi-main-pi-operating-manual version="4"/);
+assert.match(injectedPrompt, /lemonpi-main-pi-operating-manual version="5"/);
 assert.match(injectedPrompt, /Run run-attention child 2 needs intervention now/);
 assert.equal(shouldInjectMainPiOperatingManual({}), true);
 assert.equal(shouldInjectMainPiOperatingManual({ PI_SUBAGENT_CHILD: "0" }), true);

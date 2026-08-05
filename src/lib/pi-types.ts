@@ -210,9 +210,21 @@ export interface SubagentRunStatus {
   settingsHash?: string;
   budgetPhase?: "work" | "warning" | "finalizing";
   budgetStopReason?: string;
+  limitPolicy?: {
+    enabled: boolean;
+    source: "disabled-default" | "user-settings";
+    behavior: "warn-only" | "checkpoint-and-pause" | "checkpoint-and-stop";
+    warning: { tokens?: number; turns?: number; toolCalls?: number; runtimeMs?: number };
+    hard: { tokens?: number; turns?: number; toolCalls?: number; runtimeMs?: number };
+    settingsHash: string;
+  };
   partialHandoffPath?: string;
+  checkpointRef?: string;
+  checkpointCommit?: string;
+  checkpointPatchDigest?: string;
+  checkpointChangedPaths?: string[];
   stopProvenance?: {
-    cause: "user" | "budget" | "runtime_shutdown" | "superseded" | "main_agent" | "operator" | "dependency_failure" | "unknown";
+    cause: "user" | "user_shutdown" | "optional_budget" | "inactivity_watchdog" | "process_crash" | "application_shutdown" | "superseded" | "dependency_failure" | "unknown";
     initiator: string;
     initiatingRunId?: string;
     reason: string;
