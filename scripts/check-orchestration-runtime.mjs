@@ -52,6 +52,7 @@ import {
   compileDelegationContracts,
   delegatesImplementation,
   automaticTurnMayStart,
+  sessionMutationMayPersist,
   independentSpawnParams,
   parsedMissionState,
 } from "../src-tauri/resources/lemonpi-narration/extensions/narration.ts";
@@ -59,6 +60,9 @@ import {
 assert.equal(automaticTurnMayStart("passive-session"), false);
 assert.equal(automaticTurnMayStart("user-input"), true);
 assert.equal(automaticTurnMayStart("live-worker-event"), true);
+assert.equal(sessionMutationMayPersist("passive-session"), false);
+assert.equal(sessionMutationMayPersist("user-input"), true);
+assert.equal(sessionMutationMayPersist("live-worker-event"), true);
 
 function git(cwd, ...args) {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -575,10 +579,11 @@ const continuationEvents = {
 const continuationTools = new Map();
 const continuationHandlers = new Map();
 const continuationSentMessages = [];
+const continuationAppendedEntries = [];
 const continuationPi = {
   registerTool(tool) { continuationTools.set(tool.name, tool); },
   on(event, handler) { continuationHandlers.set(event, handler); },
-  appendEntry() {},
+  appendEntry(customType, data) { continuationAppendedEntries.push({ customType, data: structuredClone(data) }); },
   sendMessage(message, options) { continuationSentMessages.push({ message, options }); },
   events: continuationEvents,
   async exec(program, args, options = {}) {
@@ -591,7 +596,7 @@ const continuationBranch = [{ type: "custom", customType: "lemonpi-mission-state
   version: 5,
   policyVersion: CURRENT_ORCHESTRATION_POLICY_VERSION,
   id: "mission-checkpoint",
-  phase: "integration",
+  phase: "delegated",
   request: "Complete the checkpoint feature",
   activeRunIds: [],
   writerActive: false,
@@ -614,6 +619,13 @@ continuationHandlers.get("session_start")?.({ reason: "resume" }, continuationCo
 await continuationHandlers.get("agent_settled")?.({}, continuationContext);
 await new Promise((resolve) => setTimeout(resolve, 650));
 assert.equal(continuationSentMessages.some((entry) => entry.options?.triggerTurn === true), false);
+assert.equal(continuationSentMessages.length, 0, "passive task restoration must not append invisible messages");
+assert.equal(continuationAppendedEntries.length, 0, "passive task restoration must not append session metadata or change recency");
+continuationHandlers.get("session_tree")?.({ reason: "switch" }, continuationContext);
+await new Promise((resolve) => setTimeout(resolve, 650));
+assert.equal(continuationSentMessages.length, 0, "passive task navigation must remain message-free after reconciliation");
+assert.equal(continuationAppendedEntries.length, 0, "passive task navigation must preserve the conversation timestamp");
+await continuationHandlers.get("input")?.({ source: "rpc", text: "Continue the checkpoint feature." }, continuationContext);
 const actualContinuationLaunch = await continuationTools.get("lemonpi_dispatch").execute("actual-continuation", { lanes: [{
   agent: "worker",
   summary: "Finish checkpoint continuation",
@@ -672,6 +684,7 @@ const fakePi = {
   },
 };
 lemonPiNarration(fakePi);
+await extensionHandlers.get("input")?.({ source: "rpc", text: "Add an unread notification dot" }, {});
 const gitTool = registeredTools.get("lemonpi_git");
 assert.ok(gitTool);
 const continuationIntegration = await gitTool.execute("checkpoint-continuation-integration", {

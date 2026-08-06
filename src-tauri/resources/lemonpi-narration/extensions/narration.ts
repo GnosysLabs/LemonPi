@@ -189,7 +189,7 @@ Delegated work is asynchronous by default in LemonPi. After launching subagents,
 </lemonpi-visible-narration>`;
 
 export const MAIN_PI_OPERATING_MANUAL = `
-<lemonpi-main-pi-operating-manual version="6">
+<lemonpi-main-pi-operating-manual version="7">
 You are Main Pi. Follow this procedure from the beginning of every new user task. LemonPi runtime state and tool results are authoritative; do not reconstruct the workflow from old conversation text.
 
 Primary goals: preserve the user's exact scope, produce the first visible implementation quickly, keep Git recoverable, and never repeat work that LemonPi has already completed or validated.
@@ -248,7 +248,7 @@ INTEGRATION, VALIDATION, AND GIT
 RECOVERY AND USER COMMUNICATION
 
 19. If the same LemonPi tool contract fails twice, treat it as infrastructure trouble. LemonPi persists that count across user retries and performs any recorded safe fallback itself, including inspected-worktree integration. Do not spend additional turns renegotiating malformed internal parameters.
-20. Opening, resuming, reloading, forking, or navigating to a task is always passive. Session restoration may replay visible state and reconcile status artifacts, but it must never enqueue a prompt or begin a model turn. Only a real new user message or a live worker event observed after that session was opened can authorize an automatic turn. A completion wake may begin only after the prior Main Pi turn and every tool have settled. Passive todo/outcome snapshots never enter the model follow-up queue and cannot start a turn. Finish any validation already in progress. Never restart reconciliation or validation solely because a synthetic wake arrived.
+20. Opening, resuming, reloading, forking, or navigating to a task is always passive and read-only. Session restoration may replay visible state and reconcile status artifacts in memory, but it must never append mission/todo/outcome metadata, never alter the task's filesystem modification time or sidebar recency, and never enqueue a prompt or begin a model turn. Only a real new user message or a live worker event observed after that session was opened can authorize session persistence or an automatic turn. A completion wake may begin only after the prior Main Pi turn and every tool have settled. Passive todo/outcome snapshots never enter the model follow-up queue and cannot start a turn. Finish any validation already in progress. Never restart reconciliation or validation solely because a synthetic wake arrived.
 21. Before the first tool, tell the user what path you selected and why. During longer work, give specific milestone updates. At the end, report the actual outcome, files changed, focused validation, branch and Git commit, whether intended changes are committed, whether the tree is clean, any separately preserved pre-existing changes, and any real limitation. Main Pi alone asks clarifying questions; children do not negotiate product scope with the user.
 
 NEVER DO THESE
@@ -1825,6 +1825,12 @@ export function automaticTurnMayStart(authority: AutomaticTurnAuthority): boolea
   return authority === "user-input" || authority === "live-worker-event";
 }
 
+export type SessionMutationAuthority = AutomaticTurnAuthority;
+
+export function sessionMutationMayPersist(authority: SessionMutationAuthority): boolean {
+  return authority === "user-input" || authority === "live-worker-event";
+}
+
 export default function lemonPiNarration(pi: ExtensionAPI) {
   let sawToolActivity = false;
   let visibleExplanationAfterLastTool = false;
@@ -1851,6 +1857,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   let missionWakeCheck: Promise<boolean> | undefined;
   let missionWakeGeneration = 0;
   let automaticTurnAuthority: AutomaticTurnAuthority = "passive-session";
+  let sessionMutationAuthority: SessionMutationAuthority = "passive-session";
+  let sessionShuttingDown = false;
   let delegationLaunchesInFlight = 0;
   let lastDelegationLaunchAt = 0;
   let proactiveCompactionInFlight = false;
@@ -1962,6 +1970,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   };
 
   const sendPassiveCustomMessage = (customType: string, content: string, onDelivered?: () => void) => {
+    if (!sessionMutationMayPersist(sessionMutationAuthority)) return false;
     if (mainAgentRunning || activeMainToolExecutions > 0 || !mainTurnSettled) {
       pendingPassiveCustomMessages.set(customType, { content, onDelivered });
       return false;
@@ -1972,6 +1981,10 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   };
 
   const flushPassiveCustomMessages = () => {
+    if (!sessionMutationMayPersist(sessionMutationAuthority)) {
+      pendingPassiveCustomMessages.clear();
+      return;
+    }
     if (mainAgentRunning || activeMainToolExecutions > 0 || !mainTurnSettled) return;
     const pending = [...pendingPassiveCustomMessages.entries()];
     pendingPassiveCustomMessages.clear();
@@ -2094,6 +2107,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       missionPersistTimer = undefined;
     }
     if (!mission) return;
+    if (!sessionMutationMayPersist(sessionMutationAuthority)) return;
     const snapshot = missionSnapshot()!;
     const hash = missionStateContentHash(snapshot);
     if (hash === lastPersistedMissionHash) return;
@@ -2102,6 +2116,17 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     pi.appendEntry<MissionState>(MISSION_ENTRY, snapshot);
     publishMissionOutcomes(snapshot);
     lastPersistedMissionHash = hash;
+  };
+
+  const beginPassiveSession = () => {
+    automaticTurnAuthority = "passive-session";
+    sessionMutationAuthority = "passive-session";
+    sessionShuttingDown = false;
+    if (missionPersistTimer) {
+      clearTimeout(missionPersistTimer);
+      missionPersistTimer = undefined;
+    }
+    pendingPassiveCustomMessages.clear();
   };
 
   const persistMission = () => {
@@ -3011,13 +3036,13 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   };
 
   pi.on("session_start", async (_event, ctx) => {
-    automaticTurnAuthority = "passive-session";
+    beginPassiveSession();
     runsStartedInThisSessionRuntime.clear();
     restoreMission(ctx);
   });
   pi.on("session_compact", async (_event, ctx) => restoreMission(ctx));
   pi.on("session_tree", async (_event, ctx) => {
-    automaticTurnAuthority = "passive-session";
+    beginPassiveSession();
     runsStartedInThisSessionRuntime.clear();
     restoreMission(ctx);
   });
@@ -3083,6 +3108,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   }, 5_000);
 
   pi.on("session_shutdown", async () => {
+    sessionShuttingDown = true;
     automaticTurnAuthority = "passive-session";
     runsStartedInThisSessionRuntime.clear();
     missionWakeGeneration += 1;
@@ -3106,6 +3132,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
       await createAttemptCheckpoint(attempt);
     }));
     persistMissionNow();
+    sessionMutationAuthority = "passive-session";
     clearInterval(missionScheduler);
     clearInterval(workerTelemetryScheduler);
   });
@@ -4592,7 +4619,10 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   pi.events.on("subagent:async-complete", (payload) => {
     const runId = delegationRunId(payload);
     const liveCompletion = runId ? runsStartedInThisSessionRuntime.delete(runId) : false;
-    if (liveCompletion) automaticTurnAuthority = "live-worker-event";
+    if (liveCompletion && !sessionShuttingDown) {
+      automaticTurnAuthority = "live-worker-event";
+      sessionMutationAuthority = "live-worker-event";
+    }
     if (runId) updateAttemptTelemetry(runId, payload);
     const independentlyDispatched = runId ? independentDispatchRuns.delete(runId) : false;
     if (runId) {
@@ -4659,7 +4689,12 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     const isMainStopRequest = event.text.startsWith(MAIN_AGENT_STOP_PREFIX);
     if (!isSteerRequest && !isStopRequest && !isTerminalRequest && !isMainStopRequest) {
       automaticTurnAuthority = "user-input";
+      sessionMutationAuthority = "user-input";
+      persistMission();
       return { action: "continue" };
+    }
+    if (isSteerRequest || isStopRequest || isMainStopRequest) {
+      sessionMutationAuthority = "user-input";
     }
 
     if (isMainStopRequest) {

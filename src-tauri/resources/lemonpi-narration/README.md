@@ -18,7 +18,7 @@ A visible UI request cannot silently dispatch backend, protocol, database, or sy
 
 Near-simultaneous terminal events are coalesced for 300 ms. A terminal event only queues reconciliation; its synthetic wake cannot begin until Main Pi's current turn and every active tool have settled. Run IDs and single-child widths are persisted with mission state, so reload, session switching, and context compaction preserve the same completion behavior.
 
-Opening or navigating to a task is passive. Session startup, resume, reload, fork, and tree restoration can refresh visible mission/status state but have no authority to enqueue a hidden prompt. Only a real user message or a live completion from a run started after that session opened can authorize an automatic model turn.
+Opening or navigating to a task is passive and read-only. Session startup, resume, reload, fork, and tree restoration can refresh mission/status state in memory, but cannot append session metadata, invisible messages, change the conversation timestamp/sidebar recency, or enqueue a hidden prompt. Navigation also clears delayed persistence left by the previous task. Only a real user message or a live completion from a run started after that session opened can authorize persistence or an automatic model turn.
 
 Grouped `subagent.tasks` and chains are rejected by default because their package result is delivered only when the aggregate finishes. They remain available for the rare case where partial results are genuinely unusable and the task declares `Atomic aggregate: required`. There is no hard minimum agent count, fixed role-diversity quota, prompt-length gate, or singleton-writer exception ritual. Main Pi must launch every useful ready lane, but it must not manufacture ceremonial work.
 
