@@ -189,7 +189,7 @@ Delegated work is asynchronous by default in LemonPi. After launching subagents,
 </lemonpi-visible-narration>`;
 
 export const MAIN_PI_OPERATING_MANUAL = `
-<lemonpi-main-pi-operating-manual version="5">
+<lemonpi-main-pi-operating-manual version="6">
 You are Main Pi. Follow this procedure from the beginning of every new user task. LemonPi runtime state and tool results are authoritative; do not reconstruct the workflow from old conversation text.
 
 Primary goals: preserve the user's exact scope, produce the first visible implementation quickly, keep Git recoverable, and never repeat work that LemonPi has already completed or validated.
@@ -248,7 +248,7 @@ INTEGRATION, VALIDATION, AND GIT
 RECOVERY AND USER COMMUNICATION
 
 19. If the same LemonPi tool contract fails twice, treat it as infrastructure trouble. LemonPi persists that count across user retries and performs any recorded safe fallback itself, including inspected-worktree integration. Do not spend additional turns renegotiating malformed internal parameters.
-20. A completion wake may begin only after the prior Main Pi turn and every tool have settled. Passive todo/outcome snapshots never enter the model follow-up queue and cannot start a turn. Finish any validation already in progress. Never restart reconciliation or validation solely because a synthetic wake arrived.
+20. Opening, resuming, reloading, forking, or navigating to a task is always passive. Session restoration may replay visible state and reconcile status artifacts, but it must never enqueue a prompt or begin a model turn. Only a real new user message or a live worker event observed after that session was opened can authorize an automatic turn. A completion wake may begin only after the prior Main Pi turn and every tool have settled. Passive todo/outcome snapshots never enter the model follow-up queue and cannot start a turn. Finish any validation already in progress. Never restart reconciliation or validation solely because a synthetic wake arrived.
 21. Before the first tool, tell the user what path you selected and why. During longer work, give specific milestone updates. At the end, report the actual outcome, files changed, focused validation, branch and Git commit, whether intended changes are committed, whether the tree is clean, any separately preserved pre-existing changes, and any real limitation. Main Pi alone asks clarifying questions; children do not negotiate product scope with the user.
 
 NEVER DO THESE
@@ -1819,6 +1819,12 @@ export function shouldWakeForPlanContinuation(input: {
     && input.attempts < 3;
 }
 
+export type AutomaticTurnAuthority = "passive-session" | "user-input" | "live-worker-event";
+
+export function automaticTurnMayStart(authority: AutomaticTurnAuthority): boolean {
+  return authority === "user-input" || authority === "live-worker-event";
+}
+
 export default function lemonPiNarration(pi: ExtensionAPI) {
   let sawToolActivity = false;
   let visibleExplanationAfterLastTool = false;
@@ -1844,12 +1850,14 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   let lastMissionWakeAt = 0;
   let missionWakeCheck: Promise<boolean> | undefined;
   let missionWakeGeneration = 0;
+  let automaticTurnAuthority: AutomaticTurnAuthority = "passive-session";
   let delegationLaunchesInFlight = 0;
   let lastDelegationLaunchAt = 0;
   let proactiveCompactionInFlight = false;
   let restoreWakeTimer: ReturnType<typeof setTimeout> | undefined;
   let restoreReconcileGeneration = 0;
   const activeDelegationRuns = new Set<string>();
+  const runsStartedInThisSessionRuntime = new Set<string>();
   const delegationToolCalls = new Set<string>();
   const delegationLaunchToolCalls = new Set<string>();
   const delegationLaunchWidths = new Map<string, number>();
@@ -2770,6 +2778,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   });
 
   const requestMissionWake = (reason: "plan" | "integration"): Promise<boolean> => {
+    if (!automaticTurnMayStart(automaticTurnAuthority)) return Promise.resolve(false);
     if (missionWakeCheck) return Promise.resolve(false);
     if (proactiveCompactionInFlight) return Promise.resolve(false);
     if (!mission || missionWakeIsBlocked({ mainAgentRunning, activeToolExecutions: activeMainToolExecutions, wakeQueued: missionWakeQueued, turnSettled: mainTurnSettled })) return Promise.resolve(false);
@@ -2851,6 +2860,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   };
 
   const sendRestoreIntervention = (missionId: string, runId: string | undefined, reason: string) => {
+    if (!automaticTurnMayStart(automaticTurnAuthority)) return;
     if (restoreInterventionMissions.has(missionId)) return;
     restoreInterventionMissions.add(missionId);
     pi.sendMessage(
@@ -2943,7 +2953,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     persistMission();
 
     for (const item of terminal) void wakeForTerminalRun(item.runId, undefined, item.status);
-    if (intervention?.needsAttention && intervention.runId) {
+    if (intervention?.needsAttention && intervention.runId && automaticTurnMayStart(automaticTurnAuthority)) {
       attentionRecovery = { runId: intervention.runId };
       attentionActionObserved = false;
       attentionRepairRequested = false;
@@ -2951,7 +2961,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
         { customType: "lemonpi-attention-recovery", content: `${ATTENTION_RECOVERY}\n\nTarget run: ${intervention.runId}`, display: false },
         { deliverAs: "followUp", triggerTurn: true },
       );
-    } else if (intervention) {
+    } else if (intervention && automaticTurnMayStart(automaticTurnAuthority)) {
       sendRestoreIntervention(missionId, intervention.runId, intervention.reason);
     } else if (terminal.length === 0 && mission.activeRunIds.length === 0) {
       await requestMissionWake("integration");
@@ -3000,9 +3010,17 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     scheduleRestoredMissionReconciliation(restored.id, generation, 0);
   };
 
-  pi.on("session_start", async (_event, ctx) => restoreMission(ctx));
+  pi.on("session_start", async (_event, ctx) => {
+    automaticTurnAuthority = "passive-session";
+    runsStartedInThisSessionRuntime.clear();
+    restoreMission(ctx);
+  });
   pi.on("session_compact", async (_event, ctx) => restoreMission(ctx));
-  pi.on("session_tree", async (_event, ctx) => restoreMission(ctx));
+  pi.on("session_tree", async (_event, ctx) => {
+    automaticTurnAuthority = "passive-session";
+    runsStartedInThisSessionRuntime.clear();
+    restoreMission(ctx);
+  });
 
   pi.on("context", async (event) => {
     const messages = event.messages.map((message) => {
@@ -3021,7 +3039,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   });
 
   const missionScheduler = setInterval(() => {
-    if (proactiveCompactionInFlight
+    if (!automaticTurnMayStart(automaticTurnAuthority)
+      || proactiveCompactionInFlight
       || !mainTurnSettled
       || !missionNeedsMain()
       || missionWakeIsBlocked({ mainAgentRunning, activeToolExecutions: activeMainToolExecutions, wakeQueued: missionWakeQueued, turnSettled: mainTurnSettled })
@@ -3064,6 +3083,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   }, 5_000);
 
   pi.on("session_shutdown", async () => {
+    automaticTurnAuthority = "passive-session";
+    runsStartedInThisSessionRuntime.clear();
     missionWakeGeneration += 1;
     missionWakeCheck = undefined;
     missionWakeQueued = false;
@@ -4557,6 +4578,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
   pi.events.on("subagent:async-started", (payload) => {
     const runId = delegationRunId(payload);
     if (!runId) return;
+    if (automaticTurnMayStart(automaticTurnAuthority)) runsStartedInThisSessionRuntime.add(runId);
     activeDelegationRuns.add(runId);
     if (!activeDelegationWidths.has(runId)) activeDelegationWidths.set(runId, 1);
     activeDelegationHandoffPending = true;
@@ -4569,6 +4591,8 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
 
   pi.events.on("subagent:async-complete", (payload) => {
     const runId = delegationRunId(payload);
+    const liveCompletion = runId ? runsStartedInThisSessionRuntime.delete(runId) : false;
+    if (liveCompletion) automaticTurnAuthority = "live-worker-event";
     if (runId) updateAttemptTelemetry(runId, payload);
     const independentlyDispatched = runId ? independentDispatchRuns.delete(runId) : false;
     if (runId) {
@@ -4633,7 +4657,10 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     const isStopRequest = event.text.startsWith(SUBAGENT_STOP_PREFIX);
     const isTerminalRequest = event.text.startsWith(SUBAGENT_TERMINAL_PREFIX);
     const isMainStopRequest = event.text.startsWith(MAIN_AGENT_STOP_PREFIX);
-    if (!isSteerRequest && !isStopRequest && !isTerminalRequest && !isMainStopRequest) return { action: "continue" };
+    if (!isSteerRequest && !isStopRequest && !isTerminalRequest && !isMainStopRequest) {
+      automaticTurnAuthority = "user-input";
+      return { action: "continue" };
+    }
 
     if (isMainStopRequest) {
       restoreReconcileGeneration += 1;
@@ -5443,6 +5470,7 @@ export default function lemonPiNarration(pi: ExtensionAPI) {
     mainAgentRunning = false;
     mainTurnSettled = true;
     flushPassiveCustomMessages();
+    if (!automaticTurnMayStart(automaticTurnAuthority)) return;
     const intentionallyStopped = lastAssistantStopReason === "aborted" || lastAssistantStopReason === "error";
     const strandedPlanTask = remainingPlanTask;
     const ownedWorkActive = missionHasOwnedWork();

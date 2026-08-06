@@ -182,12 +182,13 @@ assert.match(MAIN_PI_OPERATING_MANUAL, /lemonpi_git\(\{ action: "integrate_worke
 assert.match(MAIN_PI_OPERATING_MANUAL, /Never call `subagent_wait`, sleep, or repeatedly poll status/);
 assert.match(MAIN_PI_OPERATING_MANUAL, /same LemonPi tool contract fails twice[\s\S]*safe fallback/);
 assert.match(MAIN_PI_OPERATING_MANUAL, /Never rerun an unchanged suite/);
+assert.match(MAIN_PI_OPERATING_MANUAL, /Opening, resuming, reloading, forking, or navigating to a task is always passive[\s\S]*never enqueue a prompt or begin a model turn/);
 assert.doesNotMatch(MAIN_PI_OPERATING_MANUAL, /Create the whole known roadmap before|complete visible roadmap/);
 const injectedPrompt = buildMainPiSystemPrompt("BASE SYSTEM PROMPT", { runId: "run-attention", index: 2 });
 assert.match(injectedPrompt, /^BASE SYSTEM PROMPT/);
 assert.match(injectedPrompt, /lemonpi-authoritative-policy version="10"/);
 assert.match(injectedPrompt, /lemonpi-visible-narration/);
-assert.match(injectedPrompt, /lemonpi-main-pi-operating-manual version="5"/);
+assert.match(injectedPrompt, /lemonpi-main-pi-operating-manual version="6"/);
 assert.match(injectedPrompt, /Run run-attention child 2 needs intervention now/);
 assert.equal(shouldInjectMainPiOperatingManual({}), true);
 assert.equal(shouldInjectMainPiOperatingManual({ PI_SUBAGENT_CHILD: "0" }), true);

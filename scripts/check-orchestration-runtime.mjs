@@ -51,9 +51,14 @@ import {
   default as lemonPiNarration,
   compileDelegationContracts,
   delegatesImplementation,
+  automaticTurnMayStart,
   independentSpawnParams,
   parsedMissionState,
 } from "../src-tauri/resources/lemonpi-narration/extensions/narration.ts";
+
+assert.equal(automaticTurnMayStart("passive-session"), false);
+assert.equal(automaticTurnMayStart("user-input"), true);
+assert.equal(automaticTurnMayStart("live-worker-event"), true);
 
 function git(cwd, ...args) {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -556,6 +561,8 @@ const continuationEvents = {
         assert.match(readFileSync(join(actualContinuationWorktree, "src", "registry.js"), "utf8"), /registry = \[feature/);
         assert.deepEqual(git(actualContinuationWorktree, "diff", "--name-only", continuationBase, "HEAD").split("\n"), ["src/feature.js", "src/registry.js"]);
         data = { runId: "continuation-run" };
+      } else if (request.method === "status" && !request.params.id) {
+        data = { protocolVersion: 2, fleet: { totalActive: 0 } };
       } else {
         data = { protocolVersion: 2, target: { runId: request.params.id, state: "running", metrics: { totalTokens: 1, turns: 1, toolCalls: 1, runtimeMs: 1 }, terminal: false, observedAt: Date.now() } };
       }
@@ -567,11 +574,12 @@ const continuationEvents = {
 };
 const continuationTools = new Map();
 const continuationHandlers = new Map();
+const continuationSentMessages = [];
 const continuationPi = {
   registerTool(tool) { continuationTools.set(tool.name, tool); },
   on(event, handler) { continuationHandlers.set(event, handler); },
   appendEntry() {},
-  sendMessage() {},
+  sendMessage(message, options) { continuationSentMessages.push({ message, options }); },
   events: continuationEvents,
   async exec(program, args, options = {}) {
     const result = spawnSync(program, args, { cwd: options.cwd, encoding: "utf8", env: options.env ?? process.env, timeout: options.timeout });
@@ -599,8 +607,13 @@ const continuationContext = {
   cwd: continuationRepo,
   sessionManager: { getBranch: () => continuationBranch, getSessionId: () => "checkpoint-session" },
   modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt-5.6" }] },
+  getContextUsage: () => undefined,
+  hasPendingMessages: () => false,
 };
-continuationHandlers.get("session_start")?.({}, continuationContext);
+continuationHandlers.get("session_start")?.({ reason: "resume" }, continuationContext);
+await continuationHandlers.get("agent_settled")?.({}, continuationContext);
+await new Promise((resolve) => setTimeout(resolve, 650));
+assert.equal(continuationSentMessages.some((entry) => entry.options?.triggerTurn === true), false);
 const actualContinuationLaunch = await continuationTools.get("lemonpi_dispatch").execute("actual-continuation", { lanes: [{
   agent: "worker",
   summary: "Finish checkpoint continuation",
